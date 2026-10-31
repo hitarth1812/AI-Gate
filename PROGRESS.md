@@ -577,3 +577,19 @@ header built at run time and planted in a copied doc is found (control, so the T
 the copied set includes PROGRESS/README/CHANGELOG/pyproject and `examples/` (edge).
 Verify: `python -m pytest -q` → `1 failed, 118 passed in 110.99s` (only the known Windows test);
 pyflakes clean. Bench not re-run: `aigate_lite.py` unchanged by this item.
+
+## Cleanup 2 — fixture split (D1)
+
+Change (the only edit to an original test, approved as D1): one line,
+`tests/test_secrets_deps.py:49`. The string literal that starts with the OpenSSH private-key BEGIN header
+is now written as `"-----BEGIN " + "OPENSSH PRIVATE KEY-----\nb3Bl\n..."`; the rest of the line
+(path, body, END line) is untouched. (The diff is not pasted here because quoting it would put the
+header back into this file.)
+The run-time value is identical (checked with `==`), and the test's two assertions (`secrets.env_file` on
+`keys/deploy.key`, and a `secrets.hardcoded` for the header) are unchanged and pass. Only the BEGIN line is
+split: the scanner's regex does not match the END line.
+Tests: `test_whole_tracked_tree_contains_no_hardcoded_secrets` added to tests/test_repo_hygiene.py (every
+tracked file copied into a temp repo, `check --all --offline`); failed before with
+`[('tests/test_secrets_deps.py', 49)]`, passes after.
+Verify: `python -m pytest -q` → `1 failed, 119 passed in 117.61s` (only the known Windows test); pyflakes
+clean; bench not re-run (`aigate_lite.py` unchanged).

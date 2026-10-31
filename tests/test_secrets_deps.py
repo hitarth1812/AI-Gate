@@ -46,7 +46,7 @@ def test_env_files(repo):
 
 def test_private_key_file_blocks_but_certificate_passes(repo):
     repo.write("certs/server.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
-    repo.write("keys/deploy.key", "-----BEGIN OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n")
+    repo.write("keys/deploy.key", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n")
     repo.add()
     res = repo.check()
     assert [f["path"] for f in find(res, "secrets.env_file")] == ["keys/deploy.key"]

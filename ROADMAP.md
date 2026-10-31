@@ -34,8 +34,6 @@ session after a human review of the previous one. Do not start them early.
   commits and third-party Python imports independent of repo size too.
 - Range/push mode runs `git diff` twice per pushed commit for the secrets scan; one `git log -p --raw`
   stream could replace them.
-- Self-audit (`check --all`) flags the original test fixture `tests/test_secrets_deps.py:49` (private key
-  header). Split the string or add an `[[allow]]` (needs a human: rule 7 froze that test in Phase 1).
 - Trust model follow-ups: trust store in the common git dir so linked worktrees share approvals; optional
   y/N prompt on a TTY.
 - Pin the vendored `.aigate/aigate_lite.py` by hash at install time so a pulled change to the gate itself

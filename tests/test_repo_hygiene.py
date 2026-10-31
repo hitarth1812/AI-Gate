@@ -9,11 +9,15 @@ DOC_SUFFIXES = (".md", ".toml", ".yml", ".yaml")
 KEY_HEADER = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"     # split so this file is not itself a finding
 
 
-def doc_files():
+def tracked_files():
     proc = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
     if proc.returncode != 0:
         pytest.skip("not a git checkout")
-    return [p for p in proc.stdout.splitlines() if p.endswith(DOC_SUFFIXES)]
+    return [p for p in proc.stdout.splitlines() if (ROOT / p).is_file()]
+
+
+def doc_files():
+    return [p for p in tracked_files() if p.endswith(DOC_SUFFIXES)]
 
 
 def scan_copy(tmp_path, files, extra=None):
@@ -33,6 +37,12 @@ def scan_copy(tmp_path, files, extra=None):
 
 def test_repo_docs_contain_no_hardcoded_secrets(tmp_path):
     res = scan_copy(tmp_path, doc_files())
+    assert [(f["path"], f["line"]) for f in find(res, "secrets.hardcoded")] == []
+
+
+def test_whole_tracked_tree_contains_no_hardcoded_secrets(tmp_path):
+    # the tool's own regex table and the tests' fixtures included: fixtures must be built at run time
+    res = scan_copy(tmp_path, tracked_files())
     assert [(f["path"], f["line"]) for f in find(res, "secrets.hardcoded")] == []
 
 
