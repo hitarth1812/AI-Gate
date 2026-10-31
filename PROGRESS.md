@@ -33,6 +33,18 @@ Context claims checked:
 ## BLOCKED
 - `tests/test_gate.py::test_configured_command_runs` fails on Windows because the test embeds a Windows
   path in a TOML basic string (invalid escape). Not a tool bug; test left unchanged per rule 7.
+- **Item 8 (trust model for `[[commands]]`)**: conflicts with rule 7. Any implementation where untrusted
+  repo commands do not run makes the existing `tests/test_gate.py::test_configured_command_runs` fail on
+  every OS (it commits a `[[commands]]` config and expects the command to run with no approval step).
+  Heuristics that would keep that test green (e.g. auto-trust configs whose last commit author matches
+  `user.email`) are spoofable and would defeat the feature. Nothing implemented.
+  Proposed resolution for a human: approve adding one line, `assert repo.run("trust").returncode == 0`,
+  after `repo.commit()` in that test (no assertion is removed), then implement as specified:
+  `aigate-lite trust` stores sha256 of the canonical validated `[[commands]]` list in `.git/aigate/trusted`
+  (one hash per line, so branch switches don't re-prompt); changed commands need re-approval; untrusted →
+  one `warn` finding (`commands.failed` with action warn, or a new `commands.untrusted` rule — a new rule
+  id also needs approval since README/tests count 65 rules); `--config FILE` given on the command line
+  counts as trusted; CHANGELOG "Behaviour changes" entry (commands no longer run by default).
 
 ## Iteration 1 — benchmark harness + AIGATE_PROFILE counters
 
@@ -360,3 +372,11 @@ D                 512.6     546.9          6      1   -90.6% / -90.3%
 Perf gates: PASS   (D / A = 1.07)
 ```
   (The bench calls the script directly, so the hook's interpreter probe is not in these numbers.)
+
+## Iteration 8 ⚠ — trust model for [[commands]]: BLOCKED
+
+Explore: `run_commands` runs every `[[commands]]` entry from the active config through `shell=True`;
+for humans in staged mode the config is the working-tree `.aigate/lite.toml`, so a cloned repo's config
+runs on the first commit. `test_configured_command_runs` (original suite) asserts exactly that flow.
+Plan stopped at step 2: the item conflicts with non-negotiable 7 (see BLOCKED). No code changed; no commit
+of code. README still warns "Commands in `.aigate/lite.toml` run on your machine".
