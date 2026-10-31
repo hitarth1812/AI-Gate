@@ -534,6 +534,8 @@ class FileChange:
     binary: bool = False
     new_spec: str | None = None
     old_spec: str | None = None
+    new_sha: str | None = None                    # blob ids from `git diff --raw` (key the result cache)
+    old_sha: str | None = None
 
     @property
     def deleted(self) -> bool:
@@ -636,7 +638,7 @@ def parse_raw(out: str) -> list:
         else:
             old = new = items[i + 1]
             i += 2
-        entries.append((status, new_mode, old, new))
+        entries.append((status, new_mode, old, new, fields[2], fields[3]))
     return entries
 
 
@@ -653,15 +655,16 @@ def collect_changes(repo: Repo, base: str, head) -> list:
     if len(sections) != len(entries) or any(
             (s["b"] or s["a"]) not in (None, e[2], e[3]) for s, e in zip(sections, entries)):
         sections = []                                 # unusual output: fall back to one diff per file
-        for _status, _mode, old, new in entries:
+        for _status, _mode, old, new, *_shas in entries:
             one = parse_patch(repo.git(*patch_args, "--", *dict.fromkeys([old, new])))
             sections.append(one[0] if one else {"added": {}, "removed": [], "binary": False})
     new_ref = ":" if head is None else head + ":"
     return [FileChange(path=new, old_path=None if status == "A" else old, status=status, new_mode=mode,
                        added=sec["added"], removed=sec["removed"], binary=sec["binary"],
                        new_spec=None if status == "D" else new_ref + new,
-                       old_spec=None if status == "A" else f"{base}:{old}")
-            for (status, mode, old, new), sec in zip(entries, sections)]
+                       old_spec=None if status == "A" else f"{base}:{old}",
+                       new_sha=None if status == "D" else new_sha, old_sha=None if status == "A" else old_sha)
+            for (status, mode, old, new, old_sha, new_sha), sec in zip(entries, sections)]
 
 
 # --------------------------------------------------------------------------- file classes
@@ -910,14 +913,17 @@ def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=
 
 
 class Context:
-    def __init__(self, repo, cfg, changes, *, mode, base, head, provenance, registry, merge=False, label=""):
+    def __init__(self, repo, cfg, changes, *, mode, base, head, provenance, registry, merge=False, label="",
+                 results=None):
         self.repo, self.cfg, self.changes = repo, cfg, changes
+        self.results = results or ResultCache(enabled=False)
         self.mode, self.base, self.head = mode, base, head
         self.provenance, self.registry, self.merge, self.label = provenance, registry, merge, label
         self.new_ref = ":" if head is None else head + ":"
         self._files = None
         self._texts: dict = {}
         self._asts: dict = {}
+        self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
 
     @property
@@ -960,8 +966,10 @@ class Context:
                     tree = ast.parse(text, filename=fc.path)
                 except SyntaxError as e:
                     err = e
-                except (ValueError, RecursionError, MemoryError):
+                except ValueError:
                     pass
+                except (RecursionError, MemoryError):
+                    self.parse_failures.add(key)     # transient: not a verdict the result cache may keep
             self._asts[key] = (tree, err)
         return self._asts[key]
 
@@ -984,6 +992,150 @@ class Context:
             if not tests and self.is_test(fc.path):
                 continue
             yield fc
+
+
+# --------------------------------------------------------------------------- result cache
+
+class ResultCache:
+    """Remembers which files the pure per-file checks found clean, keyed by everything those checks read.
+
+    Only checks that read nothing but one file's blobs, its added/removed lines, its path and the config are
+    cached (secrets line scan, suppressions, code lines, Python AST checks), and only a clean verdict is
+    stored: a file with findings is always checked again, so no finding text, key or secret ever reaches
+    the disk. The key covers both blob ids, a hash of the added/removed lines (git's diff settings can
+    change them), the path, the check, the tool version and source, RULES, the whole config and the Python
+    version. The file is JSON signed with HMAC-SHA256 under a random key kept next to it (both created
+    0600); a bad signature, a malformed entry, a file over 2 MB or any read error means the cache is
+    ignored, so tampering can only cause a re-check. It trusts the local user account: whoever can rewrite
+    the key file can rewrite the cache."""
+
+    VERSION = 2
+    MAX_AGE = 14 * 86400
+    MAX_ENTRIES = 5000
+    MAX_BYTES = 2_000_000
+
+    def __init__(self, directory=None, enabled=True):
+        self.entries: dict = {}
+        self.dirty = False
+        self.secret = None
+        self.path = self.key_path = None
+        self._salt = self._cfg = self._cfg_digest = None
+        if not enabled or not directory:
+            return
+        self.path = os.path.join(directory, f"results-v{self.VERSION}.json")
+        self.key_path = os.path.join(directory, "results.key")
+        try:
+            self.secret = self._load_secret(directory)
+        except OSError:
+            self.secret = None
+            return
+        try:
+            if os.path.getsize(self.path) > self.MAX_BYTES:
+                return
+            with open(self.path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            entries = doc["entries"]
+            if doc.get("v") != self.VERSION or not isinstance(entries, dict) or                     not _hmac_ok(self.secret, _canonical(entries), doc.get("mac")):
+                return
+            if all(isinstance(t, (int, float)) for t in entries.values()):
+                self.entries = entries
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, MemoryError):
+            return
+
+    def _load_secret(self, directory):
+        try:
+            with open(self.key_path, "rb") as fh:
+                secret = fh.read()
+            if len(secret) == 32:
+                return secret
+        except FileNotFoundError:
+            pass
+        os.makedirs(directory, exist_ok=True)
+        secret = os.urandom(32)
+        _write_private(self.key_path, secret)
+        self.entries, self.dirty = {}, True           # a new key invalidates whatever was stored before
+        return secret
+
+    @property
+    def enabled(self) -> bool:
+        return self.secret is not None
+
+    def salt(self, ctx) -> str:
+        """Digest of everything outside the file that the cached checks depend on (once per config)."""
+        import hashlib
+        if self._salt is None:
+            try:
+                with open(__file__, "rb") as fh:
+                    source = hashlib.sha256(fh.read()).hexdigest()
+            except OSError:
+                source = "unknown"
+            self._salt = json.dumps([__version__, source, _RULE_ROWS, list(sys.version_info[:2])], default=str)
+        if self._cfg is not ctx.cfg:
+            text = self._salt + json.dumps(ctx.cfg.data, sort_keys=True, default=str)
+            self._cfg, self._cfg_digest = ctx.cfg, hashlib.sha256(text.encode()).hexdigest()
+        return self._cfg_digest
+
+    def run(self, check, ctx, fc, compute) -> list:
+        if not self.enabled or not fc.new_sha or set(fc.new_sha) == {"0"}:
+            return compute()
+        import hashlib
+        lines = hashlib.sha256(json.dumps([sorted(fc.added.items()), fc.removed]).encode()).hexdigest()
+        key = hashlib.sha256(json.dumps([check, fc.path, fc.old_path, fc.status, fc.new_mode, fc.new_sha,
+                                         fc.old_sha if fc.old_spec else None, lines, self.salt(ctx)]).encode()).hexdigest()
+        now = time.time()
+        if key in self.entries:
+            PROFILE["cache_hits"] += 1
+            if now - self.entries[key] > 86400:            # keep files that keep being checked
+                self.entries[key], self.dirty = now, True
+            return []
+        failures = len(ctx.parse_failures)
+        found = compute()
+        if not found and len(ctx.parse_failures) == failures:   # a parser that ran out of memory/stack is no verdict
+            self.entries[key], self.dirty = now, True
+        return found
+
+    def save(self) -> None:
+        if not self.enabled or not self.dirty:
+            return
+        now = time.time()
+        fresh = sorted(((k, t) for k, t in self.entries.items() if now - t < self.MAX_AGE),
+                       key=lambda kv: kv[1])[-self.MAX_ENTRIES:]
+        entries = dict(fresh)
+        doc = {"v": self.VERSION, "mac": _hmac(self.secret, _canonical(entries)), "entries": entries}
+        try:
+            _write_private(self.path, json.dumps(doc).encode("utf-8"))
+        except OSError:
+            pass
+
+
+def _write_private(path, data: bytes) -> None:
+    """Atomically replace `path` with `data`, created 0600; never leaves a temp file behind."""
+    tmp = f"{path}.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _canonical(entries) -> bytes:
+    return json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def _hmac(secret, data) -> str:
+    import hmac
+    return hmac.new(secret, data, "sha256").hexdigest()
+
+
+def _hmac_ok(secret, data, mac) -> bool:
+    import hmac
+    return isinstance(mac, str) and hmac.compare_digest(_hmac(secret, data), mac)
 
 
 # --------------------------------------------------------------------------- registry lookups
@@ -1306,9 +1458,15 @@ def check_secrets(ctx, changes=None, where="") -> list:
     for fc in changes if changes is not None else ctx.changes:
         if fc.deleted or fc.binary or fc.symlink or not fc.added:
             continue
-        for line_no, text in fc.added.items():
-            if len(text) <= 4000:
-                out.extend(secret_findings(ctx, fc, line_no, text, where))
+        out += ctx.results.run("secrets" + where, ctx, fc, lambda fc=fc: _secrets_file(ctx, fc, where))
+    return out
+
+
+def _secrets_file(ctx, fc, where) -> list:
+    out = []
+    for line_no, text in fc.added.items():
+        if len(text) <= 4000:
+            out.extend(secret_findings(ctx, fc, line_no, text, where))
     return out
 
 
@@ -2749,24 +2907,30 @@ TYPE_CAST = re.compile(r"\bas\s+any\b|:\s*any\b(?=\s*[,)=;\]>|])|<any>")
 def check_suppressions(ctx) -> list:
     out = []
     for fc in ctx.code_changes(CODE_EXTS):
-        before = Counter()
-        for _, text in fc.removed:
-            for rule, rx in SUPPRESSIONS:
-                if rx.search(text):
-                    before[rule] += 1
-                    break
-        for line, text in fc.added.items():
-            for rule, rx in SUPPRESSIONS:
-                m = rx.search(text)
-                if m:
-                    if before[rule]:
-                        before[rule] -= 1            # the same suppression existed on an edited line
-                    else:
-                        out.append(make(rule, fc.path, line, f"`{m.group(0).strip()}` added", key=m.group(0).strip()))
-                    break
-            if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
-                out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
-                                key=text.strip()))
+        out += ctx.results.run("suppressions", ctx, fc, lambda fc=fc: _suppressions_file(ctx, fc))
+    return out
+
+
+def _suppressions_file(ctx, fc) -> list:
+    out = []
+    before = Counter()
+    for _, text in fc.removed:
+        for rule, rx in SUPPRESSIONS:
+            if rx.search(text):
+                before[rule] += 1
+                break
+    for line, text in fc.added.items():
+        for rule, rx in SUPPRESSIONS:
+            m = rx.search(text)
+            if m:
+                if before[rule]:
+                    before[rule] -= 1            # the same suppression existed on an edited line
+                else:
+                    out.append(make(rule, fc.path, line, f"`{m.group(0).strip()}` added", key=m.group(0).strip()))
+                break
+        if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
+            out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
+                            key=text.strip()))
     return out
 
 
@@ -2832,32 +2996,38 @@ def _blocks(lines) -> list:
 def check_code_lines(ctx) -> list:
     out = []
     for fc in ctx.code_changes(CODE_EXTS):
-        is_js, is_py = fc.ext in JS_EXTS, fc.ext in PY_EXTS
-        test = ctx.is_test(fc.path)
-        for line, text in fc.added.items():
-            if len(text) > 2000:
-                continue
-            m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
-            if m and c and c.start() <= m.start():
-                out.append(make("code.placeholder", fc.path, line, text.strip()[:90], key=text.strip()))
-            elif is_js and JS_PLACEHOLDER.search(text):
-                out.append(make("code.placeholder", fc.path, line, "throws 'not implemented'", key=text.strip()))
-            elif TODO_RE.search(text):
-                out.append(make("code.todo", fc.path, line, text.strip()[:80], key=text.strip()))
-            if WEAK_CRYPTO.search(text):
-                out.append(make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip()))
-            if not is_py:
-                for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
-                    if rx.search(text):
-                        out.append(make(rule, fc.path, line, what, key=text.strip()))
-            if is_js and not test and JS_CONSOLE.search(text) and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
-                out.append(make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip()))
-        if is_js:
-            for block in _blocks(fc.added):
-                joined = "\n".join(fc.added[ln] for ln in block)
-                for m in JS_SWALLOW.finditer(joined):
-                    out.append(make("code.swallowed_exception", fc.path, block[0] + joined[:m.start()].count("\n"),
-                                    "empty catch", key=m.group(0)))
+        out += ctx.results.run("code_lines", ctx, fc, lambda fc=fc: _code_lines_file(ctx, fc))
+    return out
+
+
+def _code_lines_file(ctx, fc) -> list:
+    out = []
+    is_js, is_py = fc.ext in JS_EXTS, fc.ext in PY_EXTS
+    test = ctx.is_test(fc.path)
+    for line, text in fc.added.items():
+        if len(text) > 2000:
+            continue
+        m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
+        if m and c and c.start() <= m.start():
+            out.append(make("code.placeholder", fc.path, line, text.strip()[:90], key=text.strip()))
+        elif is_js and JS_PLACEHOLDER.search(text):
+            out.append(make("code.placeholder", fc.path, line, "throws 'not implemented'", key=text.strip()))
+        elif TODO_RE.search(text):
+            out.append(make("code.todo", fc.path, line, text.strip()[:80], key=text.strip()))
+        if WEAK_CRYPTO.search(text):
+            out.append(make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip()))
+        if not is_py:
+            for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
+                if rx.search(text):
+                    out.append(make(rule, fc.path, line, what, key=text.strip()))
+        if is_js and not test and JS_CONSOLE.search(text) and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
+            out.append(make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip()))
+    if is_js:
+        for block in _blocks(fc.added):
+            joined = "\n".join(fc.added[ln] for ln in block)
+            for m in JS_SWALLOW.finditer(joined):
+                out.append(make("code.swallowed_exception", fc.path, block[0] + joined[:m.start()].count("\n"),
+                                "empty catch", key=m.group(0)))
     return out
 
 
@@ -3058,64 +3228,70 @@ def _abstractish(fn, cls) -> bool:
 
 def check_python(ctx) -> list:
     out = []
-    lim = ctx.cfg["limits"]
     for fc in ctx.code_changes(PY_EXTS):
-        tree, err = ctx.py_tree(fc)
-        if tree is None:
-            if err is not None and (fc.old_spec is None or ctx.py_tree(fc, "old")[0] is not None):
-                out.append(make("code.syntax_error", fc.path, err.lineno,
-                                f"{err.msg} (parsed with Python {sys.version_info[0]}.{sys.version_info[1]})", key=err.msg))
-            continue
-        added = fc.added
-        test = ctx.is_test(fc.path)
-        old_tree = ctx.py_tree(fc, "old")[0] if fc.old_spec else None
-        old_metrics = {q: _fn_metrics(f)[:3] for f, _c, q in iter_functions(old_tree)} if old_tree else {}
+        out += ctx.results.run("python", ctx, fc, lambda fc=fc: _python_file(ctx, fc))
+    return out
 
-        # functions: stubs, size, complexity, loops, recursion
-        for fn, cls, qual in iter_functions(tree):
-            end = fn.end_lineno or fn.lineno
-            if not any(ln in added for ln in range(fn.lineno, end + 1)):
-                continue
-            new_fn = fn.lineno in added
-            kind = _body_kind(fn)
-            if new_fn and kind and not _abstractish(fn, cls) and not fc.path.endswith(".pyi"):
-                if kind == "ellipsis" or (kind == "notimpl" and cls is None):
-                    out.append(make("code.placeholder", fc.path, fn.lineno, f"{qual}() has no implementation "
-                                    f"({'`...`' if kind == 'ellipsis' else 'raise NotImplementedError'})", key=qual))
-                elif not test:
-                    out.append(make("code.stub", fc.path, fn.lineno, f"{qual}() has an empty body", key=qual))
-            if new_fn:
-                defaults = list(fn.args.defaults) + [d for d in fn.args.kw_defaults if d is not None]
-                if any(isinstance(d, (ast.List, ast.Dict, ast.Set)) or (
-                        isinstance(d, ast.Call) and dotted_name(d.func) in ("list", "dict", "set")) for d in defaults):
-                    out.append(make("code.mutable_default", fc.path, fn.lineno, f"{qual}() has a mutable default argument",
-                                    key=qual))
-            length, cx, depth, scan = _fn_metrics(fn)
-            old = old_metrics.get(qual)
-            if length > lim["function_lines"] and (old is None or length > old[0]):
-                out.append(make("size.function_length", fc.path, fn.lineno,
-                                f"{qual}() is {length} lines (limit {lim['function_lines']})", key=qual))
-            if cx > lim["complexity"] and (old is None or cx > old[1]):
-                out.append(make("size.complexity", fc.path, fn.lineno,
-                                f"{qual}() has complexity {cx} (limit {lim['complexity']})", key=qual))
-            if depth >= lim["loop_depth"] and (old is None or depth > old[2]):
-                deepest = max(scan.loops, key=len)
-                out.append(make("perf.nested_loops", fc.path, deepest[-1][0],
-                                f"{qual}() nests {depth} loops (≈O(n^{depth}))", key=qual))
-            out += _loop_patterns(fc, qual, fn, scan)
-            if not ({(dotted_name(d.func if isinstance(d, ast.Call) else d) or "").split(".")[-1]
-                     for d in fn.decorator_list} & MEMO):
-                for stmt in _local_nodes(fn):
-                    if isinstance(stmt, (ast.Return, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
-                        calls = [n for n in ast.walk(stmt) if isinstance(n, ast.Call)
-                                 and dotted_name(n.func) in (fn.name, f"self.{fn.name}", f"cls.{fn.name}")]
-                        if len(calls) >= 2 and stmt.lineno in added:
-                            out.append(make("perf.exponential_recursion", fc.path, stmt.lineno,
-                                            f"{qual}() calls itself {len(calls)} times per call without memoisation",
-                                            key=qual))
-                            break
-        out += _python_nodes(ctx, fc, tree, test)
-        out += _unused_imports(fc, tree)
+
+def _python_file(ctx, fc) -> list:
+    out = []
+    lim = ctx.cfg["limits"]
+    tree, err = ctx.py_tree(fc)
+    if tree is None:
+        if err is not None and (fc.old_spec is None or ctx.py_tree(fc, "old")[0] is not None):
+            out.append(make("code.syntax_error", fc.path, err.lineno,
+                            f"{err.msg} (parsed with Python {sys.version_info[0]}.{sys.version_info[1]})", key=err.msg))
+        return out
+    added = fc.added
+    test = ctx.is_test(fc.path)
+    old_tree = ctx.py_tree(fc, "old")[0] if fc.old_spec else None
+    old_metrics = {q: _fn_metrics(f)[:3] for f, _c, q in iter_functions(old_tree)} if old_tree else {}
+
+    # functions: stubs, size, complexity, loops, recursion
+    for fn, cls, qual in iter_functions(tree):
+        end = fn.end_lineno or fn.lineno
+        if not any(ln in added for ln in range(fn.lineno, end + 1)):
+            continue
+        new_fn = fn.lineno in added
+        kind = _body_kind(fn)
+        if new_fn and kind and not _abstractish(fn, cls) and not fc.path.endswith(".pyi"):
+            if kind == "ellipsis" or (kind == "notimpl" and cls is None):
+                out.append(make("code.placeholder", fc.path, fn.lineno, f"{qual}() has no implementation "
+                                f"({'`...`' if kind == 'ellipsis' else 'raise NotImplementedError'})", key=qual))
+            elif not test:
+                out.append(make("code.stub", fc.path, fn.lineno, f"{qual}() has an empty body", key=qual))
+        if new_fn:
+            defaults = list(fn.args.defaults) + [d for d in fn.args.kw_defaults if d is not None]
+            if any(isinstance(d, (ast.List, ast.Dict, ast.Set)) or (
+                    isinstance(d, ast.Call) and dotted_name(d.func) in ("list", "dict", "set")) for d in defaults):
+                out.append(make("code.mutable_default", fc.path, fn.lineno, f"{qual}() has a mutable default argument",
+                                key=qual))
+        length, cx, depth, scan = _fn_metrics(fn)
+        old = old_metrics.get(qual)
+        if length > lim["function_lines"] and (old is None or length > old[0]):
+            out.append(make("size.function_length", fc.path, fn.lineno,
+                            f"{qual}() is {length} lines (limit {lim['function_lines']})", key=qual))
+        if cx > lim["complexity"] and (old is None or cx > old[1]):
+            out.append(make("size.complexity", fc.path, fn.lineno,
+                            f"{qual}() has complexity {cx} (limit {lim['complexity']})", key=qual))
+        if depth >= lim["loop_depth"] and (old is None or depth > old[2]):
+            deepest = max(scan.loops, key=len)
+            out.append(make("perf.nested_loops", fc.path, deepest[-1][0],
+                            f"{qual}() nests {depth} loops (≈O(n^{depth}))", key=qual))
+        out += _loop_patterns(fc, qual, fn, scan)
+        if not ({(dotted_name(d.func if isinstance(d, ast.Call) else d) or "").split(".")[-1]
+                 for d in fn.decorator_list} & MEMO):
+            for stmt in _local_nodes(fn):
+                if isinstance(stmt, (ast.Return, ast.Assign, ast.AugAssign, ast.AnnAssign, ast.Expr)):
+                    calls = [n for n in ast.walk(stmt) if isinstance(n, ast.Call)
+                             and dotted_name(n.func) in (fn.name, f"self.{fn.name}", f"cls.{fn.name}")]
+                    if len(calls) >= 2 and stmt.lineno in added:
+                        out.append(make("perf.exponential_recursion", fc.path, stmt.lineno,
+                                        f"{qual}() calls itself {len(calls)} times per call without memoisation",
+                                        key=qual))
+                        break
+    out += _python_nodes(ctx, fc, tree, test)
+    out += _unused_imports(fc, tree)
     return out
 
 
@@ -3601,6 +3777,7 @@ def run_check(args, env) -> int:
     registry = Registry(offline=args.offline or env.get("AIGATE_OFFLINE") == "1",
                         budget=float(pre["gate"].get("max_seconds", 20)), use_cache=not args.no_cache,
                         fixture=env.get("AIGATE_REGISTRY_FIXTURE"))
+    results = ResultCache(default_cache_dir(), enabled=not args.no_cache)
     findings, notes, stats, label = [], [], Counter(), runs[0][0] if len(runs) == 1 else f"push ({len(runs)} refs)"
     provenance, cfg = quick, pre
     for run_label, base, head, commits in runs:
@@ -3623,7 +3800,7 @@ def run_check(args, env) -> int:
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
-                      provenance=provenance, registry=registry, merge=merge, label=run_label)
+                      provenance=provenance, registry=registry, merge=merge, label=run_label, results=results)
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
         stats["files"] += len(counted)
         stats["added"] += sum(len(fc.added) for fc in counted)
@@ -3657,6 +3834,7 @@ def run_check(args, env) -> int:
         if merge:
             notes.append("merge commit: incoming changes from the merged branch are checked too")
     registry.save()
+    results.save()
     if registry.failures:
         notes.append(f"{registry.failures} registry lookup(s) failed (offline or blocked); results may be incomplete")
 
@@ -3918,7 +4096,7 @@ def build_parser():
     c.add_argument("--format", choices=("text", "json", "github"), default="text")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
     c.add_argument("--offline", action="store_true", help="skip registry lookups")
-    c.add_argument("--no-cache", action="store_true", help="ignore the local lookup cache")
+    c.add_argument("--no-cache", action="store_true", help="ignore the local lookup and result caches")
     c.add_argument("--no-commands", action="store_true", help="skip [[commands]] from the config")
     c.add_argument("--config", help="use this config file instead of .aigate/lite.toml")
     c.add_argument("-q", "--quiet", action="store_true", help="print only problems that stop the commit")

@@ -173,3 +173,60 @@ Perf gates: PASS
   (startup is not affected by this item; the −32.6% vs the item-2 run is the machine being less loaded —
   `python_noop` moved −7.2% too.) B and C make 7 git calls: JS files still need the full listing for
   `js_project` (package.json / tsconfig discovery).
+
+## Iteration 4 ⚠ — safe result cache
+
+Explore:
+- The four pure checkers (secrets line scan, suppressions, code lines, Python AST) read only one file's
+  blobs, its added/removed lines, its path (ext, test/ignore globs) and the config; none reads provenance,
+  the registry, `ctx.merge` or other files (grep of `ctx.agent|provenance|registry|merge|mode`).
+- Blob ids are already in `git diff --raw --no-abbrev` output; parse_raw dropped them.
+- Risk: storing finding text on disk (secret leakage); stale results if any key input is missed.
+
+Change: FileChange gets `new_sha`/`old_sha`; the four checkers' loop bodies moved verbatim into
+`_secrets_file/_suppressions_file/_code_lines_file/_python_file` and called through `ResultCache.run`.
+After review: **only clean verdicts are stored** (key → timestamp); a file with findings is re-checked
+every run. Key = sha256(check, path, old path, status, mode, new blob, old blob, sha256(added+removed
+lines), sha256(version + script source + RULES + config + Python minor)). File `results-v2.json` + key
+`results.key` in the cache dir, created 0600 via O_EXCL temp + `os.replace`; HMAC-SHA256; >2 MB, bad MAC,
+malformed JSON, RecursionError/MemoryError → ignored. Pruned to 14 days / 5,000 entries; hits refresh
+the timestamp daily. Python parses that hit RecursionError/MemoryError are not cached. `--no-cache`
+disables it.
+
+Tests (tests/test_cache.py, 12): second run hits with identical findings and no secret in the file (TP);
+clean code cached as clean (TN); config change and tool source/version change invalidate; forged entries
+with the old MAC → whole cache ignored, secret still blocks; replaced key / garbage JSON → ignored, no
+gate.error; same blob in tests/ and app/ keyed by path (warn vs fix); `--no-cache` writes nothing; 0600
+(POSIX only) and pruning; empty / CRLF / binary files; secret + TODO on one line never reach the file;
+200,000-deep `[[[` file ignored without a crash.
+
+Review (independent subagent, diff + tests only): 6 findings.
+1. HIGH raw secrets reach the cache (keys of code.todo etc. are the whole line) → **fixed** (clean-only).
+2. MEDIUM key depended on git diff settings → **fixed** (hash of added/removed lines in the key).
+3. MEDIUM RecursionError on nested JSON / no size cap → **fixed** (caught; 2 MB cap).
+4. LOW transient parse failure cached as clean → **fixed** (`ctx.parse_failures`).
+5. LOW salt re-serialised per file → **fixed** (digest once per config).
+6. LOW temp-file leftovers, PID reuse, no refresh on hit → **fixed** (`_write_private` with O_EXCL +
+   cleanup; daily refresh).
+Not fixed (documented): whoever can write the key file can forge the cache (same user account).
+
+Verify:
+- `python -m pytest -q --ignore=tests/test_ci.py --ignore=tests/test_checkers.py` → `4 failed, 74 passed`
+  (the 4 known; test_ci/test_checkers are the pre-written item 5/6 tests).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        59.3     132.9                     -2.6% / +101.1%
+startup           208.4     249.5                     -33.2% / -26.7%
+A                 525.8     636.3          6      1   -90.9% / -89.8%
+B                 592.6     778.8          7     21   -89.4% / -86.4%
+C                 840.7     977.7          7    301   -85.4% / -84.9%
+D                 490.8     518.6          6      1   -91.0% / -90.8%
+A-cold            460.9     481.4
+C-cold            872.7     942.1
+Perf gates: PASS
+```
+  Measured benefit is small: C warm 840.7 vs cold 872.7 ms (−3.7%); A warm vs cold is within noise
+  (startup + compile + git dominate). The cache is kept because it is safe and cheap, not because it is
+  a big win on this machine.

@@ -31,6 +31,7 @@ ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
 FIXTURE_VERSION = "1"            # bump when generated content changes; forces a rebuild
 SCENARIOS = ("A", "B", "C", "D")
+COLD = ("A", "C")                # also measured with --no-cache (result and lookup caches off), not gated
 D_FILES = 50_000
 STRIP = ("CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "AIGATE_AGENT", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME",
          "VIRTUAL_ENV", "CONDA_PREFIX", "PRE_COMMIT_FROM_REF", "PRE_COMMIT_TO_REF")
@@ -222,6 +223,12 @@ def measure(script, runs, py) -> dict:
         _, prof = run_once(cmd, repos[s], {**env, "AIGATE_PROFILE": "1"})
         times = [run_once(cmd, repos[s], env)[0] for _ in range(runs)]
         result[s] = {**summarize(times), "verdict": verdict, "counters": profile_counters(prof.stderr)}
+    for s in COLD:
+        cmd = [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json", "--no-cache"]
+        if run_once(cmd, repos[s], env)[1].returncode not in (0, 1):
+            continue
+        times = [run_once(cmd, repos[s], env)[0] for _ in range(runs)]
+        result[f"{s}-cold"] = summarize(times)
     return result
 
 
@@ -230,7 +237,9 @@ def measure(script, runs, py) -> dict:
 def table(res, base=None) -> str:
     rows = [f"{'measure':<12} {'median ms':>10} {'p95 ms':>9}  {'git calls':>9} {'blobs':>6}"
             + ("   vs baseline (median / p95)" if base else "")]
-    for key in ("python_noop", "startup", *SCENARIOS):
+    for key in ("python_noop", "startup", *SCENARIOS, *(f"{s}-cold" for s in COLD)):
+        if key not in res:
+            continue
         r = res[key]
         c = r.get("counters") or {}
         line = (f"{key:<12} {r['median_ms']:>10.1f} {r['p95_ms']:>9.1f}  {c.get('git_calls', ''):>9} "
