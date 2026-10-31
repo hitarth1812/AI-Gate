@@ -1,0 +1,30 @@
+# aigate-lite in GitLab CI for merge requests. Add this job to .gitlab-ci.yml and commit
+# .aigate/aigate_lite.py. To make it blocking: Settings > Merge requests > "Pipelines must succeed".
+#
+# The gate and its config are taken from the target branch, so a merge request cannot weaken them.
+# Fork merge requests: by default their pipelines run in the fork, where "origin" is the fork itself.
+# Run them in the parent project (Settings > CI/CD > "Run pipelines in the parent project for merge
+# requests from forks") or this job only checks the fork against its own copy.
+aigate-lite:
+  stage: test
+  image: python:3.12-slim
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  variables:
+    GIT_DEPTH: 0                         # full history: the range needs the merge base
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq git > /dev/null
+    - T="$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - git fetch --quiet origin "+refs/heads/$T:refs/remotes/origin/$T"
+    - BASE="origin/$T"
+    - git show "$BASE:.aigate/aigate_lite.py" > /tmp/aigate_lite.py 2>/dev/null || { echo "WARNING - $BASE has no gate yet; using this merge request's copy"; cp .aigate/aigate_lite.py /tmp/aigate_lite.py; }
+    - git show "$BASE:.aigate/lite.toml" > /tmp/lite.toml 2>/dev/null || true > /tmp/lite.toml
+  script:
+    - python /tmp/aigate_lite.py check --range "$BASE..HEAD" --format text --color never --no-commands --config /tmp/lite.toml
+  after_script:                          # report only; the script step decides pass/fail
+    - BASE="origin/$CI_MERGE_REQUEST_TARGET_BRANCH_NAME"
+    - python /tmp/aigate_lite.py check --range "$BASE..HEAD" --format sarif --no-commands --config /tmp/lite.toml > aigate.sarif || true
+  artifacts:
+    when: always
+    paths: [aigate.sarif]
+    expire_in: 30 days

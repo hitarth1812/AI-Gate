@@ -3694,6 +3694,36 @@ def report_github(res: Result) -> None:
     print(f"aigate-lite verdict: {res.verdict.upper()} (risk {res.risk:g}/100, {len(res.findings)} findings)")
 
 
+def report_sarif(res: Result) -> None:
+    """SARIF 2.1.0 for code-scanning uploads. Allowed findings are kept, marked as suppressed."""
+    import urllib.parse
+    level = {"block": "error", "fix": "error", "warn": "warning"}
+    used = sorted({f.rule for f in res.findings})
+    results = []
+    for f in res.findings:
+        r = {"ruleId": f.rule, "ruleIndex": used.index(f.rule), "level": level.get(f.action, "note"),
+             "message": {"text": f.message}, "partialFingerprints": {"aigateFingerprint/v1": f.fingerprint},
+             "properties": {"action": f.action, "sensitivePath": f.sensitive}}
+        # code scanning needs a location; repo-wide findings ("(gate)", "(commit)") point at the config
+        path = CONFIG_PATH if f.path.startswith("(") else f.path
+        loc = {"artifactLocation": {"uri": urllib.parse.quote(path, safe="/")}}
+        if f.line and path == f.path:
+            loc["region"] = {"startLine": f.line}
+        r["locations"] = [{"physicalLocation": loc}]
+        if f.allowed:
+            r["suppressions"] = [{"kind": "external", "justification": f.allowed}]
+        results.append(r)
+    rules = [{"id": rid, "shortDescription": {"text": RULES[rid].title}, "help": {"text": RULES[rid].hint},
+              "defaultConfiguration": {"level": level.get(RULES[rid].action, "note")},
+              "properties": {"severity": RULES[rid].severity, "confidence": RULES[rid].confidence}} for rid in used]
+    print(json.dumps({
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0",
+        "runs": [{"tool": {"driver": {"name": "aigate-lite", "version": __version__, "rules": rules}},
+                  "results": results,
+                  "properties": {"verdict": res.verdict, "risk": res.risk, "escalated": res.escalated}}],
+    }, indent=2))
+
+
 # --------------------------------------------------------------------------- running a check
 
 LANGUAGE_EXTS = {"python": PY_EXTS, "javascript": JS_EXTS, "code": CODE_EXTS}
@@ -3882,6 +3912,8 @@ def run_check(args, env) -> int:
         report_json(res)
     elif args.format == "github":
         report_github(res)
+    elif args.format == "sarif":
+        report_sarif(res)
     else:
         color = args.color == "always" or (args.color == "auto" and sys.stdout.isatty() and not env.get("NO_COLOR"))
         report_text(res, color=color, verbose=args.verbose, quiet=args.quiet, stage=stage)
@@ -4125,7 +4157,7 @@ def build_parser():
     target.add_argument("--range", metavar="BASE..HEAD", help="check commits in a range, e.g. origin/main..HEAD")
     target.add_argument("--push", action="store_true", help="pre-push hook mode: read refs from stdin")
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
-    c.add_argument("--format", choices=("text", "json", "github"), default="text")
+    c.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
     c.add_argument("--offline", action="store_true", help="skip registry lookups")
     c.add_argument("--no-cache", action="store_true", help="ignore the local lookup and result caches")

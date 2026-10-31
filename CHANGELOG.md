@@ -13,6 +13,10 @@
 - `bench/bench.py`: deterministic benchmark (4 scenarios, 30 runs, median/p95, git-call and blob counters)
   with `--save` / `--compare` perf gates.
 
+- `--format sarif` (SARIF 2.1.0) for code-scanning uploads.
+- `examples/github-actions.yml` rewritten (SHA-pinned actions, gate and config from the base branch,
+  SARIF upload) and new `examples/gitlab-ci.yml`; README "Enforce it in CI".
+
 ### Changed
 - Start-up: argparse, urllib, gzip, concurrent.futures, configparser, importlib.metadata, hashlib, shutil,
   shlex and glob are imported only by the code that needs them; `from __future__ import annotations` dropped.

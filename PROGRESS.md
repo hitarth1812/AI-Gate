@@ -265,3 +265,54 @@ A-cold            457.3     477.1
 C-cold            864.0     948.8
 Perf gates: PASS   (D / A = 1.03)
 ```
+
+## Iteration 6 ⚠ — CI as the enforcement point + SARIF
+
+Explore:
+- The old example used tag pins (`actions/checkout@v4`), ran the PR's own copy of the gate, and in range
+  mode a human's config is read from HEAD (`load_config(repo, head)`), i.e. from the PR itself.
+- Output formats are text/json/github; Finding paths like `(gate)` / `(commit)` have no file.
+- Risk: SARIF that code scanning rejects; a CI job that a PR can weaken; an upload failure that blocks.
+
+Change: `--format sarif` (`report_sarif`: SARIF 2.1.0, rules used, `ruleIndex`, levels error/warning,
+percent-encoded relative URIs, `partialFingerprints` = existing fingerprint, allowed findings as
+`suppressions: external`, repo-wide findings located at `.aigate/lite.toml`). Exit codes unchanged.
+`examples/github-actions.yml` rewritten: actions pinned by SHA (looked up with
+`git ls-remote --tags https://github.com/actions/checkout` etc.: checkout v5.1.0 `fbc6f399…`,
+setup-python v6.3.0 `ece7cb06…`, codeql-action v4.39.1 peeled `9b325408…`), gate script **and config**
+from the base branch (empty config = defaults when the base has none), `persist-credentials: false`,
+`--no-commands`, annotations step decides pass/fail, SARIF upload `continue-on-error`. New
+`examples/gitlab-ci.yml`. README section "Enforce it in CI" (required status check `gate`, CODEOWNERS
+requirement, fork pipelines).
+
+Tests (tests/test_ci.py, 6): SARIF with findings validates against a minimal 2.1.0 shape and never contains
+the secret (TP); clean code → valid SARIF with empty results (TN); allowed finding suppressed and a
+`fix tures/ünï.py` path percent-encoded (edge); repo-wide finding still has a location; workflow uses only
+40-hex SHA pins, base config always passed quoted, upload non-blocking; GitLab example present. (The two
+example-file tests passed before the reporter existed because the example files were written first.)
+
+Review (independent subagent): 10 findings.
+1. HIGH PR config used when base has no lite.toml → **fixed** (always `--config`, empty file fallback).
+2. HIGH workflow file comes from the PR → **documented** (README step 4 now mandatory CODEOWNERS /
+   required workflow; caveat restored in the YAML). Cannot be fixed inside a workflow file.
+3. HIGH failed SARIF upload turns the check red → **fixed** (`continue-on-error: true`).
+4. HIGH GitLab fork MRs check against the fork → **documented** (run fork pipelines in the parent project).
+5. MEDIUM results without a location → **fixed** (+ test).
+6. MEDIUM first-adoption PR fails → **fixed** (PR copy used once, with a `::warning::`).
+7. MEDIUM GitLab fetch without refspec → **fixed**.
+8. LOW unquoted `$CONFIG` → **fixed**.
+9. LOW gate runs twice → **documented** in README (first run decides).
+10. LOW README merge-queue / check name → **fixed**.
+
+Verify:
+- `python -m pytest -q` → `4 failed, 85 passed in 116.09s` (the 4 known).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+startup           212.6     224.4                     -31.9% / -34.1%
+A                 474.8     484.4          6      1   -91.7% / -92.3%
+B                 527.1     544.4          7     21   -90.5% / -90.5%
+C                 732.1     769.8          7    301   -87.3% / -88.1%
+D                 502.8     517.4          6      1   -90.8% / -90.9%
+Perf gates: PASS   (D / A = 1.06)
+```

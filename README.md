@@ -109,22 +109,49 @@ Blocking findings can only be allowed through `[[allow]]`.
 
 ## Output and exit codes
 
-- `--format text` (default), `json` (stable schema) or `github` (annotations for Actions).
+- `--format text` (default), `json` (stable schema), `github` (annotations for Actions) or `sarif`
+  (SARIF 2.1.0, for code-scanning uploads).
 - `-q` prints only what stops the commit; `-v` adds hints, fingerprints and allowed findings.
 - Exit codes: `0` pass or warnings only, `1` fix or block, `2` usage or git error.
 - The verdict is the strongest action found. A Fix verdict becomes Block when the risk score is 60 or
   higher; the score uses the same formula as the full gate.
 
-## Optional: the same check in CI
+## Enforce it in CI (hooks can be skipped)
 
-`examples/github-actions.yml` runs `check --range` on pull requests. It is free on public repos and
-uses free minutes on private ones.
+Hooks run on the developer's machine, so `--no-verify` (or an agent that commits that way) skips them.
+The check that cannot be skipped is a required CI status on the pull request.
+
+**GitHub Actions** — `examples/github-actions.yml`:
+
+1. Copy it to `.github/workflows/aigate-lite.yml` and commit `.aigate/aigate_lite.py`
+   (`aigate-lite install --vendor` copies it for you).
+2. Open a pull request once so the check runs and GitHub learns its name (the job is called `gate`).
+3. Settings → Branches (or Rules → Rulesets) → protect your default branch → **Require status checks to
+   pass** → add `gate`. If you use a merge queue, the workflow already listens to `merge_group`.
+4. **Required for this to mean anything:** GitHub runs the workflow file from the pull request itself, so
+   a pull request that edits `.github/workflows/aigate-lite.yml` can change what runs. Put
+   `.github/workflows/**` and `.aigate/**` in CODEOWNERS and turn on **Require review from Code Owners**
+   (or make the workflow a ruleset-required workflow). Without that, CI is a safety net, not a boundary.
+
+The workflow pins every action to a full commit SHA, runs the gate **and its config from the base
+branch** (a pull request cannot loosen the script or `.aigate/lite.toml` that judge it; the first PR that
+adds the gate uses its own copy, with a warning), writes annotations with `--format github`, and uploads
+`--format sarif` to code scanning (Security → Code scanning; the upload is skipped without failing the
+job where code scanning is not enabled). `--no-commands` keeps `[[commands]]` from the pull request from
+running in CI. The gate runs twice (annotations, then SARIF); only the first run decides the result.
+
+**GitLab CI** — `examples/gitlab-ci.yml` runs on merge-request pipelines and keeps `aigate.sarif` as an
+artifact. Make it blocking with Settings → Merge requests → **Pipelines must succeed**, and run fork
+merge-request pipelines in the parent project (otherwise a fork is checked against its own copy).
+
+**Other CI:** run `python .aigate/aigate_lite.py check --range "origin/main..HEAD" --no-commands` and fail
+the job on exit code 1. `--format json` (schema 1) and `--format sarif` (SARIF 2.1.0) are stable outputs.
 
 ## Limits (read these)
 
 - **Hooks are bypassable.** `git commit --no-verify` and `git push --no-verify` skip them, and some
   agents commit that way. The pre-push hook catches what the commit hook missed, but only a
-  server-side check (the CI example, or the full gate) is enforceable.
+  server-side check is enforceable: see "Enforce it in CI" above.
 - **Static heuristics, not proof.** Time complexity is flagged from code shape, not measured. Test
   tampering for JS/TS is line-based.
 - **Not covered in lite:** calls to functions or attributes that don't exist (that needs a type

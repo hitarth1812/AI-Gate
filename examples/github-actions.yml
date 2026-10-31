@@ -1,11 +1,18 @@
-# Optional: run the same checks on pull requests. Free on public repos; private repos use the
-# free monthly Actions minutes. Copy to .github/workflows/aigate-lite.yml and commit
-# .aigate/aigate_lite.py (aigate-lite install --vendor does that copy for you).
+# aigate-lite in GitHub Actions: the enforcement point that cannot be skipped with --no-verify.
+# Copy to .github/workflows/aigate-lite.yml, commit .aigate/aigate_lite.py (`aigate-lite install --vendor`
+# does that copy), then make the `gate` check required (see README, "Enforce it in CI").
 #
-# Note: a pull request can edit this workflow file, so treat this as a safety net, not a security
-# boundary. Pin the actions below to full commit SHAs for production use.
+# Note: on pull_request, GitHub runs the workflow file from the pull request itself, so a PR that edits
+# this file can change what runs. Protect .github/workflows/** and .aigate/** with CODEOWNERS and
+# "Require review from Code Owners" (or a ruleset-required workflow), as the README explains.
+#
+# Actions are pinned to full commit SHAs (tags can be moved). Pins checked with `git ls-remote --tags`:
+#   actions/checkout v5.1.0, actions/setup-python v6.3.0, github/codeql-action v4.39.1.
+# Update them deliberately (e.g. with Dependabot), never to a tag.
 name: aigate-lite
-on: pull_request
+on:
+  pull_request:
+  merge_group:
 
 permissions:
   contents: read
@@ -14,12 +21,41 @@ jobs:
   gate:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write          # upload the SARIF report to code scanning
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
-      - name: Check the pull request
-        run: python .aigate/aigate_lite.py check --range "origin/${{ github.base_ref }}..HEAD" --format github --no-commands
+      # Use the gate and its config from the base branch, so a pull request cannot weaken what checks it.
+      - name: Fetch the gate from the base branch
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.merge_group.base_ref }}
+        run: |
+          BASE="origin/${BASE_REF#refs/heads/}"
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+          if ! git show "$BASE:.aigate/aigate_lite.py" > "$RUNNER_TEMP/aigate_lite.py" 2>/dev/null; then
+            # First adoption: the base branch has no gate yet, so this PR's copy is used once.
+            echo "::warning::$BASE has no .aigate/aigate_lite.py yet; using the copy from this pull request"
+            cp .aigate/aigate_lite.py "$RUNNER_TEMP/aigate_lite.py"
+          fi
+          # Always the base branch's config; an empty file (= built-in defaults) when it has none,
+          # so a pull request can never supply its own [rules] or [[allow]] entries.
+          git show "$BASE:.aigate/lite.toml" > "$RUNNER_TEMP/lite.toml" 2>/dev/null || : > "$RUNNER_TEMP/lite.toml"
+      - name: Check the pull request (annotations)
+        run: python "$RUNNER_TEMP/aigate_lite.py" check --range "$BASE..HEAD" --format github --no-commands --config "$RUNNER_TEMP/lite.toml"
+      # Reporting only: the step above is the one that passes or fails the job.
+      - name: SARIF report
+        if: always()
+        run: python "$RUNNER_TEMP/aigate_lite.py" check --range "$BASE..HEAD" --format sarif --no-commands --config "$RUNNER_TEMP/lite.toml" > aigate.sarif || true
+      - uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        if: always()
+        continue-on-error: true       # needs code scanning enabled; must never turn the required check red
+        with:
+          sarif_file: aigate.sarif
+          category: aigate-lite
