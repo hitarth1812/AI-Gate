@@ -3530,13 +3530,52 @@ def check_duplicates(ctx) -> list:
 
 # --------------------------------------------------------------------------- configured commands
 
-def run_commands(ctx, stage, paths) -> list:
+def commands_hash(commands) -> str:
+    """Identity of a validated [[commands]] list; any change to any command changes it."""
+    import hashlib
+    return hashlib.sha256(json.dumps(commands, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def trusted_hashes(repo) -> set:
+    try:
+        with open(repo.private_path("aigate/trusted"), encoding="utf-8", errors="replace") as fh:
+            return {ln.split()[0] for ln in fh if re.fullmatch(r"[0-9a-f]{64}", (ln.split() or [""])[0])}
+    except OSError:
+        return set()
+
+
+def _shell_path(path: str):
+    """A changed path as one shell word for {files}, or None when it cannot be passed safely.
+    shell=True means /bin/sh on POSIX (shlex quoting) but cmd.exe on Windows, which ignores single quotes:
+    there paths are double-quoted and any path with % or " (expanded or unbalanced inside quotes) is left
+    out. A leading '-' would read as an option, so such paths get './'."""
     import shlex
+    if path.startswith("-"):
+        path = "./" + path
+    if os.name != "nt":
+        return shlex.quote(path)
+    if "%" in path or '"' in path:
+        return None
+    return f'"{path}"'
+
+
+def run_commands(ctx, stage, paths, trusted=False) -> list:
+    """Run the configured commands for this stage. Commands that come from a repository's config run only
+    after `aigate-lite trust` approved exactly this list (a cloned repo must not run code on the first
+    commit); a config passed with --config is the user's own choice and counts as trusted."""
     out = []
-    for c in ctx.cfg["commands"]:
-        if c["stage"] not in (stage, "both") or (c["when"] and not any(path_matches(p, c["when"]) for p in paths)):
-            continue
-        files = " ".join(shlex.quote(p) for p in paths if os.path.exists(os.path.join(ctx.repo.root, p)))
+    due = [c for c in ctx.cfg["commands"] if c["stage"] in (stage, "both")
+           and (not c["when"] or any(path_matches(p, c["when"]) for p in paths))]
+    if due and not trusted and commands_hash(ctx.cfg["commands"]) not in trusted_hashes(ctx.repo):
+        names = ", ".join(f"`{c['name']}`" for c in due)
+        return [make("commands.failed", "(command)", None,
+                     f"not run: {names} from {ctx.cfg.origin} not approved yet; review them, then run `aigate-lite trust`",
+                     action="warn", key="untrusted",
+                     hint="Commands in a repository's config run on your machine, so each new or changed list "
+                          "needs one approval: `aigate-lite trust` shows them and records the approval in .git/aigate/trusted.")]
+    for c in due:
+        files = " ".join(q for q in (_shell_path(p) for p in paths if os.path.exists(os.path.join(ctx.repo.root, p)))
+                         if q is not None)
         cmd = c["run"].replace("{files}", files)
         try:
             proc = subprocess.run(cmd, shell=True, cwd=ctx.repo.root, capture_output=True, text=True,
@@ -3905,7 +3944,7 @@ def run_check(args, env) -> int:
                                          action=fail_action, key=sha))
         if not args.no_commands and not full:
             paths = [fc.path for fc in changes if not fc.deleted]
-            findings += run_commands(ctx, stage, paths)
+            findings += run_commands(ctx, stage, paths, trusted=bool(args.config))
         if merge:
             notes.append("merge commit: incoming changes from the merged branch are checked too")
     registry.save()
@@ -4154,6 +4193,52 @@ def cmd_scope(args) -> int:
     return 0
 
 
+def _visible(value) -> str:
+    """Text as it really is: control characters (which could hide or rewrite what the terminal shows) are
+    escaped, and the whole value is printed however long."""
+    text = str(value)
+    return text if text.isprintable() else repr(text)
+
+
+def cmd_trust(args) -> int:
+    """Approve the [[commands]] in .aigate/lite.toml (the working tree's, or --rev's): exactly this list."""
+    repo = Repo.discover()
+    agent = detect_provenance(dict(os.environ))
+    if agent[0] == "agent":
+        print(f"aigate-lite: refusing to trust commands for an AI agent (detected via {agent[1]}); "
+              "a person has to run `aigate-lite trust`", file=sys.stderr)
+        return 1
+    if args.rev:
+        rev = repo.commit(args.rev)
+        if not rev:
+            raise GitError(f"cannot resolve {args.rev!r}")
+        cfg = load_config(repo, rev)
+    else:
+        cfg = load_config(repo, "worktree")
+    for problem in cfg.problems:
+        print(f"warning: {problem}")
+    commands = cfg["commands"]
+    if not commands:
+        print(f"no [[commands]] in {cfg.origin}: nothing to trust")
+        return 0
+    print(f"Approving every command below from {cfg.origin}. They run on this machine through the shell:")
+    for c in commands:
+        print(f"  - name: {_visible(c['name'])}\n    run: {_visible(c['run'])}\n    stage: {c['stage']}  "
+              f"action: {c['action']}  timeout: {c['timeout']}s  when: {_visible(c['when'] or 'always')}")
+    path = repo.private_path("aigate/trusted")
+    known = trusted_hashes(repo)
+    digest = commands_hash(commands)
+    if digest not in known:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            _write_private(path, "".join(f"{h}\n" for h in sorted(known) + [digest]).encode("utf-8"))
+        except OSError as e:
+            print(f"aigate-lite: cannot record the approval in {path}: {e}", file=sys.stderr)
+            return 2
+    print(f"trusted (recorded in {path}); any change to these commands needs a new `aigate-lite trust`")
+    return 0
+
+
 def cmd_explain(args) -> int:
     if not args.rule:
         print(f"{'rule':<30} {'default':<8} {'severity':<9} what it catches")
@@ -4207,6 +4292,8 @@ def build_parser():
     s = sub.add_parser("scope", help="declare which paths the current task may touch")
     s.add_argument("action", choices=("set", "add", "show", "clear"))
     s.add_argument("globs", nargs="*")
+    t = sub.add_parser("trust", help="approve the [[commands]] in .aigate/lite.toml so they may run")
+    t.add_argument("--rev", help="approve the config as committed in this revision (e.g. a branch you push)")
     e = sub.add_parser("explain", help="list rules, or explain one")
     e.add_argument("rule", nargs="?")
     return p
@@ -4227,7 +4314,7 @@ def main(argv=None) -> int:
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
-                "explain": cmd_explain}[args.command](args)
+                "explain": cmd_explain, "trust": cmd_trust}[args.command](args)
     except GitError as e:
         print(f"aigate-lite: {e}", file=sys.stderr)
         return 2

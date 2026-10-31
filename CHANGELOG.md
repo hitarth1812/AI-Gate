@@ -5,6 +5,12 @@
 ### Behaviour changes
 <!-- Every changed default or text-output format goes here. -->
 No rule IDs, config keys, JSON schema (1) or exit codes changed. New: `--format sarif`, `check --all`.
+- **`[[commands]]` from a repository's config no longer run until approved** with `aigate-lite trust`
+  (new subcommand; `--rev` approves a committed config). Until then each check adds one `commands.failed`
+  finding with action `warn` and runs nothing; any change to the commands needs a new approval. A config
+  given with `--config` on the command line is trusted as before.
+- `{files}` in commands: on Windows paths are double-quoted for cmd.exe and paths containing `%` or `"` are
+  left out; paths starting with `-` are passed as `./-…` on every OS.
 - New default: a per-file result cache (`results-v2.json` + `results.key`, both 0600, in the cache dir)
   remembers which files the pure checks found clean. `--no-cache` now turns off this cache as well as
   the registry cache.
@@ -40,6 +46,8 @@ No rule IDs, config keys, JSON schema (1) or exit codes changed. New: `--format 
 - `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
 
 ### Fixed
+- Windows: a changed file named like `a&cmd&.py` could inject shell commands through `{files}` (POSIX
+  quoting under cmd.exe).
 - Windows: `install --force` / `uninstall` no longer fail with WinError 32 (file renamed while open).
 - Windows: vendored hooks no longer run the Microsoft Store `python3` stub.
 - Windows: the text report no longer crashes with UnicodeEncodeError on a cp1252 pipe.

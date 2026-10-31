@@ -169,6 +169,7 @@ def test_configured_command_runs(repo):
     repo.write(".aigate/lite.toml", f'[[commands]]\nname = "tests"\nrun = "{sys.executable} -c \\"raise SystemExit(3)\\""\n'
                                     'stage = "commit"\n')
     repo.commit()
+    assert repo.run("trust").returncode == 0
     repo.write("a.py", "x = 1\n")
     repo.add()
     res = repo.check()

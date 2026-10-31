@@ -33,18 +33,8 @@ Context claims checked:
 ## BLOCKED
 - `tests/test_gate.py::test_configured_command_runs` fails on Windows because the test embeds a Windows
   path in a TOML basic string (invalid escape). Not a tool bug; test left unchanged per rule 7.
-- **Item 8 (trust model for `[[commands]]`)**: conflicts with rule 7. Any implementation where untrusted
-  repo commands do not run makes the existing `tests/test_gate.py::test_configured_command_runs` fail on
-  every OS (it commits a `[[commands]]` config and expects the command to run with no approval step).
-  Heuristics that would keep that test green (e.g. auto-trust configs whose last commit author matches
-  `user.email`) are spoofable and would defeat the feature. Nothing implemented.
-  Proposed resolution for a human: approve adding one line, `assert repo.run("trust").returncode == 0`,
-  after `repo.commit()` in that test (no assertion is removed), then implement as specified:
-  `aigate-lite trust` stores sha256 of the canonical validated `[[commands]]` list in `.git/aigate/trusted`
-  (one hash per line, so branch switches don't re-prompt); changed commands need re-approval; untrusted →
-  one `warn` finding (`commands.failed` with action warn, or a new `commands.untrusted` rule — a new rule
-  id also needs approval since README/tests count 65 rules); `--config FILE` given on the command line
-  counts as trusted; CHANGELOG "Behaviour changes" entry (commands no longer run by default).
+- ~~Item 8~~ unblocked 2026-10-31: the user approved adding `assert repo.run("trust").returncode == 0`
+  to `test_configured_command_runs` (one line added, nothing removed). Implemented in iteration 8b.
 
 ## Iteration 1 — benchmark harness + AIGATE_PROFILE counters
 
@@ -454,3 +444,53 @@ Perf gates: PASS
   over this interpreter's installed packages; on an interpreter with few packages the baseline (and so the
   relative gain) is much smaller. The startup miss is structural here: bare `python -c pass` is 54.9 ms and
   compiling the 190 KB script is ~77 ms (iteration 2).
+
+## Iteration 8b ⚠ — trust model for [[commands]] (unblocked by the user)
+
+User approval: add `assert repo.run("trust").returncode == 0` after `repo.commit()` in
+`tests/test_gate.py::test_configured_command_runs`. That is the only change to an original test.
+
+Change: `aigate-lite trust [--rev REV]` validates the config, prints every command (name, run, stage,
+action, timeout, when; control characters escaped via repr), refuses when an AI agent is detected, and
+appends sha256(canonical validated list) to `.git/aigate/trusted` (0600, atomic). `run_commands` runs a
+stage's commands only if the list's hash is approved or the config came from `--config`; otherwise one
+`commands.failed` finding with action `warn`, naming the commands and the fix. Reused rule id (no new
+rule without approval). `{files}`: cmd.exe-safe quoting on Windows (double quotes; `%`/`"` paths
+dropped), `./` before a leading `-`. Write failure → clean message, exit 2.
+
+Tests (tests/test_trust.py, 11): untrusted → warn and nothing runs, then `trust` → runs (TP); no commands
+→ no finding, `trust` says so (TN); changed command and changed `when` need re-approval; switching back to
+an approved list needs none; `--config` file in a path with a space is trusted; push-stage commands make no
+noise at commit; corrupt/CRLF/binary trust file → untrusted, no gate.error, `trust` rewrites it; control
+characters shown escaped and agents refused; `trust --rev feature` + `--range main..feature` runs; a file
+named `a&echo INJECTED&.py` does not inject on Windows (**this test executed `echo INJECTED` before the fix**)
+and `-rf.py` arrives as `./-rf.py`.
+
+Review (independent subagent): 6 findings.
+1. HIGH Windows `{files}` injection via cmd.exe → **fixed** (+ test that reproduced it).
+2. HIGH vendored `.aigate/aigate_lite.py` is repo code that runs → **documented** (README limit; ROADMAP:
+   pin by hash). Pre-existing, outside this item.
+3. MEDIUM `trust` display could hide content; agents could self-approve → **fixed** (escaped, all fields,
+   agents refused). No y/N prompt: it would break the approved test line (non-TTY, no flag).
+4. MEDIUM reusing `commands.failed` lets repo `[rules]` silence/upgrade the notice and adds risk score →
+   **open, needs a decision**: a dedicated rule id was not approved. Fails closed in every case (commands
+   never run untrusted). ROADMAP.
+5. LOW push-stage config not approvable; per-worktree store → `--rev` **added**; common-dir store in ROADMAP.
+6. LOW write failure traceback → **fixed**.
+
+Verify:
+- `python -m pytest -q` → `1 failed, 112 passed in 147.50s` (only the Windows TOML-escape bug in
+  `test_configured_command_runs` remains; its new `trust` line passes).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+python_noop        57.7      62.3                     -5.3% / -5.7%
+startup           156.0     227.9                     -50.0% / -33.1%
+A                 473.5     498.0          6      1   -91.8% / -92.1%
+B                 527.3     550.1          7     21   -90.5% / -90.4%
+C                 716.9     747.6          7    301   -87.6% / -88.4%
+D                 498.4     528.3          6      1   -90.9% / -90.7%
+Perf gates: PASS   (D / A = 1.05)
+```
+  startup median 156.0 vs 208.1 in iteration 10 with p95 227.9: run-to-run noise (this item does not touch
+  start-up). docs/PERF.md still shows the iteration-10 run; it was not regenerated.

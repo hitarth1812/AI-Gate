@@ -111,6 +111,7 @@ import_map = { mylib = "my-lib-dist" }                # import name -> package n
 name = "tests"
 run = "python -m pytest -q"
 stage = "push"                  # commit | push | both
+                                # then approve them once: aigate-lite trust
 
 [[allow]]                       # a known false positive
 rule = "secrets.generic"
@@ -172,8 +173,14 @@ the job on exit code 1. `--format json` (schema 1) and `--format sarif` (SARIF 2
 - **Not covered in lite:** calls to functions or attributes that don't exist (that needs a type
   checker, which you can add as a `[[commands]]` entry), sandboxed test runs, mutation testing, and
   LLM review.
-- **Commands in `.aigate/lite.toml` run on your machine.** Review that file when you clone a repo that
-  has one, as you would with any hook setup.
+- **Commands in `.aigate/lite.toml` need your approval.** A cloned or pulled config can't run code on your
+  next commit: `[[commands]]` stay off (one `commands.failed` warning says so) until a person runs
+  `aigate-lite trust`, which prints every command with hidden characters escaped and records exactly that
+  list in `.git/aigate/trusted`. Any change to any command needs a new approval; `trust --rev <branch>`
+  approves a config you push but have not checked out; AI agents can't approve. `--config FILE` on the
+  command line counts as your own choice and is trusted (so don't point it at a file a pull request controls).
+- **A vendored gate is code from the repo too.** With `install --vendor` the hook runs
+  `.aigate/aigate_lite.py` as committed; review changes to that file like any other code you execute.
 - **Offline:** if PyPI/npm can't be reached, dependency findings become `deps.unverified` warnings.
   Set `[gate] offline = "block"` to stop instead.
 

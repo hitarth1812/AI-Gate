@@ -36,5 +36,9 @@ session after a human review of the previous one. Do not start them early.
   stream could replace them.
 - Self-audit (`check --all`) flags the original test fixture `tests/test_secrets_deps.py:49` (private key
   header). Split the string or add an `[[allow]]` (needs a human: rule 7 froze that test in Phase 1).
-- Item 8 (trust model for `[[commands]]`) is BLOCKED pending approval to add `repo.run("trust")` to
-  `test_configured_command_runs`; design recorded in PROGRESS.md.
+- Trust model follow-ups (need a decision): a dedicated `commands.untrusted` rule (low severity, not
+  overridable) instead of reusing `commands.failed` — today a repo config can set `commands.failed` to
+  `off` (hides the notice) or `block` (blocks fresh clones), and the warn adds to the risk score; trust store
+  in the common git dir so linked worktrees share approvals; optional y/N prompt on a TTY.
+- Pin the vendored `.aigate/aigate_lite.py` by hash at install time so a pulled change to the gate itself
+  needs approval too.
