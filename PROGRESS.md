@@ -412,3 +412,45 @@ C                 746.5     763.1          7    301   -87.0% / -88.2%
 D                 498.4     521.7          6      1   -90.9% / -90.8%
 Perf gates: PASS   (D / A = 1.06)
 ```
+
+## Iteration 10 — release prep
+
+- README: "First success in under 2 minutes" (install --vendor → a fake key built at run time so the
+  README does not flag itself → blocked commit → clean up → optional `check --all`); Windows `py -3` note;
+  hand-typed "0.3–0.7 s" speed claim and "52 tests" count replaced by pointers to generated output;
+  `check --all` row; bench commands under Development. (The 2-minute figure is a goal for the steps, not
+  a measured number.)
+- CHANGELOG "Behaviour changes" complete for the phase (result cache default, hook interpreter search,
+  `?` replacement on non-UTF-8 pipes, new CI example); confirms no rule ID / config key / schema / exit
+  code changes.
+- `bench/bench.py --markdown` writes docs/PERF.md; `bench/latest.json` is the run it was generated from.
+- Self-audit `python aigate_lite.py check --all --offline` on this repo: **1 block** —
+  `secrets.hardcoded tests/test_secrets_deps.py:49` (the original v0.1.0 test's
+  `-----BEGIN OPENSSH PRIVATE KEY-----` fixture, unchanged per rule 7; hooks never saw it because they
+  check only added lines). Plus 13 fix-level findings in the tool's own source/tests (regex literals,
+  intentional `shell=True` for `[[commands]]`, test fixtures). None comes from samples added this phase.
+  Suggested for a human: split that fixture string, or add an `[[allow]]` with a path for it.
+
+Verify:
+- `python -m pytest -q` → `1 failed, 101 passed in 135.45s` (only the BLOCKED test).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json --markdown docs/PERF.md --json bench/latest.json`:
+```
+python_noop        54.9      59.0                     -9.9% / -10.7%
+startup           208.1     219.0                     -33.3% / -35.7%
+A                 470.6     486.2          6      1   -91.8% / -92.2%
+B                 524.8     557.0          7     21   -90.6% / -90.3%
+C                 738.8     757.1          7    301   -87.2% / -88.3%
+D                 495.9     525.2          6      1   -90.9% / -90.7%
+A-cold            459.3     468.8
+C-cold            876.5     964.4
+  MISS startup (--version)    target <= 40 ms       achieved 208.1 ms
+  met  scenario A             target >= 40% faster  achieved 91.8% faster
+  met  scenario B             target >= 40% faster  achieved 90.6% faster
+  met  D / A                  target <= 1.2         achieved 1.05
+Perf gates: PASS
+```
+- Caveat on the A–D gains: most of the baseline's ~5.5 s was `importlib.metadata.packages_distributions()`
+  over this interpreter's installed packages; on an interpreter with few packages the baseline (and so the
+  relative gain) is much smaller. The startup miss is structural here: bare `python -c pass` is 54.9 ms and
+  compiling the 190 KB script is ~77 ms (iteration 2).

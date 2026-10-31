@@ -1,0 +1,75 @@
+{
+  "meta": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "machine": "Hitarth",
+    "script": "aigate_lite.py",
+    "runs": 30,
+    "fixture_version": "1",
+    "date": "2026-10-31T18:04:14"
+  },
+  "python_noop": {
+    "median_ms": 54.9,
+    "p95_ms": 59.0,
+    "runs": 30
+  },
+  "startup": {
+    "median_ms": 208.1,
+    "p95_ms": 219.0,
+    "runs": 30
+  },
+  "A": {
+    "median_ms": 470.6,
+    "p95_ms": 486.2,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 1,
+      "cache_hits": 4,
+      "git_calls": 6
+    }
+  },
+  "B": {
+    "median_ms": 524.8,
+    "p95_ms": 557.0,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 21,
+      "cache_hits": 70,
+      "git_calls": 7
+    }
+  },
+  "C": {
+    "median_ms": 738.8,
+    "p95_ms": 757.1,
+    "runs": 30,
+    "verdict": "warn",
+    "counters": {
+      "blobs_read": 301,
+      "cache_hits": 900,
+      "git_calls": 7
+    }
+  },
+  "D": {
+    "median_ms": 495.9,
+    "p95_ms": 525.2,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 1,
+      "cache_hits": 4,
+      "git_calls": 6
+    }
+  },
+  "A-cold": {
+    "median_ms": 459.3,
+    "p95_ms": 468.8,
+    "runs": 30
+  },
+  "C-cold": {
+    "median_ms": 876.5,
+    "p95_ms": 964.4,
+    "runs": 30
+  }
+}
