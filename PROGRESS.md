@@ -593,3 +593,38 @@ tracked file copied into a temp repo, `check --all --offline`); failed before wi
 `[('tests/test_secrets_deps.py', 49)]`, passes after.
 Verify: `python -m pytest -q` → `1 failed, 119 passed in 117.61s` (only the known Windows test); pyflakes
 clean; bench not re-run (`aigate_lite.py` unchanged).
+
+## Cleanup 3 ⚠ — non-UTF-8 pipe test failing on Linux (harness fix)
+
+Explore:
+- `GitRepo.run` used `text=True` with no encoding, so output was decoded with the **parent's** preferred
+  encoding: UTF-8 on Linux, cp1252 on Windows.
+- The child writes stdout in `PYTHONIOENCODING` if set, else its locale/UTF-8-mode encoding; the tool only
+  adds `errors="replace"` (`main()`), it never changes the encoding.
+- So on Windows parent and child agreed by coincidence (cp1252); on Linux byte 0xb7 ("·") hit the UTF-8
+  decoder inside `communicate()` and stdout came back `None`.
+- Reproduced both ways: on Windows with the parent in UTF-8 mode (`PYTHONUTF8=1 py -3.12 -m pytest …` →
+  `UnicodeDecodeError: 'utf-8' codec can't decode byte 0xb7`), and on real Linux (WSL Ubuntu, Python 3.12.3,
+  git 2.43, committed HEAD → same error).
+Change (tests/conftest.py only; the tool and the test's assertions are untouched): `run` captures bytes and
+decodes them with `child_encoding(env)` — the encoding a real child Python reports for a piped stdout under
+the same environment (one probe per distinct set of encoding variables, cached) — with `errors="replace"`,
+then translates newlines exactly like text mode (`\r\n`/`\r` → `\n`). `input=` is written as text mode did
+(`\n` → `os.linesep`, then encoded with the same encoding).
+Tests (tests/test_harness.py, new, 5): cp1252 output decodes to "·" (TP); the encoding follows the child's
+variables (UTF-8 mode, PYTHONIOENCODING wins, `:errors` suffix, empty codec part) rather than the parent's;
+undecodable bytes never raise; newline translation; a real `repo.run` with a cp1252 child under
+`PYTHONUTF8=1` (edge). Failed before at import (helpers missing).
+Review (independent subagent, diff + tests only): 3 findings.
+1. MEDIUM the first version guessed the encoding from `PYTHONUTF8` + `locale.getencoding()`, which is wrong
+   when UTF-8 mode is on by default (PEP 686, Python 3.15) or locale coercion fails; its test compared the
+   function to its own formula → **fixed** (ask a real child; tests compare against real children).
+2. LOW `text=True` wrote `input` with `\n` → `\r\n` on Windows, the bytes version did not → **fixed**.
+3. LOW `locale.getencoding()` needs 3.11 → moot after 1 (and `requires-python >= 3.11`).
+Verify:
+- Linux (WSL Ubuntu, Python 3.12.3, pytest 9.1.1 copied from the Windows install onto `PYTHONPATH` because
+  that Python has no pip/venv): `125 passed in 27.28s` — the whole suite, including the Windows-only failure.
+- Windows: `python -m pytest -q` → `1 failed, 124 passed in 119.24s`; with the parent in UTF-8 mode
+  (`PYTHONUTF8=1`, the Linux-like case) → `1 failed, 124 passed in 116.83s`. The failure both times is
+  the known `test_configured_command_runs`. pyflakes clean on conftest/test_harness. Bench not re-run
+  (`aigate_lite.py` unchanged).

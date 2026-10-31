@@ -49,6 +49,8 @@ No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one ru
 - `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
 
 ### Fixed
+- Test harness: subprocess output is decoded with the child's real stdout encoding (`errors="replace"`),
+  so `test_text_output_survives_a_non_utf8_pipe` passes on Linux too (it decoded cp1252 output as UTF-8).
 - The repository's own docs no longer quote a private-key header (`check --all` on this repo blocked on
   PROGRESS.md); `tests/test_repo_hygiene.py` keeps tracked docs free of `secrets.hardcoded` findings.
 - Windows: a changed file named like `a&cmd&.py` could inject shell commands through `{files}` (POSIX
