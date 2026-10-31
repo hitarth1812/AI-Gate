@@ -112,3 +112,64 @@ Perf gates: PASS
 - Compile cost: `compile()` of the 190 KB source = **77.1 ms** median, module-body exec 4.4 ms. A script run
   as `python aigate_lite.py` is recompiled on every run (no .pyc for `__main__`), so ~77 ms of the startup
   is compilation, not imports. Noted in ROADMAP (hooks could import the module to use cached bytecode).
+
+## Iteration 3 — work avoidance
+
+Explore:
+- `python_imports` computed `python_local_modules` (all of `git ls-files`), `python_declared` (every
+  manifest in the tree) and `python_environment` (`importlib.metadata.packages_distributions()`, 5.8 s
+  here) before looking at a single import — for every commit that touches a .py file.
+- `packages_distributions()` → `dist.files` → `skip_missing_files` stats every file of every installed
+  distribution (22,660 `nt.stat` calls on this interpreter).
+- `check_env_not_ignored` built `set(ctx.files)` (full listing) on every staged run, and ran one
+  `git check-ignore` per root `.env*` file.
+- Range mode ran `git rev-parse <sha>^` once per pushed commit; `empty_tree()` (a `hash-object`) ran on every
+  plan; `MERGE_HEAD` and the scope file each cost a `rev-parse --git-path`.
+- `check_duplicates` looked up a file's added lines with a linear scan inside a nested loop (O(files²)).
+- Already fine: one `git cat-file --batch` process; `ctx.files` was already a lazy property.
+
+Change (behaviour identical, findings unchanged):
+- New imports are collected first; only names that are not stdlib / first_party / private are looked up
+  in the tree, and only with a targeted `git ls-files -- ':(glob)**/<name>/**' ':(glob)**/<name>.*'`
+  (falls back to the full listing for >64 names, non-identifier names, or range mode). Manifests and
+  installed packages are consulted only when a name is still unresolved.
+- `_dist_tops()` reproduces `packages_distributions()` from `top_level.txt` / `RECORD` without stat'ing
+  files (including its quirk of splitting backslash RECORD paths, so results are identical — asserted by a
+  test against `importlib.metadata.packages_distributions()` on this interpreter).
+- `check_env_not_ignored`: lists only the root `.env*` candidates (`:(literal)` pathspecs) and asks one
+  `git check-ignore -z --stdin`; nothing at all when no candidate exists. A failing check-ignore still
+  reports nothing, as before.
+- `Repo.discover` asks for `--absolute-git-dir` in the same `rev-parse`; `private_path()` replaces
+  `--git-path` for MERGE_HEAD and aigate/scope; `empty_tree()` memoised and computed only when needed;
+  pushed commits' parents come from the `git log` call that already reads their messages.
+- `check_duplicates`: dict lookup instead of `ctx_added()` (removed).
+
+Tests (tests/test_perf.py, 8 new): stdlib+local imports trigger no environment scan and no manifest walk
+(TP, failed before); a hallucinated third-party import is still flagged and the environment still consulted
+(TN); local package in a `my pkg/ütil/` path with CRLF sources resolves as local (edge: unicode + space +
+CRLF); environment mapping equals the stdlib's; git calls don't grow with the number of `.env*` files
+(failed before: 12 vs 10); no file listing for a commit with no code; range git calls grow by exactly the
+2 diff calls per extra commit (failed before: 6); 40 duplicated files → 39 findings, first copy unflagged.
+
+Verify:
+- `python -m pytest -q` → `4 failed, 62 passed in 90.50s` (same 4 pre-existing; suite was 258 s).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        56.5      61.0                     -7.2% / -7.7%
+startup           210.3     218.6                     -32.6% / -35.8%
+A                 483.3     730.5          6      1   -91.6% / -88.3%   (baseline git 9, blobs 2)
+B                 573.9     621.2          7     21   -89.7% / -89.1%   (baseline git 9, blobs 22)
+C                 872.8     909.1          7    301   -84.9% / -85.9%   (baseline git 9, blobs 302)
+D                 487.9     503.9          6      1   -91.0% / -91.1%   (baseline git 9, blobs 2)
+Phase 1 targets:
+  MISS startup (--version)    target <= 40 ms       achieved 210.3 ms
+  met  scenario A             target >= 40% faster  achieved 91.6% faster
+  met  scenario B             target >= 40% faster  achieved 89.7% faster
+  met  D / A                  target <= 1.2         achieved 1.01
+Perf gates: PASS
+```
+  (startup is not affected by this item; the −32.6% vs the item-2 run is the machine being less loaded —
+  `python_noop` moved −7.2% too.) B and C make 7 git calls: JS files still need the full listing for
+  `js_project` (package.json / tsconfig discovery).

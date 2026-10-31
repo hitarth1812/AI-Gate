@@ -29,3 +29,8 @@ session after a human review of the previous one. Do not start them early.
 - Hooks run `python .aigate/aigate_lite.py`, which recompiles 190 KB of source every time (77 ms measured
   on the Phase 1 machine). A hook that imports the module with `sys.pycache_prefix` pointed at the cache dir
   would reuse bytecode. Needs care: writable cache dir, stale-pyc safety, Windows paths.
+- `js_project` and `python_declared` still list every file (`git ls-files`) to find package.json /
+  tsconfig / Python manifests. A pathspec listing (`:(glob,icase)**/package.json` …) would make JS
+  commits and third-party Python imports independent of repo size too.
+- Range/push mode runs `git diff` twice per pushed commit for the secrets scan; one `git log -p --raw`
+  stream could replace them.

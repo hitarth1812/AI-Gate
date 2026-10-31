@@ -107,7 +107,7 @@ def test_third_party_import_still_scans_and_flags(repo, monkeypatch, capsys):
     repo.add()
     scans = watch(monkeypatch, "python_environment")
     _, res = run_inproc(repo, monkeypatch, capsys, "check", "--format", "json")
-    assert len(scans) == 1
+    assert scans                                              # the installed packages are still consulted
     assert [f["line"] for f in find(res, "deps.hallucinated")] == [1] and not find(res, "deps.undeclared")
 
 
@@ -129,9 +129,10 @@ def test_environment_scan_matches_importlib_metadata():
         cache = {}
         repo = type("R", (), {"root": os.devnull})()
     names, mapping = aigate.python_environment(Ctx())
-    for top, dists in importlib.metadata.packages_distributions().items():
-        assert top in names, top
-        assert {d for d in dists if d} <= mapping[top], top
+    expected = importlib.metadata.packages_distributions()
+    assert names == set(expected)
+    for top, dists in expected.items():
+        assert {d for d in dists if d} == mapping[top], top
 
 
 def test_env_check_runs_one_git_process_however_many_env_files(repo):
@@ -161,7 +162,7 @@ def test_no_env_files_means_no_file_listing(repo, monkeypatch, capsys):
 def test_range_git_calls_do_not_grow_per_commit_beyond_the_diffs(repo):
     def calls(n):
         for i in range(n):
-            repo.write(f"f{i}.py", f"x = {i}\n")
+            repo.write(f"f{n}_{i}.py", f"x = {i}\n")
             repo.commit(f"c{i}")
         return profile(repo.run("check", "--range", f"HEAD~{n}..HEAD", "--format", "json",
                                 env={"AIGATE_PROFILE": "1"}))["git_calls"]

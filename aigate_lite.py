@@ -440,18 +440,22 @@ def run_git(root, *args, input_bytes=None, check=True) -> str:
 
 
 class Repo:
-    def __init__(self, root: str):
+    def __init__(self, root: str, git_dir=None):
         self.root = root
+        self.git_dir = git_dir
         self._reader = None
         self._blobs: dict = {}
+        self._empty_tree = None
 
     @classmethod
     def discover(cls, cwd=None) -> "Repo":
         PROFILE["git_calls"] += 1
-        proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
-        if proc.returncode != 0:
+        proc = subprocess.run(["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"], cwd=cwd,
+                              capture_output=True, text=True)
+        lines = proc.stdout.splitlines()
+        if proc.returncode != 0 or len(lines) != 2:
             raise GitError("not inside a git repository")
-        return cls(proc.stdout.strip())
+        return cls(lines[0].strip(), lines[1].strip())
 
     def git(self, *args, **kw) -> str:
         return run_git(self.root, *args, **kw)
@@ -463,11 +467,17 @@ class Repo:
         return proc.stdout.strip() if proc.returncode == 0 else None
 
     def empty_tree(self) -> str:
-        return self.git("hash-object", "-t", "tree", "--stdin", input_bytes=b"").strip()
+        if self._empty_tree is None:
+            self._empty_tree = self.git("hash-object", "-t", "tree", "--stdin", input_bytes=b"").strip()
+        return self._empty_tree
 
     def git_path(self, name: str) -> str:
         p = self.git("rev-parse", "--git-path", name).strip()
         return p if os.path.isabs(p) else os.path.join(self.root, p)
+
+    def private_path(self, name: str) -> str:
+        """A per-worktree file inside the git dir (MERGE_HEAD, aigate/scope); same answer as git_path, no subprocess."""
+        return os.path.join(self.git_dir, name) if self.git_dir else self.git_path(name)
 
     def read(self, spec: str):
         """Bytes of '<rev>:<path>' or ':<path>' (the index); None when missing or not a blob."""
@@ -1366,21 +1376,31 @@ def check_env_files(ctx, changes=None, where="") -> list:
 def check_env_not_ignored(ctx) -> list:
     if ctx.mode != "staged":
         return []
-    out, tracked = [], set(ctx.files)
     try:
         names = sorted(os.listdir(ctx.repo.root))
     except OSError:
         return []
+    candidates = []
     for name in names:
         lname = name.lower()
         if not (lname == ".env" or lname.startswith(".env.")) or lname.endswith(ENV_SAFE_SUFFIXES):
             continue
-        if name in tracked or not os.path.isfile(os.path.join(ctx.repo.root, name)):
-            continue
-        PROFILE["git_calls"] += 1
-        if subprocess.run(["git", "check-ignore", "-q", "--", name], cwd=ctx.repo.root).returncode == 1:
-            out.append(make("secrets.env_not_ignored", name, None, f"{name} exists but is not in .gitignore", key=name))
-    return out
+        if os.path.isfile(os.path.join(ctx.repo.root, name)):
+            candidates.append(name)
+    if not candidates:
+        return []
+    tracked = set(ctx.repo.git("ls-files", "-z", "--", *(":(literal)" + n for n in candidates)).split("\0"))
+    candidates = [n for n in candidates if n not in tracked]
+    if not candidates:
+        return []
+    PROFILE["git_calls"] += 1
+    proc = subprocess.run(["git", "check-ignore", "-z", "--stdin"], cwd=ctx.repo.root, capture_output=True,
+                          input="\0".join(candidates).encode("utf-8"))
+    if proc.returncode not in (0, 1):
+        return []                              # as before: a failing check-ignore reports nothing
+    ignored = set(proc.stdout.decode("utf-8", "replace").split("\0"))
+    return [make("secrets.env_not_ignored", name, None, f"{name} exists but is not in .gitignore", key=name)
+            for name in candidates if name not in ignored]
 
 
 # --------------------------------------------------------------------------- checks: paths and scope
@@ -1390,7 +1410,7 @@ GATE_FILES = (".aigate/**", ".pre-commit-config.yaml", ".husky/**", "lefthook.ym
 
 
 def scope_path(repo: Repo) -> str:
-    return repo.git_path("aigate/scope")
+    return repo.private_path("aigate/scope")
 
 
 def load_scope(repo: Repo) -> list:
@@ -1905,6 +1925,26 @@ def find_site_packages(root: str) -> list:
     return list(dict.fromkeys(out))
 
 
+def _dist_tops(dist) -> set:
+    """Top-level import names of an installed distribution, as importlib.metadata.packages_distributions()
+    finds them, but read straight from RECORD: `dist.files` stats every listed file, which took seconds."""
+    import csv
+    import inspect
+    tops = (dist.read_text("top_level.txt") or "").split()
+    if tops:
+        return set(tops)
+    record = dist.read_text("RECORD")
+    paths = ([row[0] for row in csv.reader(record.splitlines()) if row] if record
+             else [str(f) for f in dist.files or []])
+    names = set()
+    for p in paths:
+        parts = p.split("/")                 # no "\\" handling, exactly like the stdlib (keeps results identical)
+        name = parts[0] if len(parts) > 1 else (inspect.getmodulename(parts[0]) or parts[0])
+        if name and "." not in name:
+            names.add(name)
+    return names
+
+
 def python_environment(ctx):
     """(importable top-level names, import -> distributions) from this interpreter and project venvs."""
     if "py_env" in ctx.cache:
@@ -1912,9 +1952,12 @@ def python_environment(ctx):
     import importlib.metadata
     names, mapping = set(), defaultdict(set)
     try:
-        for top, dists in importlib.metadata.packages_distributions().items():
-            names.add(top)
-            mapping[top].update(dists)
+        for dist in importlib.metadata.distributions():
+            dname = dist.metadata["Name"] if dist.metadata else None
+            for top in _dist_tops(dist):
+                names.add(top)
+                if dname:
+                    mapping[top].add(dname)
     except Exception:
         pass
     for sp in find_site_packages(ctx.repo.root):
@@ -1976,15 +2019,28 @@ def python_declared(ctx):
     return ctx.cache["py_declared"]
 
 
-def python_local_modules(ctx) -> set:
-    if "py_local" not in ctx.cache:
-        names = set()
-        for p in ctx.files:
-            parts = p.split("/")
-            if parts[-1].endswith((".py", ".pyi", ".so", ".pyd", ".pyx")):
-                names.update(parts[:-1])
-                names.add(parts[-1].split(".")[0])
-        ctx.cache["py_local"] = names
+def _module_names(paths) -> set:
+    names = set()
+    for p in paths:
+        parts = p.split("/")
+        if parts[-1].endswith((".py", ".pyi", ".so", ".pyd", ".pyx")):
+            names.update(parts[:-1])
+            names.add(parts[-1].split(".")[0])
+    return names
+
+
+def python_local_modules(ctx, tops=None) -> set:
+    """Module and package names in the tree. Given `tops`, the answer is exact for those names only, and git
+    lists just the matching paths instead of every file (the difference is large in big repos)."""
+    if "py_local" in ctx.cache:
+        return ctx.cache["py_local"]
+    if tops is not None and ctx._files is None and ctx.head is None and len(tops) <= 64 \
+            and all(t.isidentifier() for t in tops):
+        if not tops:
+            return set()
+        specs = [s for t in sorted(tops) for s in (f":(glob)**/{t}/**", f":(glob)**/{t}.*")]
+        return _module_names(p for p in ctx.repo.git("ls-files", "-z", "--", *specs).split("\0") if p) & set(tops)
+    ctx.cache["py_local"] = _module_names(ctx.files)
     return ctx.cache["py_local"]
 
 
@@ -2023,22 +2079,31 @@ def python_imports(ctx):
     if not files:
         return findings, candidates
     stdlib = set(sys.stdlib_module_names) | {"__future__"}
-    local = python_local_modules(ctx)
     dcfg = ctx.cfg["deps"]
-    declared, has_manifest, req_py = python_declared(ctx)
-    env_names, env_map = python_environment(ctx)
+    new_imports = []                      # (fc, imports added by this change)
     for fc in files:
         tree, _ = ctx.py_tree(fc)
         if tree is None:
             continue
         old_tree = ctx.py_tree(fc, "old")[0] if fc.old_spec else None
         old_tops = {t for t, *_ in iter_imports(old_tree)} if old_tree else set()
-        seen = set()
+        seen, found = set(), []
         for top, dotted, line, optional in iter_imports(tree):
             if line not in fc.added or top in old_tops or dotted in seen:
                 continue
             seen.add(dotted)
+            found.append((top, dotted, line, optional))
+        new_imports.append((fc, found))
+    # Only names that are not stdlib, configured or private need the tree, manifests or installed packages,
+    # and each of those is looked up only when the first such import shows up.
+    maybe_local = {top for _, found in new_imports for top, *_ in found
+                   if top not in stdlib and top not in REMOVED_STDLIB and top not in dcfg["first_party"]
+                   and not path_matches(top, dcfg["private"])}
+    local = python_local_modules(ctx, maybe_local)
+    for fc, found in new_imports:
+        for top, dotted, line, optional in found:
             if top in REMOVED_STDLIB:
+                req_py = python_declared(ctx)[2]
                 removed, repl = REMOVED_STDLIB[top]
                 breaks = sys.version_info[:2] >= removed or (req_py is not None and req_py >= removed)
                 findings.append(make("deps.removed_stdlib", fc.path, line,
@@ -2047,6 +2112,8 @@ def python_imports(ctx):
                 continue
             if top in stdlib or top in local or top in dcfg["first_party"] or path_matches(top, dcfg["private"]):
                 continue
+            declared, has_manifest, _req_py = python_declared(ctx)
+            env_names, env_map = python_environment(ctx)
             dists = import_dists(top, dotted, dcfg["import_map"], env_map)
             if is_declared(top, dotted, dists, declared):
                 continue
@@ -3261,7 +3328,7 @@ def check_duplicates(ctx) -> list:
         for k in range(len(rows) - n + 1):
             h = hashlib.sha1("\n".join(r[1] for r in rows[k:k + n]).encode()).hexdigest()
             index[h].append((fc.path, rows[k][0]))
-    out = []
+    out, added_by = [], {fc.path: fc.added for fc in files}
     for fc in files:
         rows, covered = rows_by.get(fc.path, []), 0
         for k in range(len(rows) - n + 1):
@@ -3271,7 +3338,7 @@ def check_duplicates(ctx) -> list:
             h = hashlib.sha1("\n".join(r[1] for r in window).encode()).hexdigest()
             me = (fc.path, window[0][0])
             # report the later copy only, unless the other copy already existed before this change
-            others = sorted(o for o in index[h] if o != me and (o < me or o[1] not in ctx_added(files, o)))
+            others = sorted(o for o in index[h] if o != me and (o < me or o[1] not in added_by.get(o[0], ())))
             if not others:
                 continue
             end = k + n
@@ -3282,13 +3349,6 @@ def check_duplicates(ctx) -> list:
             out.append(make("code.duplicate_block", fc.path, window[0][0],
                             f"{n}+ lines duplicate {other[0]}:{other[1]}", key=h))
     return out
-
-
-def ctx_added(files, loc) -> set:
-    for fc in files:
-        if fc.path == loc[0]:
-            return fc.added
-    return set()
 
 
 # --------------------------------------------------------------------------- configured commands
@@ -3466,20 +3526,21 @@ SECRET_CHECKERS = (check_secrets, check_env_files)
 
 
 def _commit_info(repo, shas) -> tuple:
-    messages, authors = [], []
+    """(messages, authors, sha -> first parent or None)."""
+    messages, authors, parents = [], [], {}
     for i in range(0, len(shas), 200):
-        out = repo.git("log", "--no-walk=unsorted", "-z", "--format=%an%x1f%cn%x1f%B", *shas[i:i + 200])
+        out = repo.git("log", "--no-walk=unsorted", "-z", "--format=%H%x1f%P%x1f%an%x1f%cn%x1f%B", *shas[i:i + 200])
         for rec in out.split("\0"):
-            parts = rec.split("\x1f")
-            if len(parts) == 3:
-                authors += parts[:2]
-                messages.append(parts[2])
-    return messages, authors
+            parts = rec.split("\x1f", 4)
+            if len(parts) == 5:
+                parents[parts[0]] = (parts[1].split() or [None])[0]
+                authors += parts[2:4]
+                messages.append(parts[4])
+    return messages, authors, parents
 
 
 def plan_runs(repo, args, env) -> list:
     """Each run: (label, base, head, commits)."""
-    empty = repo.empty_tree()
     if args.range:
         spec = args.range
         a, b = re.split(r"\.\.\.?", spec, 1) if ".." in spec else (spec, "HEAD")
@@ -3515,11 +3576,11 @@ def plan_runs(repo, args, env) -> list:
                 if not commits:
                     continue
                 parent = repo.commit(commits[0] + "^")
-                base = parent or empty
+                base = parent or repo.empty_tree()
             runs.append((f"push {local_ref.replace('refs/heads/', '')}", base, head, commits))
         return runs
     head = repo.commit("HEAD")
-    return [("staged changes", head or empty, None, [])]
+    return [("staged changes", head or repo.empty_tree(), None, [])]
 
 
 def run_check(args, env) -> int:
@@ -3543,7 +3604,7 @@ def run_check(args, env) -> int:
     findings, notes, stats, label = [], [], Counter(), runs[0][0] if len(runs) == 1 else f"push ({len(runs)} refs)"
     provenance, cfg = quick, pre
     for run_label, base, head, commits in runs:
-        messages, authors = _commit_info(repo, commits) if commits else ((), ())
+        messages, authors, parents = _commit_info(repo, commits) if commits else ((), (), {})
         provenance = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"],
                                        messages, authors)
         if args.config:
@@ -3560,7 +3621,7 @@ def run_check(args, env) -> int:
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
             return 0
-        merge = head is None and os.path.exists(repo.git_path("MERGE_HEAD"))
+        merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
                       provenance=provenance, registry=registry, merge=merge, label=run_label)
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
@@ -3582,7 +3643,7 @@ def run_check(args, env) -> int:
             if len(commits) > 300:
                 notes.append(f"{len(commits)} commits: secrets scanned in the first 300 only")
             for sha in commits[:300]:
-                parent = repo.commit(sha + "^") or repo.empty_tree()
+                parent = (parents[sha] if sha in parents else repo.commit(sha + "^")) or repo.empty_tree()
                 try:
                     per_commit = collect_changes(repo, parent, sha)
                     findings += check_secrets(ctx, per_commit, f" (commit {sha[:8]})")
