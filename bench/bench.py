@@ -333,6 +333,10 @@ def markdown(res, base, cmd) -> str:
         out.append(row)
     if base:
         out += ["", f"Baseline: v0.1.0 measured {base['meta']['date']} on the same machine (`bench/baseline.json`).",
+                "", "Most of the baseline's time went to `importlib.metadata.packages_distributions()` scanning every "
+                    "package installed in the interpreter, which v0.1.0 ran on every check. The large gains over the "
+                    "baseline therefore depend on the environment: with few installed packages the baseline, and the "
+                    "gain, are much smaller. Compare rows within one run for anything else.",
                 "", "| Phase 1 target | goal | achieved | met |", "|---|---|---|---|"]
         out += [f"| {n} | {w} | {g} | {'yes' if ok else 'no'} |" for n, w, g, ok in targets(res, base)]
     return "\n".join(out) + "\n"

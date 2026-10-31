@@ -6,70 +6,76 @@
     "script": "aigate_lite.py",
     "runs": 30,
     "fixture_version": "1",
-    "date": "2026-10-31T18:04:14"
+    "date": "2026-10-31T21:17:34"
   },
   "python_noop": {
-    "median_ms": 54.9,
-    "p95_ms": 59.0,
+    "median_ms": 36.1,
+    "p95_ms": 41.7,
     "runs": 30
   },
   "startup": {
-    "median_ms": 208.1,
-    "p95_ms": 219.0,
+    "median_ms": 165.8,
+    "p95_ms": 175.0,
     "runs": 30
   },
   "A": {
-    "median_ms": 470.6,
-    "p95_ms": 486.2,
+    "median_ms": 328.1,
+    "p95_ms": 347.6,
     "runs": 30,
     "verdict": "pass",
     "counters": {
       "blobs_read": 1,
-      "cache_hits": 4,
       "git_calls": 6
     }
   },
   "B": {
-    "median_ms": 524.8,
-    "p95_ms": 557.0,
+    "median_ms": 395.2,
+    "p95_ms": 411.7,
     "runs": 30,
     "verdict": "pass",
     "counters": {
       "blobs_read": 21,
-      "cache_hits": 70,
       "git_calls": 7
     }
   },
   "C": {
-    "median_ms": 738.8,
-    "p95_ms": 757.1,
+    "median_ms": 730.5,
+    "p95_ms": 809.9,
     "runs": 30,
     "verdict": "warn",
     "counters": {
       "blobs_read": 301,
-      "cache_hits": 900,
       "git_calls": 7
     }
   },
   "D": {
-    "median_ms": 495.9,
-    "p95_ms": 525.2,
+    "median_ms": 351.6,
+    "p95_ms": 377.4,
     "runs": 30,
     "verdict": "pass",
     "counters": {
       "blobs_read": 1,
-      "cache_hits": 4,
       "git_calls": 6
     }
   },
   "A-cold": {
-    "median_ms": 459.3,
-    "p95_ms": 468.8,
+    "median_ms": 330.1,
+    "p95_ms": 364.6,
     "runs": 30
   },
   "C-cold": {
-    "median_ms": 876.5,
-    "p95_ms": 964.4,
+    "median_ms": 726.0,
+    "p95_ms": 786.8,
+    "runs": 30
+  },
+  "A-cache": {
+    "median_ms": 330.3,
+    "p95_ms": 386.9,
+    "runs": 30
+  },
+  "C-cache": {
+    "median_ms": 577.6,
+    "p95_ms": 625.7,
     "runs": 30
   }
 }

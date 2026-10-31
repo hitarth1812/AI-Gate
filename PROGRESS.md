@@ -762,3 +762,54 @@ D                 151.7     157.6          6      1
   failures; changed to named module-level markers (`not_root`, `posix_sh`), the convention test_hooks.py
   (`needs_sh`) and this file (`posix_only`) already use. Same tests, same conditions (Windows 8 passed /
   11 skipped; Linux 19 passed).
+
+## Cleanup 5 — docs/bench refresh (run last, on the final code)
+
+Change: bench/bench.py's `--markdown` output now explains that most of the v0.1.0 baseline's time was
+`importlib.metadata.packages_distributions()` over the installed packages, so the gain over it depends on
+the environment (the text is generated; PERF.md is not edited by hand). README's result-cache sentence
+("saves little") was wrong for large changes on the final run and now points to the C / C-cache rows
+instead of making a claim. docs/PERF.md and bench/latest.json regenerated with
+`python bench/bench.py --runs 30 --compare bench/baseline.json --markdown docs/PERF.md --json bench/latest.json`:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        36.1      41.7                     -40.7% / -36.9%
+startup           165.8     175.0                     -46.9% / -48.6%
+A                 328.1     347.6          6      1   -94.3% / -94.5%
+B                 395.2     411.7          7     21   -92.9% / -92.8%
+C                 730.5     809.9          7    301   -87.3% / -87.5%
+D                 351.6     377.4          6      1   -93.5% / -93.3%
+A-cold            330.1     364.6
+C-cold            726.0     786.8
+A-cache           330.3     386.9
+C-cache           577.6     625.7
+Perf gates: PASS   (D / A = 1.07)
+```
+D is back to 351.6 ms (item 6's 393.3 was noise).
+
+## Cleanup — final checklist
+
+Final vs the pre-cleanup run (Cleanup — Iteration 0), median ms, Windows:
+
+| measure | pre-cleanup | final | change | note |
+|---|---:|---:|---:|---|
+| `python -c pass` | 34.4 | 36.1 | +4.9 % | machine drift (not the tool) |
+| startup | 159.4 | 165.8 | +4.0 % | |
+| A | 321.7 | 328.1 | +2.0 % | |
+| B | 359.4 | 395.2 | +10.0 % | at the limit; result cache now off by default (D2) |
+| C | 548.1 | 730.5 | **+33.3 %** | **> 10 %: D2** (cache off by default); `C-cache` 577.6 = +5.4 % |
+| D | 343.7 | 351.6 | +2.3 % | |
+
+⚠ The "no scenario regresses > 10 %" item is **not met for C** (and B is at the line). Both come directly from
+D2: the pre-cleanup run had the result cache on by default. With `--cache` (like for like) C is +5.4 %. Not
+worked around; for the user to decide (keep D2, or turn the default back on).
+Linux (WSL, item 6): hook start-up 120.1 → 67.0 ms.
+- `python -m pytest -q`: Windows → `1 failed, 138 passed, 11 skipped in 149.46s` (failure: the known
+  Windows-only `test_configured_command_runs`, original frozen test, out of scope; skips: POSIX-only bytecode
+  tests); Linux (WSL Ubuntu, Python 3.12.3) → `150 passed in 35.15s`. Not run: macOS, Python 3.11/3.13/3.14.
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python aigate_lite.py check --all --offline -q` (on the committed final tree) →
+  `BLOCK (risk score escalated it) · risk 100/100 · 13 fix · 102 warn` — **0 block findings** (was 2). The
+  verdict is still BLOCK and exit code 1: the 13 fix-level findings (the tool's own regex tables, intentional
+  `shell=True`, test fixtures; none added by this cleanup) push the risk score to 100, and a Fix verdict at
+  ≥ 60 escalates to Block. Changing that needs `[[allow]]` entries or a scoring decision — not in scope.

@@ -54,7 +54,9 @@ No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one ru
 - Checkers are `Checker(name, languages, needs_network, run)` objects; a checker whose languages are not
   in the change is skipped (same findings). Extra checkers can be appended to `CHECKERS`.
 - README: "First success in under 2 minutes"; speed claim replaced by the generated docs/PERF.md.
-- `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
+- `bench/bench.py` also reports `--no-cache` and `--cache` timings for scenarios A and C, a `startup-hook` row
+  on POSIX (start-up the way hooks start the gate), and notes in docs/PERF.md why the gain over the v0.1.0
+  baseline depends on the environment. docs/PERF.md and bench/latest.json regenerated from the final code.
 
 ### Fixed
 - Test harness: subprocess output is decoded with the child's real stdout encoding (`errors="replace"`),
