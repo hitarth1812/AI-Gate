@@ -61,6 +61,7 @@ MAX_BYTES = 1_000_000            # files larger than this skip content checks
 ACTION_RANK = {"off": 0, "pass": 1, "warn": 2, "fix": 3, "block": 4}
 WEIGHTS = {"critical": 40, "high": 20, "medium": 8, "low": 2}
 BLOCK_AT = 60                    # risk score that escalates a Fix verdict to Block
+PROFILE = Counter(git_calls=0, blobs_read=0)   # AIGATE_PROFILE=1 prints these to stderr on exit
 
 
 # --------------------------------------------------------------------------- rules
@@ -442,6 +443,7 @@ class GitError(RuntimeError):
 
 
 def run_git(root, *args, input_bytes=None, check=True) -> str:
+    PROFILE["git_calls"] += 1
     proc = subprocess.run(["git", *args], cwd=root, input=input_bytes, capture_output=True)
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args[:2])} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
@@ -456,6 +458,7 @@ class Repo:
 
     @classmethod
     def discover(cls, cwd=None) -> "Repo":
+        PROFILE["git_calls"] += 1
         proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True)
         if proc.returncode != 0:
             raise GitError("not inside a git repository")
@@ -465,6 +468,7 @@ class Repo:
         return run_git(self.root, *args, **kw)
 
     def commit(self, rev: str):
+        PROFILE["git_calls"] += 1
         proc = subprocess.run(["git", "rev-parse", "--verify", "-q", rev + "^{commit}"],
                               cwd=self.root, capture_output=True, text=True)
         return proc.stdout.strip() if proc.returncode == 0 else None
@@ -483,10 +487,12 @@ class Repo:
         data = None
         if "\n" not in spec:
             if self._reader is None:
+                PROFILE["git_calls"] += 1
                 self._reader = subprocess.Popen(["git", "cat-file", "--batch"], cwd=self.root,
                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
                 atexit.register(self.close)
             r = self._reader
+            PROFILE["blobs_read"] += 1
             r.stdin.write(spec.encode("utf-8") + b"\n")
             r.stdin.flush()
             header = r.stdout.readline()
@@ -1373,6 +1379,7 @@ def check_env_not_ignored(ctx) -> list:
             continue
         if name in tracked or not os.path.isfile(os.path.join(ctx.repo.root, name)):
             continue
+        PROFILE["git_calls"] += 1
         if subprocess.run(["git", "check-ignore", "-q", "--", name], cwd=ctx.repo.root).returncode == 1:
             out.append(make("secrets.env_not_ignored", name, None, f"{name} exists but is not in .gitignore", key=name))
     return out
@@ -3867,8 +3874,8 @@ def main(argv=None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
         argv = ["check", *argv]
-    args = build_parser().parse_args(argv)
     try:
+        args = build_parser().parse_args(argv)
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
@@ -3878,6 +3885,9 @@ def main(argv=None) -> int:
         return 2
     except KeyboardInterrupt:
         return 130
+    finally:
+        if os.environ.get("AIGATE_PROFILE") == "1":
+            sys.stderr.write("aigate-profile: " + json.dumps(dict(sorted(PROFILE.items()))) + "\n")
 
 
 if __name__ == "__main__":

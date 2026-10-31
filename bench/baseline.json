@@ -1,0 +1,61 @@
+{
+  "meta": {
+    "python": "3.12.10",
+    "platform": "Windows-11-10.0.26300-SP0",
+    "machine": "Hitarth",
+    "script": "aigate_lite.py",
+    "runs": 30,
+    "fixture_version": "1",
+    "date": "2026-10-31T16:38:24"
+  },
+  "python_noop": {
+    "median_ms": 60.9,
+    "p95_ms": 66.1,
+    "runs": 30
+  },
+  "startup": {
+    "median_ms": 312.1,
+    "p95_ms": 340.5,
+    "runs": 30
+  },
+  "A": {
+    "median_ms": 5749.9,
+    "p95_ms": 6265.2,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 2,
+      "git_calls": 9
+    }
+  },
+  "B": {
+    "median_ms": 5574.5,
+    "p95_ms": 5718.5,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 22,
+      "git_calls": 9
+    }
+  },
+  "C": {
+    "median_ms": 5761.4,
+    "p95_ms": 6460.7,
+    "runs": 30,
+    "verdict": "warn",
+    "counters": {
+      "blobs_read": 302,
+      "git_calls": 9
+    }
+  },
+  "D": {
+    "median_ms": 5450.6,
+    "p95_ms": 5655.6,
+    "runs": 30,
+    "verdict": "pass",
+    "counters": {
+      "blobs_read": 2,
+      "git_calls": 9
+    }
+  }
+}
