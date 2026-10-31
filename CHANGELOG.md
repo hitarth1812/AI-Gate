@@ -44,10 +44,13 @@ No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one ru
   from the first `rev-parse`, no `rev-parse <sha>^` per pushed commit, empty tree computed once on demand.
 
 - Checkers are `Checker(name, languages, needs_network, run)` objects; a checker whose languages are not
-  in the change is skipped (same findings). Extra checkers can be appended to `CHECKERS`.- README: "First success in under 2 minutes"; speed claim replaced by the generated docs/PERF.md.
+  in the change is skipped (same findings). Extra checkers can be appended to `CHECKERS`.
+- README: "First success in under 2 minutes"; speed claim replaced by the generated docs/PERF.md.
 - `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
 
 ### Fixed
+- The repository's own docs no longer quote a private-key header (`check --all` on this repo blocked on
+  PROGRESS.md); `tests/test_repo_hygiene.py` keeps tracked docs free of `secrets.hardcoded` findings.
 - Windows: a changed file named like `a&cmd&.py` could inject shell commands through `{files}` (POSIX
   quoting under cmd.exe).
 - Windows: `install --force` / `uninstall` no longer fail with WinError 32 (file renamed while open).

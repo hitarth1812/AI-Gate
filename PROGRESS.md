@@ -416,7 +416,7 @@ Perf gates: PASS   (D / A = 1.06)
 - `bench/bench.py --markdown` writes docs/PERF.md; `bench/latest.json` is the run it was generated from.
 - Self-audit `python aigate_lite.py check --all --offline` on this repo: **1 block** —
   `secrets.hardcoded tests/test_secrets_deps.py:49` (the original v0.1.0 test's
-  `-----BEGIN OPENSSH PRIVATE KEY-----` fixture, unchanged per rule 7; hooks never saw it because they
+  OpenSSH private-key header fixture, unchanged per rule 7; hooks never saw it because they
   check only added lines). Plus 13 fix-level findings in the tool's own source/tests (regex literals,
   intentional `shell=True` for `[[commands]]`, test fixtures). None comes from samples added this phase.
   Suggested for a human: split that fixture string, or add an `[[allow]]` with a path for it.
@@ -522,3 +522,58 @@ C                 714.4     759.9          7    301   -87.6% / -88.2%
 D                 498.5     511.3          6      1   -90.9% / -91.0%
 Perf gates: PASS   (D / A = 1.03)
 ```
+
+# Cleanup after the Phase 1 review (6 findings)
+
+Decisions given by the user: D1 split the fixture string at run time; D2 result cache becomes opt-in
+(`--cache` / `[gate] cache = true`); D3 attempt the pycache start-up change, BLOCKED if a risk stays open.
+
+## Cleanup — Iteration 0
+
+Machine: same box (Windows 11 10.0.26300, `py -3.12` = 3.12.10, git 2.52.0.windows.1). The default
+`python` on PATH is still 3.10.11 (below `requires-python`), so every command uses `py -3.12`.
+- `aigate_lite.py` 4,337 lines, stdlib only — **true**. pyflakes 3.4.0, pytest 9.1.1.
+- `python -m pytest -q` → `1 failed, 115 passed in 111.96s` — **differs from the reviewer's numbers**.
+  The reviewer (Linux/3.13) saw `tests/test_hooks.py::test_text_output_survives_a_non_utf8_pipe` fail;
+  on Windows that test passes (the harness decodes as cp1252 here, which matches the env). The failure
+  on Windows is the known `tests/test_gate.py::test_configured_command_runs` (the test puts a Windows path
+  in a TOML basic string: `\U` is an invalid escape, so the config is rejected and no command runs; see
+  BLOCKED above). It is an original, frozen test and is not one of the 6 cleanup items, so it stays failing
+  on Windows; it passes on Linux per the reviewer.
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python aigate_lite.py check --all --offline -q` → `BLOCK · risk 100/100 · 2 block · 13 fix · 98 warn`
+  — **matches** the reviewer. Blocks: `PROGRESS.md:419` and `tests/test_secrets_deps.py:49` (both a
+  private-key header).
+- Pre-cleanup bench (`python bench/bench.py --runs 30 --compare bench/baseline.json`), the reference for
+  the final "no scenario regresses > 10 %" check. This box is faster today than in earlier iterations
+  (`python -c pass` 34 ms vs ~55 ms), so compare against this run, not against older logs:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        34.4      35.9                     -43.5% / -45.7%
+startup           159.4     165.7                     -48.9% / -51.3%
+A                 321.7     331.3          6      1   -94.4% / -94.7%
+B                 359.4     374.6          7     21   -93.6% / -93.4%
+C                 548.1     581.0          7    301   -90.5% / -91.0%
+D                 343.7     371.4          6      1   -93.7% / -93.4%
+A-cold            325.6     401.7
+C-cold            736.7     843.4
+Perf gates: PASS   (D / A = 1.07)
+```
+
+## Cleanup 1 — self-flagging docs
+
+Explore:
+- `check --all` scans tracked files in HEAD, so docs are scanned like code; `.md` is not ignored.
+- Ran the tool's own `PROVIDER_SECRETS` regexes plus looser prefixes (`AKIA…`, `ghp_`, `sk-…`, `xox…`,
+  `eyJ…`, `BEGIN … KEY`, …) over every tracked file except `aigate_lite.py`. Hits: `PROGRESS.md:419`
+  (private-key header, BLOCK), `tests/test_secrets_deps.py:49` (item 2) and `tests/test_secrets_deps.py:18`
+  (AWS's documented `…EXAMPLE` key; the tool skips it on purpose, original frozen test, left as is).
+- The 8 `secrets.generic` warns are fixtures in test files (frozen originals, or Phase 1 tests that may
+  change only for D2); they are warn-level, not literal key formats, and are left.
+Change: PROGRESS.md iteration 10 now says "OpenSSH private-key header fixture" instead of quoting it.
+Tests (tests/test_repo_hygiene.py, new, 3): tracked `*.md/*.toml/*.yml/*.yaml` copied into a temp repo,
+`check --all --offline` → no `secrets.hardcoded` (TP; failed before with `[('PROGRESS.md', 419)]`); a
+header built at run time and planted in a copied doc is found (control, so the TP cannot pass vacuously);
+the copied set includes PROGRESS/README/CHANGELOG/pyproject and `examples/` (edge).
+Verify: `python -m pytest -q` → `1 failed, 118 passed in 110.99s` (only the known Windows test);
+pyflakes clean. Bench not re-run: `aigate_lite.py` unchanged by this item.
