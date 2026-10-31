@@ -3696,9 +3696,40 @@ def report_github(res: Result) -> None:
 
 # --------------------------------------------------------------------------- running a check
 
-CHECKERS = [check_secrets, check_env_files, check_env_not_ignored, check_paths, check_deps, check_tests,
-            check_suppressions, check_code_lines, check_python, check_files, check_duplicates]
-SECRET_CHECKERS = (check_secrets, check_env_files)
+LANGUAGE_EXTS = {"python": PY_EXTS, "javascript": JS_EXTS, "code": CODE_EXTS}
+
+
+@dataclasses.dataclass(frozen=True)
+class Checker:
+    """One check. `languages` (keys of LANGUAGE_EXTS) names the files it reads; it is skipped when the change
+    has none of them (None: any file can matter). `run(ctx)` returns a list of Findings; an exception becomes
+    a gate.error finding, so a broken checker fails closed without hiding the others."""
+    name: str
+    languages: tuple | None
+    needs_network: bool
+    run: object
+
+    def applies(self, ctx) -> bool:
+        if self.languages is None:
+            return True
+        exts = set().union(*(LANGUAGE_EXTS[lang] for lang in self.languages))
+        return any(True for _ in ctx.code_changes(exts))
+
+
+CHECKERS = [
+    Checker("check_secrets", None, False, check_secrets),
+    Checker("check_env_files", None, False, check_env_files),
+    Checker("check_env_not_ignored", None, False, check_env_not_ignored),
+    Checker("check_paths", None, False, check_paths),
+    Checker("check_deps", None, True, check_deps),
+    Checker("check_tests", None, False, check_tests),
+    Checker("check_suppressions", ("code",), False, check_suppressions),
+    Checker("check_code_lines", ("code",), False, check_code_lines),
+    Checker("check_python", ("python",), False, check_python),
+    Checker("check_files", None, False, check_files),
+    Checker("check_duplicates", ("code",), False, check_duplicates),
+]
+SECRET_CHECKERS = ("check_secrets", "check_env_files")   # in ranges these run commit by commit instead
 
 
 def _commit_info(repo, shas) -> tuple:
@@ -3809,13 +3840,14 @@ def run_check(args, env) -> int:
             findings.append(make("gate.config_invalid", CONFIG_PATH, None, problem, key=problem))
         fail_action = "block" if cfg["gate"].get("fail_closed", True) else "warn"
         for checker in CHECKERS:
-            if head is not None and checker in SECRET_CHECKERS:
+            if head is not None and checker.name in SECRET_CHECKERS:
                 continue                               # scanned commit by commit below
             try:
-                findings += checker(ctx)
+                if checker.applies(ctx):
+                    findings += checker.run(ctx)
             except Exception as e:                     # one broken checker must not hide the others
-                findings.append(make("gate.error", "(gate)", None, f"{checker.__name__} failed: {type(e).__name__}: {e}",
-                                     action=fail_action, key=checker.__name__))
+                findings.append(make("gate.error", "(gate)", None, f"{checker.name} failed: {type(e).__name__}: {e}",
+                                     action=fail_action, key=checker.name))
         if head is not None:
             if len(commits) > 300:
                 notes.append(f"{len(commits)} commits: secrets scanned in the first 300 only")

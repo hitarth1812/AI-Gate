@@ -230,3 +230,38 @@ Perf gates: PASS
   Measured benefit is small: C warm 840.7 vs cold 872.7 ms (−3.7%); A warm vs cold is within noise
   (startup + compile + git dominate). The cache is kept because it is safe and cheap, not because it is
   a big win on this machine.
+
+## Iteration 5 — Checker plugin interface
+
+Explore:
+- `CHECKERS` was a list of functions; `run_check` used `checker.__name__` in `gate.error` messages and
+  `checker in SECRET_CHECKERS` to skip secrets in range mode (scanned per commit instead).
+- suppressions / code_lines / duplicates read only `ctx.code_changes(CODE_EXTS)`, python only
+  `code_changes(PY_EXTS)`; every other checker can react to any path (manifests, env files, test config).
+- Risk: a skip predicate that differs from the checker's own file filter would drop findings.
+
+Change: `Checker(name, languages, needs_network, run)` dataclass; `applies(ctx)` uses the *same*
+`ctx.code_changes(exts)` filter the checker uses, so skipping is exact. Names kept equal to the old
+function names (gate.error text unchanged). No build step; single file.
+
+Tests (tests/test_checkers.py, 5): interface shape (11 checkers, unique names, network flag); JS-only
+change never calls check_python (TP skip); .py change still flags eval (TN); deleted .py not parsed
+(edge); a plugin Checker appended to CHECKERS runs, and one that raises yields
+`check_boom failed: RuntimeError: kaput` as a blocking gate.error (fail closed). The 52 original tests are
+untouched.
+
+Verify:
+- `python -m pytest -q --ignore=tests/test_ci.py` → `4 failed, 79 passed` (the 4 known).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+python_noop        56.5      68.2                     -7.2% / +3.2%
+startup           211.1     223.8                     -32.4% / -34.3%
+A                 484.4     511.2          6      1   -91.6% / -91.8%
+B                 539.3     564.2          7     21   -90.3% / -90.1%
+C                 745.3     787.5          7    301   -87.1% / -87.8%
+D                 500.6     531.8          6      1   -90.8% / -90.6%
+A-cold            457.3     477.1
+C-cold            864.0     948.8
+Perf gates: PASS   (D / A = 1.03)
+```

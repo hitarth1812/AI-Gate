@@ -23,6 +23,8 @@
 - Fewer git processes: one `check-ignore` for all root `.env*` files (none when there are none), git dir
   from the first `rev-parse`, no `rev-parse <sha>^` per pushed commit, empty tree computed once on demand.
 
+- Checkers are `Checker(name, languages, needs_network, run)` objects; a checker whose languages are not
+  in the change is skipped (same findings). Extra checkers can be appended to `CHECKERS`.
 - `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
 
 ### Fixed
