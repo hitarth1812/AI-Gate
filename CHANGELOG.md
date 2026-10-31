@@ -20,6 +20,8 @@
 - `--format sarif` (SARIF 2.1.0) for code-scanning uploads.
 - `examples/github-actions.yml` rewritten (SHA-pinned actions, gate and config from the base branch,
   SARIF upload) and new `examples/gitlab-ci.yml`; README "Enforce it in CI".
+- `check --all`: scan every tracked file in HEAD as if newly added (finds secrets in the root commit,
+  which `--range` cannot); skips ignore paths and change-only rules; not used by hooks.
 
 ### Changed
 - Start-up: argparse, urllib, gzip, concurrent.futures, configparser, importlib.metadata, hashlib, shutil,

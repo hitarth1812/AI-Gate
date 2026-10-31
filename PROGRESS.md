@@ -380,3 +380,35 @@ for humans in staged mode the config is the working-tree `.aigate/lite.toml`, so
 runs on the first commit. `test_configured_command_runs` (original suite) asserts exactly that flow.
 Plan stopped at step 2: the item conflicts with non-negotiable 7 (see BLOCKED). No code changed; no commit
 of code. README still warns "Commands in `.aigate/lite.toml` run on your machine".
+
+## Iteration 9 — full-tree scan (`check --all`)
+
+Explore:
+- `--range A..B` uses base = merge-base = A, so A's own diff (and any root commit) is never scanned.
+- In range mode secret checkers are skipped in the main pass and run per commit; with no commits they
+  would never run, so a whole-tree mode must run them in the main pass.
+- Change-oriented rules would misfire on existing files: `scope.forbidden_path`, `scope.out_of_scope`,
+  `gate.config_changed` (check_paths) and `size.diff_budget`.
+
+Change: `check --all` (mutually exclusive with --staged/--range/--push): diff empty tree → HEAD, drop
+`[paths] ignore` matches up front, run every checker except `check_paths` in one pass (secrets included),
+no diff budget, no `[[commands]]`, text report without "commit stopped"/--no-verify lines. Exit 2 with
+"check --all needs at least one commit" on an empty repo. Hook scripts never use it.
+
+Tests (tests/test_full_scan.py, 4): secret in the **root commit** missed by `--range root..HEAD` and found
+by `--all`, never printed (TP); clean 7-file tree with a forbidden path and `diff_files = 2` passes with no
+budget/scope/config findings (TN); secret under `node_modules/` ignored and `my dir/ünï.py` with CRLF
+flagged (edge); empty repo → exit 2, `--all` with `--staged`/`--push` → exit 2, no hook contains `--all`.
+
+Verify:
+- `python -m pytest -q` → `1 failed, 101 passed in 136.16s` (only the BLOCKED test).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+startup           209.3     214.8                     -32.9% / -36.9%
+A                 470.4     484.4          6      1   -91.8% / -92.3%
+B                 524.6     539.6          7     21   -90.6% / -90.6%
+C                 746.5     763.1          7    301   -87.0% / -88.2%
+D                 498.4     521.7          6      1   -90.9% / -90.8%
+Perf gates: PASS   (D / A = 1.06)
+```

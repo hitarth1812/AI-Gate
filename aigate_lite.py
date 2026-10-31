@@ -914,8 +914,9 @@ def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=
 
 class Context:
     def __init__(self, repo, cfg, changes, *, mode, base, head, provenance, registry, merge=False, label="",
-                 results=None):
+                 results=None, full=False):
         self.repo, self.cfg, self.changes = repo, cfg, changes
+        self.full = full                       # `check --all`: every tracked file, as if newly added
         self.results = results or ResultCache(enabled=False)
         self.mode, self.base, self.head = mode, base, head
         self.provenance, self.registry, self.merge, self.label = provenance, registry, merge, label
@@ -3478,7 +3479,7 @@ def check_files(ctx) -> list:
             n_old = len(old.splitlines()) if old else 0
             if n_new > lim["file_lines"] and n_old <= lim["file_lines"]:
                 out.append(make("size.file_length", fc.path, None, f"{n_new} lines (limit {lim['file_lines']})", key=fc.path))
-    if not ctx.merge and (total_added > lim["diff_added_lines"] or files > lim["diff_files"]):
+    if not ctx.merge and not ctx.full and (total_added > lim["diff_added_lines"] or files > lim["diff_files"]):
         out.append(make("size.diff_budget", "(commit)", None,
                         f"+{total_added} lines across {files} files (limits: {lim['diff_added_lines']} lines, "
                         f"{lim['diff_files']} files)", key="budget"))
@@ -3660,10 +3661,10 @@ def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: 
         tally += f"{' · ' if tally else ''}{len(allowed)} allowed"
     mark = {"pass": "✔ PASS", "warn": "▲ WARN", "fix": "✖ FIX", "block": "✖ BLOCK"}[res.verdict]
     tail = " (risk score escalated it)" if res.escalated else ""
-    stopped = f" — {stage} stopped" if res.verdict in ("fix", "block") else ""
+    stopped = f" — {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
     print(f"{s(res.verdict)}{mark}{s('reset')}{tail} · risk {res.risk:g}/100{' · ' + tally if tally else ''}"
           f" · {st['seconds']:.1f}s{stopped}")
-    if res.verdict in ("fix", "block"):
+    if res.verdict in ("fix", "block") and stage != "scan":
         print(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows how to allow it."
               f" Bypass once (not recommended): git {'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
 
@@ -3759,7 +3760,8 @@ CHECKERS = [
     Checker("check_files", None, False, check_files),
     Checker("check_duplicates", ("code",), False, check_duplicates),
 ]
-SECRET_CHECKERS = ("check_secrets", "check_env_files")   # in ranges these run commit by commit instead
+SECRET_CHECKERS = ("check_secrets", "check_env_files")
+FULL_SCAN_SKIP = ("check_paths",)       # forbidden/scope/config-changed rules judge changes, not existing files   # in ranges these run commit by commit instead
 
 
 def _commit_info(repo, shas) -> tuple:
@@ -3778,6 +3780,11 @@ def _commit_info(repo, shas) -> tuple:
 
 def plan_runs(repo, args, env) -> list:
     """Each run: (label, base, head, commits)."""
+    if getattr(args, "all", False):
+        head = repo.commit("HEAD")
+        if not head:
+            raise GitError("check --all needs at least one commit")
+        return [("full tree", repo.empty_tree(), head, [])]
     if args.range:
         spec = args.range
         a, b = re.split(r"\.\.\.?", spec, 1) if ".." in spec else (spec, "HEAD")
@@ -3823,7 +3830,8 @@ def plan_runs(repo, args, env) -> list:
 def run_check(args, env) -> int:
     started = time.monotonic()
     repo = Repo.discover()
-    stage = "push" if (args.push or args.range) else "commit"
+    full = bool(getattr(args, "all", False))
+    stage = "scan" if full else "push" if (args.push or args.range) else "commit"
     pre = load_config(repo, "worktree", args.config)
     quick = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"])
     if env.get("AIGATE_SKIP") == "1" and quick[0] == "human":
@@ -3855,13 +3863,16 @@ def run_check(args, env) -> int:
         else:
             cfg = load_config(repo, head)
         changes = collect_changes(repo, base, head)
+        if full:
+            changes = [fc for fc in changes if not path_matches(fc.path, cfg["paths"]["ignore"])]
         if head is None and not changes:
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
-                      provenance=provenance, registry=registry, merge=merge, label=run_label, results=results)
+                      provenance=provenance, registry=registry, merge=merge, label=run_label, results=results,
+                      full=full)
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
         stats["files"] += len(counted)
         stats["added"] += sum(len(fc.added) for fc in counted)
@@ -3870,8 +3881,10 @@ def run_check(args, env) -> int:
             findings.append(make("gate.config_invalid", CONFIG_PATH, None, problem, key=problem))
         fail_action = "block" if cfg["gate"].get("fail_closed", True) else "warn"
         for checker in CHECKERS:
-            if head is not None and checker.name in SECRET_CHECKERS:
+            if head is not None and not full and checker.name in SECRET_CHECKERS:
                 continue                               # scanned commit by commit below
+            if full and checker.name in FULL_SCAN_SKIP:
+                continue
             try:
                 if checker.applies(ctx):
                     findings += checker.run(ctx)
@@ -3890,7 +3903,7 @@ def run_check(args, env) -> int:
                 except Exception as e:
                     findings.append(make("gate.error", "(gate)", None, f"secret scan of {sha[:8]} failed: {e}",
                                          action=fail_action, key=sha))
-        if not args.no_commands:
+        if not args.no_commands and not full:
             paths = [fc.path for fc in changes if not fc.deleted]
             findings += run_commands(ctx, stage, paths)
         if merge:
@@ -4172,6 +4185,8 @@ def build_parser():
     target.add_argument("--staged", action="store_true", help="check what `git commit` would record (default)")
     target.add_argument("--range", metavar="BASE..HEAD", help="check commits in a range, e.g. origin/main..HEAD")
     target.add_argument("--push", action="store_true", help="pre-push hook mode: read refs from stdin")
+    target.add_argument("--all", action="store_true",
+                        help="scan every tracked file in HEAD as if newly added (an audit; not for hooks)")
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
     c.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
