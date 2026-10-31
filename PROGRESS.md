@@ -316,3 +316,47 @@ C                 732.1     769.8          7    301   -87.3% / -88.1%
 D                 502.8     517.4          6      1   -90.8% / -90.9%
 Perf gates: PASS   (D / A = 1.06)
 ```
+
+## Iteration 7 ⚠ — Windows hook compatibility
+
+Explore:
+- Vendored hook used `command -v python3 || command -v python`: on Windows `python3` resolves to the
+  Microsoft Store stub (exists, prints an install hint, exit 9009) → baseline failure of
+  `test_vendored_install_and_init`. On this box plain `python` is also 3.10 (too old).
+- Non-vendored hook double-quoted absolute paths: `$`, backticks or `"` in a path would break it.
+- `cmd_install --force` called `os.replace` on the hook while it was open → `PermissionError [WinError 32]`.
+- Text report crashes with `UnicodeEncodeError` on a cp1252 pipe (`→`, `·`).
+- pre-push refs already parse CRLF (`str.split()`); hook files are written with `newline="\n"`.
+
+Change: hook probes `python3`, `python`, `py -3` in that order (each must run 3.11+, stdin closed),
+stops with "no Python 3.11+ found …" if none; absolute paths single-quoted (`_sh_quote`); install /
+uninstall close the hook file before rename/remove; stdout/stderr get `errors="replace"` when not UTF-8.
+
+Tests (tests/test_hooks.py, 9): rendered order and probe; paths with spaces and `'` quoted; under `sh`
+with a fake PATH (every candidate stubbed, git+sh dirs only): broken `python3` stub skipped and a secret
+blocked (TP), `py -3` fallback passes clean code (TN), no interpreter → message + exit 1, pre-push with CRLF
+refs in a repo path with a space (edge); install --force keeps the old hook (Windows guard); text report
+on cp1252 pipe; JSON unchanged on cp1252.
+
+Review (independent subagent): no blocking defects; 4 points.
+1. MEDIUM test PATH could leak a real python on Linux → **fixed** (all candidates stubbed).
+2. LOW vacuous order assertion; install test only meaningful on Windows → **fixed** / **commented**.
+3. LOW probe inherits stdin → **fixed** (`</dev/null`). Cost: one extra interpreter start per hook run
+   (more on Windows when stubs are tried first).
+4. LOW `--format github` on a cp1252 pipe prints `?` for unencodable path characters (was a crash) →
+   **documented** in CHANGELOG.
+
+Verify:
+- `python -m pytest -q` → `1 failed, 97 passed in 132.47s` — **3 of the 4 baseline Windows failures now pass**;
+  only the BLOCKED test-side TOML bug remains. Re-run of hooks+gate after review fixes: `1 failed, 25 passed`.
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+startup           214.1     231.2                     -31.4% / -32.1%
+A                 478.1     517.2          6      1   -91.7% / -91.7%
+B                 546.4     597.3          7     21   -90.2% / -89.6%
+C                 740.3     793.5          7    301   -87.2% / -87.7%
+D                 512.6     546.9          6      1   -90.6% / -90.3%
+Perf gates: PASS   (D / A = 1.07)
+```
+  (The bench calls the script directly, so the hook's interpreter probe is not in these numbers.)

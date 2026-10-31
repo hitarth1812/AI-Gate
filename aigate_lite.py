@@ -3935,19 +3935,34 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     else:
         lines.append(f'if [ -x {local} ]; then {local} "$@" || exit $?; fi')
     if vendored:
+        # The first interpreter that really runs 3.11+: on Windows `python3` is often the Microsoft Store
+        # stub, which exists on PATH but only prints an install hint. PY stays unquoted below so that
+        # "py -3" splits into the launcher and its flag; every candidate is a fixed word list.
         lines += ['ROOT="$(git rev-parse --show-toplevel)" || exit 1',
-                  'PY="$(command -v python3 || command -v python)" || { echo "aigate-lite: python3 not found;'
+                  'PY=""',
+                  "for c in python3 python 'py -3'; do",
+                  "  if $c -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' </dev/null >/dev/null 2>&1; then"
+                  ' PY="$c"; break; fi',
+                  "done",
+                  '[ -n "$PY" ] || { echo "aigate-lite: no Python 3.11+ found (tried python3, python, py -3);'
                   ' stopping (bypass once with --no-verify)" >&2; exit 1; }',
                   'SCRIPT="$ROOT/.aigate/aigate_lite.py"']
+        run = '$PY "$SCRIPT"'
     else:
-        lines += [f'PY="{py.replace(chr(92), "/")}"', f'SCRIPT="{script.replace(chr(92), "/")}"']
+        lines += [f"PY={_sh_quote(py.replace(chr(92), '/'))}", f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}"]
+        run = '"$PY" "$SCRIPT"'
     lines.append('[ -f "$SCRIPT" ] || { echo "aigate-lite: $SCRIPT is missing; reinstall the hook'
                  ' (or bypass once with --no-verify)" >&2; exit 1; }')
     if kind == "pre-push":
-        lines.append('printf "%s\\n" "$REFS" | "$PY" "$SCRIPT" check --push --remote "$1"')
+        lines.append(f'printf "%s\\n" "$REFS" | {run} check --push --remote "$1"')
     else:
-        lines.append('exec "$PY" "$SCRIPT" check --staged')
+        lines.append(f'exec {run} check --staged')
     return "\n".join(lines) + "\n"
+
+
+def _sh_quote(value: str) -> str:
+    """Single-quote for POSIX sh: spaces, $, backticks and quotes stay literal."""
+    return "'" + value.replace("'", "'\\''") + "'"
 
 
 PRE_COMMIT_SNIPPET = """  - repo: local
@@ -4008,8 +4023,9 @@ def cmd_install(args) -> int:
         path = os.path.join(hooks_dir, kind)
         if os.path.exists(path):
             with open(path, encoding="utf-8", errors="replace") as fh:
-                if HOOK_MARK not in fh.read():
-                    os.replace(path, path + ".local")
+                ours = HOOK_MARK in fh.read()
+            if not ours:                               # renamed after closing: Windows refuses open files
+                os.replace(path, path + ".local")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(hook_script(kind, args.vendor, sys.executable, script))
         os.chmod(path, 0o755)
@@ -4027,7 +4043,7 @@ def cmd_uninstall(_args) -> int:
         if os.path.exists(path):
             with open(path, encoding="utf-8", errors="replace") as fh:
                 ours = HOOK_MARK in fh.read()
-            if ours:
+            if ours:                                   # (file closed above, so Windows allows this)
                 os.remove(path)
                 if os.path.exists(path + ".local"):
                     os.replace(path + ".local", path)
@@ -4182,6 +4198,12 @@ def build_parser():
 
 
 def main(argv=None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        # A pipe on Windows uses the ANSI code page (cp1252), which cannot encode the → and · the text
+        # report prints; replace those characters instead of crashing.
+        if (getattr(stream, "encoding", None) or "").lower().replace("-", "") not in ("utf8", "utf8sig") \
+                and hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
         argv = ["check", *argv]

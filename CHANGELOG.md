@@ -7,6 +7,10 @@
 - New default: a per-file result cache (`results-v2.json` + `results.key`, both 0600, in the cache dir)
   remembers which files the pure checks found clean. `--no-cache` now turns off this cache as well as
   the registry cache.
+- Vendored hooks pick the first interpreter that really runs Python 3.11+ among `python3`, `python`,
+  `py -3` (one extra interpreter start per hook run), and stop with a message if none does.
+- On a non-UTF-8 stdout (e.g. a cp1252 pipe on Windows) unencodable characters in text/github output are
+  printed as `?` instead of crashing.
 
 ### Added
 - `AIGATE_PROFILE=1` prints `aigate-profile: {"blobs_read": n, "git_calls": n}` to stderr on exit.
@@ -32,6 +36,10 @@
 - `bench/bench.py` also reports `--no-cache` timings for scenarios A and C.
 
 ### Fixed
+- Windows: `install --force` / `uninstall` no longer fail with WinError 32 (file renamed while open).
+- Windows: vendored hooks no longer run the Microsoft Store `python3` stub.
+- Windows: the text report no longer crashes with UnicodeEncodeError on a cp1252 pipe.
+- Non-vendored hooks single-quote absolute paths (spaces, quotes, `$`).
 
 ## 0.1.0
 - Initial release: 65 rules, staged / range / push checks, JSON schema 1.
