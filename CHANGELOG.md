@@ -5,7 +5,8 @@
 ### Behaviour changes
 <!-- Every changed default or text-output format goes here. -->
 No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one rule added
-(`commands.untrusted`, 66 rules in total). New: `--format sarif`, `check --all`.
+(`commands.untrusted`, 66 rules in total) and one config key (`[gate] cache`). New: `--format sarif`,
+`check --all`, `--cache`.
 - **`[[commands]]` from a repository's config no longer run until approved** with `aigate-lite trust`
   (new subcommand; `--rev` approves a committed config). Until then each check adds one finding of the new
   rule `commands.untrusted` (warn, low severity; `[rules]` overrides do not apply to it, and the config
@@ -13,9 +14,11 @@ No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one ru
   given with `--config` on the command line is trusted as before.
 - `{files}` in commands: on Windows paths are double-quoted for cmd.exe and paths containing `%` or `"` are
   left out; paths starting with `-` are passed as `./-…` on every OS.
-- New default: a per-file result cache (`results-v2.json` + `results.key`, both 0600, in the cache dir)
-  remembers which files the pure checks found clean. `--no-cache` now turns off this cache as well as
-  the registry cache.
+- New, **off by default**: a per-file result cache (`results-v2.json` + `results.key`, both 0600, in the
+  cache dir) that remembers which files the pure checks found clean. Turn it on with `--cache` or
+  `[gate] cache = true` (a non-boolean value is reported as `gate.config_invalid` and leaves it off).
+  `--no-cache` wins over both and, as before, also turns off the registry lookup cache. (An earlier Phase 1
+  build had it on by default; it was made opt-in because the measured gain is small.)
 - `examples/github-actions.yml` now runs the gate and its config from the base branch, pinned by SHA,
   and uploads SARIF; copies of the old example keep working but are not updated.
 - Vendored hooks pick the first interpreter that really runs Python 3.11+ among `python3`, `python`,

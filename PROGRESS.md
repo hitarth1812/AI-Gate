@@ -628,3 +628,51 @@ Verify:
   (`PYTHONUTF8=1`, the Linux-like case) → `1 failed, 124 passed in 116.83s`. The failure both times is
   the known `test_configured_command_runs`. pyflakes clean on conftest/test_harness. Bench not re-run
   (`aigate_lite.py` unchanged).
+
+## Cleanup 4 ⚠ — result cache opt-in (D2)
+
+Explore:
+- `--no-cache` fed both `Registry(use_cache=…)` (registry lookups) and `ResultCache(enabled=…)`.
+- `DEFAULT_CONFIG["gate"]` drives the unknown-key check, so the new key has to be declared there.
+- tests/test_cache.py runs everything through one helper, `profiled()`, with no flag (relied on the old
+  default). Nothing builds a `check` Namespace by hand, so a new argparse flag is safe.
+Change: `--cache` flag and `[gate] cache = true|false` (default false; a non-boolean value →
+`gate.config_invalid` "gate.cache must be true or false" and stays off). Result cache on =
+(`--cache` or `cache = true`) and not `--no-cache`. `--no-cache` still also turns off the registry lookup
+cache, whose default is unchanged. `ResultCache` itself is untouched, so clean-only entries, HMAC, 0600
+files, 2 MB / 5,000-entry / 14-day caps all stay as they were. `init` template, examples/lite.toml, README
+(new "Result cache" paragraph) and CHANGELOG "Behaviour changes" updated. bench/bench.py: the `-cold`
+(`--no-cache`) rows stay, and new `-cache` rows (`--cache`, filled by a first run) are added for A and C.
+Edit to a Phase 1 test (allowed by D2; the only one): tests/test_cache.py `profiled()` adds `--cache`
+unless the call passes `--no-cache`. No assertion changed, and `test_no_cache_flag_neither_reads_nor_writes`
+runs exactly as before.
+Tests (tests/test_cache_optin.py, new, 6): off by default — two runs, no hits, no cache file (TN);
+`--cache` → hits (TP); `cache = true` → hits, no config problem (TP); `cache = false` + `--cache` → hits
+(flag wins); `--cache --no-cache` with `cache = true` → off (edge); `cache = "yes"` → one config problem,
+off (edge). Before the change: 6 failed (cache on by default, `--cache` unrecognized, `gate.cache`
+reported as an unknown key).
+Verify:
+- Windows `python -m pytest -q` → `1 failed, 130 passed in 122.21s` (the known test). Linux (WSL) →
+  `131 passed in 28.98s`. pyflakes clean on aigate_lite.py and bench/bench.py.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        36.5      40.3                     -40.1% / -39.0%
+startup           163.9     169.5                     -47.5% / -50.2%
+A                 320.9     328.7          6      1   -94.4% / -94.8%
+B                 387.7     399.1          7     21   -93.0% / -93.0%
+C                 716.3     788.8          7    301   -87.6% / -87.8%
+D                 346.7     357.7          6      1   -93.6% / -93.7%
+A-cold            324.5     333.8
+C-cold            718.0     799.2
+A-cache           333.5     348.0
+C-cache           570.4     591.4
+Perf gates: PASS   (D / A = 1.08)
+```
+- Both modes, same run: C (300 files) `--cache` 570.4 ms vs off 716.3 ms (−20 %); A (1 file) `--cache`
+  333.5 vs off 320.9 ms (+4 %, loading and checking the signed file costs more than it saves). That gain on
+  C is larger than the −3.7 % iteration 4 measured, which was the reason for D2.
+- ⚠ **Conflict with the final checklist:** vs the pre-cleanup run (cache on by default), C's default is
+  now +30.7 % (548.1 → 716.3 ms) and B +7.9 %. This follows directly from D2 (the default changed); like for
+  like, `C-cache` 570.4 vs pre-cleanup C 548.1 is +4 %. Left as decided, flagged for the user.
+- Review: optional for this item; not run (ResultCache unchanged, only its enable condition).

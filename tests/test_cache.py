@@ -11,7 +11,8 @@ CLEAN = "import json\n\n\ndef dump(x):\n    return json.dumps(x)\n"
 
 def profiled(repo, *args, env=None, script=None):
     import subprocess
-    cmd = [sys.executable, str(script or SCRIPT), "check", "--format", "json", *args]
+    cmd = [sys.executable, str(script or SCRIPT), "check", "--format", "json",
+           *(() if "--no-cache" in args else ("--cache",)), *args]          # the result cache is opt-in
     proc = subprocess.run(cmd, cwd=repo.path, env={**repo.env, "AIGATE_PROFILE": "1", **(env or {})},
                           text=True, capture_output=True)
     assert proc.returncode in (0, 1), proc.stderr

@@ -6,6 +6,7 @@ version = 1
 fail_closed = true        # if a check crashes, stop the commit instead of passing it
 offline = "warn"          # registry unreachable: warn | block | skip
 max_seconds = 20          # time budget for registry lookups
+cache = false             # remember files the per-file checks found clean (same as --cache); off by default
 
 [rules]
 # "suppress.type" = "warn"

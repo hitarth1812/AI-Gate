@@ -693,7 +693,7 @@ def is_lockfile(path: str) -> bool:
 # --------------------------------------------------------------------------- configuration
 
 DEFAULT_CONFIG = {
-    "gate": {"fail_closed": True, "offline": "warn", "max_seconds": 20},
+    "gate": {"fail_closed": True, "offline": "warn", "max_seconds": 20, "cache": False},
     "rules": {},
     "paths": {
         "ignore": ["**/node_modules/**", "**/vendor/**", "**/third_party/**", "dist/**", "build/**",
@@ -820,6 +820,9 @@ def validate_config(cfg: dict, problems: list) -> None:
     if cfg["gate"].get("offline") not in ("warn", "block", "skip"):
         problems.append("gate.offline must be warn, block or skip")
         cfg["gate"]["offline"] = "warn"
+    if not isinstance(cfg["gate"].get("cache", False), bool):
+        problems.append("gate.cache must be true or false")
+        cfg["gate"]["cache"] = False
     if cfg["provenance"].get("default") not in ("human", "agent"):
         problems.append("provenance.default must be human or agent")
         cfg["provenance"]["default"] = "human"
@@ -3893,7 +3896,8 @@ def run_check(args, env) -> int:
     registry = Registry(offline=args.offline or env.get("AIGATE_OFFLINE") == "1",
                         budget=float(pre["gate"].get("max_seconds", 20)), use_cache=not args.no_cache,
                         fixture=env.get("AIGATE_REGISTRY_FIXTURE"))
-    results = ResultCache(default_cache_dir(), enabled=not args.no_cache)
+    results = ResultCache(default_cache_dir(),
+                          enabled=(args.cache or pre["gate"].get("cache") is True) and not args.no_cache)
     findings, notes, stats, label = [], [], Counter(), runs[0][0] if len(runs) == 1 else f"push ({len(runs)} refs)"
     provenance, cfg = quick, pre
     for run_label, base, head, commits in runs:
@@ -4119,6 +4123,7 @@ version = 1
 fail_closed = true        # if a check crashes, stop the commit instead of passing it
 offline = "warn"          # registry unreachable: warn | block | skip
 max_seconds = 20          # time budget for registry lookups
+cache = false             # remember files the per-file checks found clean (same as --cache)
 
 [rules]
 # "suppress.type" = "warn"
@@ -4284,6 +4289,8 @@ def build_parser():
     c.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
     c.add_argument("--offline", action="store_true", help="skip registry lookups")
+    c.add_argument("--cache", action="store_true",
+                   help="use the result cache (remembers files found clean; off unless [gate] cache = true)")
     c.add_argument("--no-cache", action="store_true", help="ignore the local lookup and result caches")
     c.add_argument("--no-commands", action="store_true", help="skip [[commands]] from the config")
     c.add_argument("--config", help="use this config file instead of .aigate/lite.toml")

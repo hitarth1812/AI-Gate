@@ -31,7 +31,10 @@ ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
 FIXTURE_VERSION = "1"            # bump when generated content changes; forces a rebuild
 SCENARIOS = ("A", "B", "C", "D")
-COLD = ("A", "C")                # also measured with --no-cache (result and lookup caches off), not gated
+COLD = ("A", "C")                # also measured with each EXTRA flag below, not gated
+EXTRA = {"cold": "--no-cache",   # result and lookup caches off
+         "cache": "--cache"}     # result cache on (it is off by default); the first run fills it
+EXTRA_ROWS = tuple(f"{s}-{tag}" for tag in EXTRA for s in COLD)
 D_FILES = 50_000
 STRIP = ("CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "AIGATE_AGENT", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME",
          "VIRTUAL_ENV", "CONDA_PREFIX", "PRE_COMMIT_FROM_REF", "PRE_COMMIT_TO_REF")
@@ -223,12 +226,13 @@ def measure(script, runs, py) -> dict:
         _, prof = run_once(cmd, repos[s], {**env, "AIGATE_PROFILE": "1"})
         times = [run_once(cmd, repos[s], env)[0] for _ in range(runs)]
         result[s] = {**summarize(times), "verdict": verdict, "counters": profile_counters(prof.stderr)}
-    for s in COLD:
-        cmd = [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json", "--no-cache"]
-        if run_once(cmd, repos[s], env)[1].returncode not in (0, 1):
-            continue
-        times = [run_once(cmd, repos[s], env)[0] for _ in range(runs)]
-        result[f"{s}-cold"] = summarize(times)
+    for tag, flag in EXTRA.items():
+        for s in COLD:
+            cmd = [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json", flag]
+            if run_once(cmd, repos[s], env)[1].returncode not in (0, 1):   # e.g. an older script without the flag
+                continue
+            times = [run_once(cmd, repos[s], env)[0] for _ in range(runs)]
+            result[f"{s}-{tag}"] = summarize(times)
     return result
 
 
@@ -237,7 +241,7 @@ def measure(script, runs, py) -> dict:
 def table(res, base=None) -> str:
     rows = [f"{'measure':<12} {'median ms':>10} {'p95 ms':>9}  {'git calls':>9} {'blobs':>6}"
             + ("   vs baseline (median / p95)" if base else "")]
-    for key in ("python_noop", "startup", *SCENARIOS, *(f"{s}-cold" for s in COLD)):
+    for key in ("python_noop", "startup", *SCENARIOS, *EXTRA_ROWS):
         if key not in res:
             continue
         r = res[key]
@@ -292,12 +296,13 @@ def markdown(res, base, cmd) -> str:
            f"Measured {m['date']} on {m['platform']}, Python {m['python']}, {m['runs']} runs per row, "
            f"warm OS cache, `--offline`. Command:", "", f"    {cmd}", "",
            "Scenarios: A = 1 file / 20 lines; B = 20 files / 400 lines (Python + JS); C = 300-file change; "
-           "D = the A change in a 50,000-file repo. `-cold` rows add `--no-cache`. "
+           "D = the A change in a 50,000-file repo. A-D run with the defaults (result cache off). `-cold` rows add "
+           "`--no-cache`; `-cache` rows add `--cache` (result cache on, filled by a first run). "
            "`python -c pass` is the interpreter's own start-up on the same machine.", "",
            "| measure | median ms | p95 ms | git calls | blobs read |"
            + (" baseline median ms | change |" if base else ""),
            "|---|---:|---:|---:|---:|" + ("---:|---:|" if base else "")]
-    for key in ("python_noop", "startup", *SCENARIOS, *(f"{s}-cold" for s in COLD)):
+    for key in ("python_noop", "startup", *SCENARIOS, *EXTRA_ROWS):
         if key not in res:
             continue
         r, c = res[key], res[key].get("counters") or {}

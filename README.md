@@ -123,6 +123,11 @@ expires = 2027-06-30
 To allow a fix- or warn-level finding for one commit: `AIGATE_ALLOW=tests.deleted git commit ...`.
 Blocking findings can only be allowed through `[[allow]]`.
 
+Result cache (off by default): `--cache` or `[gate] cache = true` remembers which files the per-file checks
+found clean, so an unchanged file is not checked again. Only clean verdicts are stored (no finding text),
+signed, in two 0600 files in your user cache dir. `--no-cache` turns it off even when the config turns it
+on, and also skips the registry lookup cache. On the benchmark machine it saves little; see docs/PERF.md.
+
 ## Output and exit codes
 
 - `--format text` (default), `json` (stable schema), `github` (annotations for Actions) or `sarif`
