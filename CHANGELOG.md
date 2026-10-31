@@ -25,6 +25,11 @@ No existing rule IDs, config keys, JSON schema (1) or exit codes changed; one ru
   `py -3` (one extra interpreter start per hook run), and stop with a message if none does.
 - On a non-UTF-8 stdout (e.g. a cp1252 pipe on Windows) unencodable characters in text/github output are
   printed as `?` instead of crashing.
+- Hooks installed on Linux/macOS start the gate through a small loader (`python -P -c …`) that keeps one
+  bytecode file of the gate in `<cache dir>/pycache` (directory 0700, owned by you; reused only when it
+  matches the current source's hash) instead of recompiling it on every run. If the directory cannot be
+  used it falls back silently to compiling, as before. Hooks installed on Windows are unchanged.
+  Re-run `aigate-lite install` to get the faster hooks.
 
 ### Added
 - `AIGATE_PROFILE=1` prints `aigate-profile: {"blobs_read": n, "git_calls": n}` to stderr on exit.

@@ -3988,6 +3988,112 @@ def run_check(args, env) -> int:
 
 HOOK_MARK = "# aigate-lite managed hook"
 
+# POSIX hooks start the gate through this loader (`python -P -c HOOK_LOADER script args...`) so its bytecode
+# is reused instead of recompiling ~200 KB on every run. It keeps one .pyc per script path for the gate itself
+# (stdlib imports are untouched) in <cache dir>/pycache. That directory is opened once without following
+# symlinks and must be owned by this user; if it was not 0700 it is tightened and nothing in it is trusted on
+# that run. A .pyc is used only when it is a regular file owned by this user, not group/other-writable, not
+# hard-linked, opened relative to that directory, and its header carries this interpreter's magic number and
+# the hash of the current source (any edit is noticed, whatever its size or mtime). In every other case
+# (relative or unusable cache dir, any error) and on Windows (where ownership and ACLs cannot be checked
+# without extra code) the source is compiled and run as before. The import system is never used for the
+# gate, so a __pycache__ next to a vendored script is never read. -P keeps the repository root off sys.path;
+# the script's real directory goes first, as with `python script.py`.
+HOOK_LOADER = """\
+import importlib.util, marshal, os, stat, sys
+script = os.path.abspath(sys.argv[1])
+sys.argv = [script] + sys.argv[2:]
+sys.path.insert(0, os.path.dirname(os.path.realpath(script)))
+CODE = type(compile("", "", "exec"))
+MAX_AGE = 30 * 86400
+
+
+def pinned_dir(path):
+    try:
+        os.makedirs(path, mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
+        return None, False
+    try:
+        st = os.fstat(fd)
+        if st.st_uid == os.getuid():
+            if not st.st_mode & 0o077:
+                return fd, True
+            os.fchmod(fd, 0o700)                    # ours but loose: tighten it, trust nothing in it this run
+            return fd, False
+    except OSError:
+        pass
+    os.close(fd)
+    return None, False
+
+
+def read_pyc(dfd, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
+    with os.fdopen(fd, "rb") as fh:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o022 or st.st_nlink != 1:
+            return b""
+        return fh.read()
+
+
+def write_pyc(dfd, name, data):
+    tmp = f"{name}.{os.getpid()}.tmp"
+    try:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        now = os.stat(name, dir_fd=dfd).st_mtime
+        for entry in os.listdir(dfd):              # a new .pyc is rare: drop ones unused for MAX_AGE
+            if entry != name and entry.startswith("aigate_lite.") and entry.endswith((".pyc", ".tmp")):
+                try:
+                    if now - os.stat(entry, dir_fd=dfd, follow_symlinks=False).st_mtime > MAX_AGE:
+                        os.unlink(entry, dir_fd=dfd)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(tmp, dir_fd=dfd)
+        except OSError:
+            pass
+
+
+with open(script, "rb") as fh:
+    source = fh.read()
+header = importlib.util.MAGIC_NUMBER + b"\\x03\\x00\\x00\\x00" + importlib.util.source_hash(source)
+xdg = os.environ.get("XDG_CACHE_HOME", "")
+base = xdg if os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".cache")
+cache = os.environ.get("AIGATE_CACHE_DIR") or os.path.join(base, "aigate-lite")
+dfd, trusted, code = None, False, None
+if os.name != "nt" and os.path.isabs(cache) and os.listdir in os.supports_fd \\
+        and {os.open, os.rename, os.unlink, os.stat} <= os.supports_dir_fd:
+    dfd, trusted = pinned_dir(os.path.join(cache, "pycache"))
+name = "aigate_lite.{}.{}.opt{}.pyc".format(importlib.util.source_hash(script.encode("utf-8", "surrogateescape")).hex(),
+                                            sys.implementation.cache_tag, sys.flags.optimize)
+if trusted:
+    try:
+        data = read_pyc(dfd, name)
+        if data[:16] == header:
+            code = marshal.loads(data[16:])
+    except (OSError, ValueError, EOFError, TypeError):
+        code = None
+    if not isinstance(code, CODE):
+        code = None
+if code is None:
+    code = compile(source, script, "exec")
+    if dfd is not None:
+        write_pyc(dfd, name, header + marshal.dumps(code))
+if dfd is not None:
+    os.close(dfd)
+module = type(sys)("aigate_lite")
+module.__file__ = script
+sys.modules["aigate_lite"] = module
+exec(code, module.__dict__)
+sys.exit(module.main())
+"""
+
 
 def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     local = f'"$HOOK_DIR/{kind}.local"'
@@ -4015,6 +4121,9 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     else:
         lines += [f"PY={_sh_quote(py.replace(chr(92), '/'))}", f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}"]
         run = '"$PY" "$SCRIPT"'
+    if os.name != "nt":                                # see HOOK_LOADER; Windows hooks run the script directly
+        lines.append(f"LOADER={_sh_quote(HOOK_LOADER)}")
+        run = run.replace('"$SCRIPT"', '-P -c "$LOADER" "$SCRIPT"')
     lines.append('[ -f "$SCRIPT" ] || { echo "aigate-lite: $SCRIPT is missing; reinstall the hook'
                  ' (or bypass once with --no-verify)" >&2; exit 1; }')
     if kind == "pre-push":

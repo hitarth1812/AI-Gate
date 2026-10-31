@@ -207,6 +207,17 @@ def summarize(samples) -> dict:
     return {"median_ms": round(statistics.median(s), 1), "p95_ms": round(p95, 1), "runs": len(s)}
 
 
+def hook_loader(script):
+    """The script's HOOK_LOADER source (read with ast, not run), or None for builds without one."""
+    import ast
+    with open(script, encoding="utf-8") as fh:
+        tree = ast.parse(fh.read())
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and [getattr(t, "id", None) for t in node.targets] == ["HOOK_LOADER"]:
+            return ast.literal_eval(node.value)
+    return None
+
+
 def measure(script, runs, py) -> dict:
     repos = build_fixtures()
     env = base_env()
@@ -219,6 +230,11 @@ def measure(script, runs, py) -> dict:
     ver = [py, script, "--version"]
     run_once(ver, ROOT, env)
     result["startup"] = summarize([run_once(ver, ROOT, env)[0] for _ in range(runs)])
+    loader = hook_loader(script)
+    if loader and os.name != "nt":                 # what a POSIX hook runs; Windows hooks run the script directly
+        hook = [py, "-P", "-c", loader, script, "--version"]
+        run_once(hook, ROOT, env)                                      # fills the bytecode cache
+        result["startup-hook"] = summarize([run_once(hook, ROOT, env)[0] for _ in range(runs)])
     for s in SCENARIOS:
         cmd = [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json"]
         _, warm = run_once(cmd, repos[s], env)                         # warm the OS and registry caches
@@ -241,7 +257,7 @@ def measure(script, runs, py) -> dict:
 def table(res, base=None) -> str:
     rows = [f"{'measure':<12} {'median ms':>10} {'p95 ms':>9}  {'git calls':>9} {'blobs':>6}"
             + ("   vs baseline (median / p95)" if base else "")]
-    for key in ("python_noop", "startup", *SCENARIOS, *EXTRA_ROWS):
+    for key in ("python_noop", "startup", "startup-hook", *SCENARIOS, *EXTRA_ROWS):
         if key not in res:
             continue
         r = res[key]
@@ -298,15 +314,18 @@ def markdown(res, base, cmd) -> str:
            "Scenarios: A = 1 file / 20 lines; B = 20 files / 400 lines (Python + JS); C = 300-file change; "
            "D = the A change in a 50,000-file repo. A-D run with the defaults (result cache off). `-cold` rows add "
            "`--no-cache`; `-cache` rows add `--cache` (result cache on, filled by a first run). "
+           "`startup-hook` is `--version` started the way POSIX hooks start the gate (reusing its bytecode); "
+           "it is not measured on Windows, where hooks run the script directly. "
            "`python -c pass` is the interpreter's own start-up on the same machine.", "",
            "| measure | median ms | p95 ms | git calls | blobs read |"
            + (" baseline median ms | change |" if base else ""),
            "|---|---:|---:|---:|---:|" + ("---:|---:|" if base else "")]
-    for key in ("python_noop", "startup", *SCENARIOS, *EXTRA_ROWS):
+    for key in ("python_noop", "startup", "startup-hook", *SCENARIOS, *EXTRA_ROWS):
         if key not in res:
             continue
         r, c = res[key], res[key].get("counters") or {}
-        name = {"python_noop": "`python -c pass`", "startup": "`--version`"}.get(key, key)
+        name = {"python_noop": "`python -c pass`", "startup": "`--version`",
+                "startup-hook": "`--version` via hook loader"}.get(key, key)
         row = f"| {name} | {r['median_ms']:.1f} | {r['p95_ms']:.1f} | {c.get('git_calls', '')} | {c.get('blobs_read', '')} |"
         if base:
             b = base.get(key)

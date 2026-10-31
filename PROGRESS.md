@@ -676,3 +676,89 @@ Perf gates: PASS   (D / A = 1.08)
   now +30.7 % (548.1 → 716.3 ms) and B +7.9 %. This follows directly from D2 (the default changed); like for
   like, `C-cache` 570.4 vs pre-cleanup C 548.1 is +4 %. Left as decided, flagged for the user.
 - Review: optional for this item; not run (ResultCache unchanged, only its enable condition).
+
+## Cleanup 6 ⚠ — start-up compile cost (D3): done on POSIX, BLOCKED on Windows
+
+(Done before item 5 on purpose: item 5 regenerates PERF.md "from the FINAL code".)
+
+Explore:
+- Python never caches bytecode for the `__main__` script, so `$PY "$SCRIPT" check` recompiles the ~215 KB
+  file every hook run; the script cannot fix this itself (it is compiled before any of it runs). The hook has
+  to start a small loader instead.
+- Measured first (probe, 30 runs, median): Windows `--version` 164.3 → 113.5 ms with cached bytecode;
+  Linux (WSL) 113.7 → 63.7 ms.
+- `python -c` puts the cwd (the repo root, for hooks) on `sys.path[0]`, so a repo's `json.py` would shadow
+  the stdlib: the loader must run with `-P` (3.11+, which the hook already requires).
+- `sys.pycache_prefix` (the ROADMAP idea) also caches every stdlib module the gate imports (46 .pyc in the
+  first try) and goes through the import system; replaced by the loader managing one .pyc itself.
+- Timestamp .pyc compare whole-second mtime + size, so a same-size edit in the same second is missed; the
+  loader keys on `importlib.util.source_hash` of the current source instead.
+Change: `HOOK_LOADER` (Python source constant) in aigate_lite.py; `hook_script` adds `LOADER='…'` and runs
+`$PY -P -c "$LOADER" "$SCRIPT" check …` on POSIX. Hooks generated on Windows are byte-for-byte unchanged.
+The loader puts `dirname(realpath(script))` first on `sys.path` (as `python script.py` does). It keeps
+`aigate_lite.<path-hash>.<cache_tag>.opt<N>.pyc` in `<cache dir>/pycache`, and only when the cache dir path is
+absolute. The pycache dir is opened once with `O_DIRECTORY|O_NOFOLLOW` and must be owned by this uid; if
+it is not 0700 it is `fchmod`-ed and nothing in it is trusted on that run. The parent is never chmod-ed.
+The .pyc is opened relative to that fd with `O_NOFOLLOW` and used only if it is a regular file, owned by
+the uid, not group/other-writable, `nlink == 1`, its 16-byte header equals magic + checked-hash flags +
+source hash, and the payload is a code object. Otherwise the loader compiles. Writes go to a 0600 `O_EXCL`
+temp file + `os.replace` (temp removed in `finally`), and old `.pyc`/`.tmp` (> 30 days) are pruned when a
+new one is written. The import system is never used for the gate, so an adjacent `__pycache__` (e.g. one
+committed under `.aigate/`) is never read. bench/bench.py: a new `startup-hook` row (`--version` started the
+way POSIX hooks start it), measured only off Windows.
+Risks: (a) unusable/relative cache dir or any OS error → compile from source, no output; (b) source hash
+in the header (same-size, same-mtime edit test); (c) paths with spaces + unicode tested on both OSes; on
+Windows the hook does not use the loader; (d) see the checks above. A .pyc can only be used from a
+directory owned by you with mode 0700, and only a file owned by you; anyone who can write as your user can
+already edit the hook itself. **Windows: BLOCKED** — the owner and ACL of the cache dir cannot be checked
+with stdlib `os` (no uid/mode semantics), so Windows hooks keep running the script directly (ROADMAP item);
+(e) output identical to a direct run for `--version`, `check` (json/text) and `explain`, cold and warm.
+Tests (tests/test_bytecode_cache.py, new, 19; 11 need POSIX and are skipped on Windows): output equivalence;
+checked-hash .pyc in a 0700 dir reused without a rewrite; same-size same-mtime edit recompiled; a file as
+cache dir and a 0500 cache dir → silent fallback; spaces/unicode; bytecode planted next to the script never
+runs; unchecked or forged .pyc in a loose dir, writable or hard-linked .pyc, a non-code payload → not run;
+symlinked pycache dir not followed; a shared 0777 cache dir left at 0777; relative `AIGATE_CACHE_DIR` /
+`XDG_CACHE_HOME` → nothing written in the repo; a symlinked script puts its real dir on `sys.path`; repo-root
+`argparse.py`/`json.py` never imported (control: without `-P` it is); an installed vendored hook reuses
+bytecode and ignores a repo-root `json.py`; pruning; Windows hook text unchanged. Before the change:
+collection error (`HOOK_LOADER` missing).
+Mutation check (Linux): 8 deliberate breakages of the loader (no realpath, trust a loose dir, accept a
+relative cache dir, drop the file checks, accept non-code, no prune, compare only the magic, follow a
+symlinked dir) — each made exactly its target test fail.
+Review (independent subagent, diff + tests only, ran repros on WSL): 6 findings.
+1. MEDIUM symlinked script put the link's dir on `sys.path` (a direct run uses the real dir) → **fixed**.
+2. MEDIUM a .pyc planted while pycache was loose ran after the loader tightened it (repro printed PWNED)
+   → **fixed** (no trust on the run that tightens it; per-file owner/mode/nlink checks via dir fd).
+3. MEDIUM no `HOME` + no passwd entry → `./~/.cache/…` created inside the repo → **fixed** (absolute paths
+   only; relative `XDG_CACHE_HOME` ignored as the XDG spec says).
+4. LOW `chmod` after `lstat` could follow a swapped-in symlink; it also chmod-ed a shared cache dir →
+   **fixed** (`fchmod` on the `O_NOFOLLOW` fd; the parent is never chmod-ed).
+5. LOW a header-valid non-code payload printed a traceback → **fixed**.
+6. LOW no pruning, temp left on Ctrl-C, `-O` not in the key → **fixed**; root-owned cache after `sudo`
+   → silent fallback (documented). Cosmetic, not changed: tracebacks gain a `<string>` frame, and the
+   gate's own DeprecationWarnings are no longer shown by the `__main__` filter.
+The reviewer's repro script (t1) re-run against the fixed loader: no shadow import, no PWNED, rc 0.
+Verify:
+- Linux (WSL) `python -m pytest -q` → `150 passed in 35.16s`; Windows → `1 failed, 138 passed, 11 skipped
+  in 131.95s` (the known test). pyflakes clean (aigate_lite.py, bench.py, the new test).
+- Linux bench (`python3 bench/bench.py --runs 30`, WSL Ubuntu, Python 3.12.3):
+```
+python_noop        18.3      20.9
+startup           120.1     132.8
+startup-hook       67.0      86.4
+A                 130.0     136.0          6      1
+B                 165.9     172.3          7     21
+C                 390.2     401.9          7    301
+D                 151.7     157.6          6      1
+```
+  Start-up as a POSIX hook runs it: 120.1 → 67.0 ms median (−53 ms, −44 %). The A–D rows run the script
+  directly (not through a hook), so they do not include this gain.
+- Windows bench (`--compare bench/baseline.json`): no loader on Windows, so no gain expected; gates PASS.
+  A 328.6 | B 401.2 | C 756.3 | D 393.3 | startup 168.4 (item 4: 320.9 | 387.7 | 716.3 | 346.7 | 163.9).
+  D +13 % with p95 442 ms looks like noise (item 6 only adds a string constant on Windows); checked again in
+  item 5's final run.
+- Follow-up: the self-scan flagged 2 new `tests.skip_added` (fix) on this item's own tests: an inline
+  `pytest.skip()` for root and an inline `@pytest.mark.skipif`. Both are environment skips, not hidden
+  failures; changed to named module-level markers (`not_root`, `posix_sh`), the convention test_hooks.py
+  (`needs_sh`) and this file (`posix_only`) already use. Same tests, same conditions (Windows 8 passed /
+  11 skipped; Linux 19 passed).
