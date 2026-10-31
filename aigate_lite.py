@@ -20,40 +20,28 @@ cached and skipped with --offline.
     python3 aigate_lite.py check --range origin/main..HEAD
     python3 aigate_lite.py explain        # list every rule
 """
-from __future__ import annotations
-
 import sys
 
 if sys.version_info < (3, 11):
     sys.stderr.write("aigate-lite needs Python 3.11 or newer (found %s)\n" % sys.version.split()[0])
     sys.exit(2)
 
-import argparse
 import ast
-import atexit
-import concurrent.futures
-import configparser
 import dataclasses
 import datetime as dt
 import fnmatch
-import glob
-import gzip
-import hashlib
-import importlib.metadata
-import importlib.util
 import json
 import math
 import os
 import re
-import shlex
-import shutil
 import subprocess
 import time
 import tomllib
-import urllib.error
-import urllib.parse
-import urllib.request
 from collections import Counter, defaultdict
+
+# Imported where used, to keep start-up fast (see `python -X importtime`): argparse, atexit,
+# concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
+# shutil, urllib.
 
 __version__ = "0.1.0"
 
@@ -289,6 +277,7 @@ def redact(value: str) -> str:
 
 
 def fingerprint(*parts) -> str:
+    import hashlib
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:12]
 
 
@@ -487,6 +476,7 @@ class Repo:
         data = None
         if "\n" not in spec:
             if self._reader is None:
+                import atexit
                 PROFILE["git_calls"] += 1
                 self._reader = subprocess.Popen(["git", "cat-file", "--batch"], cwd=self.root,
                                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE)
@@ -1002,6 +992,7 @@ def default_cache_dir() -> str:
 
 
 def npm_quote(name: str) -> str:
+    import urllib.parse
     return urllib.parse.quote(name, safe="@")
 
 
@@ -1050,6 +1041,7 @@ class Registry:
             for k in keys:
                 self.get(k)
             return
+        import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(self.get, keys))
 
@@ -1096,6 +1088,9 @@ class Registry:
         return (entry.get("vulns") or {}).get(key[3], [])
 
     def _http(self, url, method="GET", body=None):
+        import gzip
+        import urllib.error
+        import urllib.request
         headers = {"User-Agent": f"aigate-lite/{__version__}", "Accept-Encoding": "gzip",
                    "Accept": "application/json"}
         if body is not None:
@@ -1116,6 +1111,8 @@ class Registry:
     def _fetch(self, key):
         if self.offline or time.monotonic() > self.deadline:
             return None
+        import urllib.error
+        import urllib.parse
         kind, eco, name = key[0], key[1], key[2]
         try:
             if kind == "exists":
@@ -1256,6 +1253,7 @@ def _looks_like_secret(name: str, val: str) -> bool:
 
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
+    import hashlib
     found, seen = [], set()
 
     def add(rule, val, what, action=None):
@@ -1676,6 +1674,7 @@ def parse_pipfile(text: str, path: str):
 
 
 def parse_setup_cfg(text: str, path: str):
+    import configparser
     cp = configparser.ConfigParser(interpolation=None)
     try:
         cp.read_string(text)
@@ -1895,6 +1894,7 @@ class Imp:
 
 
 def find_site_packages(root: str) -> list:
+    import glob
     bases = [os.path.join(root, d) for d in (".venv", "venv", "env", ".env")]
     bases += [os.environ[v] for v in ("VIRTUAL_ENV", "CONDA_PREFIX") if os.environ.get(v)]
     out = []
@@ -1909,6 +1909,7 @@ def python_environment(ctx):
     """(importable top-level names, import -> distributions) from this interpreter and project venvs."""
     if "py_env" in ctx.cache:
         return ctx.cache["py_env"]
+    import importlib.metadata
     names, mapping = set(), defaultdict(set)
     try:
         for top, dists in importlib.metadata.packages_distributions().items():
@@ -1946,6 +1947,7 @@ def python_environment(ctx):
 
 
 def _importable(top: str) -> bool:
+    import importlib.util
     try:
         return importlib.util.find_spec(top) is not None
     except (ImportError, ValueError, AttributeError):
@@ -2433,6 +2435,7 @@ def _cases(fn):
 
 
 def python_tests(tree) -> dict:
+    import hashlib
     out = {}
     if tree is None:
         return out
@@ -2482,6 +2485,7 @@ def _fmt_consts(c: Counter) -> str:
 
 
 def _ini_values(text, sections):
+    import configparser
     cp = configparser.ConfigParser(interpolation=None, strict=False)
     try:
         cp.read_string(text or "")
@@ -3239,6 +3243,7 @@ def check_files(ctx) -> list:
 
 
 def check_duplicates(ctx) -> list:
+    import hashlib
     n = ctx.cfg["limits"]["duplicate_lines"]
     files = [fc for fc in ctx.code_changes(CODE_EXTS, tests=False) if fc.added]
     rows_by, index = {}, defaultdict(list)
@@ -3289,6 +3294,7 @@ def ctx_added(files, loc) -> set:
 # --------------------------------------------------------------------------- configured commands
 
 def run_commands(ctx, stage, paths) -> list:
+    import shlex
     out = []
     for c in ctx.cfg["commands"]:
         if c["stage"] not in (stage, "both") or (c["when"] and not any(path_matches(p, c["when"]) for p in paths)):
@@ -3679,6 +3685,7 @@ def cmd_install(args) -> int:
         dest = os.path.join(repo.root, ".aigate", "aigate_lite.py")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
         if os.path.abspath(dest) != script:
+            import shutil
             shutil.copy2(script, dest)
         print("copied the gate to .aigate/aigate_lite.py (commit it so teammates get the same version)")
     kinds = ["pre-commit"] + ([] if args.no_pre_push else ["pre-push"])
@@ -3836,7 +3843,8 @@ def cmd_explain(args) -> int:
     return 0
 
 
-def build_parser() -> argparse.ArgumentParser:
+def build_parser():
+    import argparse
     p = argparse.ArgumentParser(prog="aigate-lite", description="Commit-time gate for AI-written code.")
     p.add_argument("--version", action="version", version=f"aigate-lite {__version__}")
     sub = p.add_subparsers(dest="command")

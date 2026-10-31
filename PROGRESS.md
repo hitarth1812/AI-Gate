@@ -71,3 +71,44 @@ D                5450.6    5655.6          9      2
   exists). It runs for *any* added .py file, even one importing only stdlib/local modules. → item 3.
 - `python -c pass` is already 60.9 ms median on this machine, so the "startup ≤ 40 ms" target is not
   reachable here whatever the script does; it will be reported as missed with this number.
+
+## Iteration 2 — lazy imports
+
+Explore:
+- `python -X importtime aigate_lite.py --version`: importlib.metadata 61.5–68.4 ms cumulative, argparse
+  18.3 ms, concurrent.futures 18.7 ms, urllib.request 15.4–16.4 ms, hashlib 8.6 ms, `__future__` 1.3 ms.
+- importlib.metadata/importlib.util are used only by the Python-import checks; urllib/gzip/concurrent
+  only for live registry lookups; configparser for setup.cfg/ini parsing; shutil/shlex/glob/atexit in
+  one function each. No test reaches these through the module namespace (grep of tests/).
+- Risk: an annotation that names a lazily imported module (`-> argparse.ArgumentParser`) would be a
+  NameError once `from __future__ import annotations` is gone → removed that annotation.
+
+Change: those imports moved into the functions that use them; `from __future__ import annotations`
+removed (the 3.11+ guard still prints its message on 3.10: `aigate-lite needs Python 3.11 or newer
+(found 3.10.11)`, rc=2).
+
+Tests (tests/test_perf.py): importing the module loads none of argparse / concurrent.futures /
+configparser / gzip / importlib.metadata / shutil / urllib.request (TP, failed before); the features that
+need argparse and configparser still load them (TN); `--version` output unchanged (edge).
+
+Verify:
+- `python -m pytest -q` → `4 failed, 54 passed in 258.16s` (the same 4 pre-existing Windows failures).
+- `python -m pyflakes aigate_lite.py` → clean.
+- importtime after: top-level imports are ast 19.6 ms (incl. shared deps), dataclasses 15.0, tomllib 9.7,
+  subprocess 6.8, json 4.3; argparse+shutil+textwrap (~16 ms) now load only when the CLI parses args.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+measure       median ms    p95 ms  git calls  blobs   vs baseline (median / p95)
+python_noop        89.0     101.5                     +46.1% / +53.6%
+startup           304.3     350.7                     -2.5% / +3.0%
+A                6250.5    6849.2          9      2   +8.7% / +9.3%
+B                6204.6    7209.3          9     22   +11.3% / +26.1%
+C                6620.3    7367.3          9    302   +14.9% / +14.0%
+D                6207.0    7276.6          9      2   +13.9% / +28.7%
+Perf gates: PASS
+```
+  The machine got slower between runs (bare `python -c pass` +46%), so wall times here are noise around
+  the 5.8 s metadata scan; the counters are unchanged.
+- Compile cost: `compile()` of the 190 KB source = **77.1 ms** median, module-body exec 4.4 ms. A script run
+  as `python aigate_lite.py` is recompiled on every run (no .pyc for `__main__`), so ~77 ms of the startup
+  is compilation, not imports. Noted in ROADMAP (hooks could import the module to use cached bytecode).

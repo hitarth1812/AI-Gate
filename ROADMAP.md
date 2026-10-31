@@ -26,3 +26,6 @@ session after a human review of the previous one. Do not start them early.
 
 ## Ideas noted during Phase 1 (not done)
 <!-- appended by the Phase 1 loop -->
+- Hooks run `python .aigate/aigate_lite.py`, which recompiles 190 KB of source every time (77 ms measured
+  on the Phase 1 machine). A hook that imports the module with `sys.pycache_prefix` pointed at the cache dir
+  would reuse bytecode. Needs care: writable cache dir, stale-pyc safety, Windows paths.
