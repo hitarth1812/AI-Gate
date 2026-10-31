@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aigate-lite"
+version = "0.1.0"
+description = "Free, local commit-time gate that checks AI-written code before it is committed or pushed"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+keywords = ["git-hooks", "pre-commit", "ai", "code-review", "security", "supply-chain"]
+
+[project.scripts]
+aigate-lite = "aigate_lite:main"
+
+[tool.setuptools]
+py-modules = ["aigate_lite"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

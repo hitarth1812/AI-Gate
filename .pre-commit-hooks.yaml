@@ -1,0 +1,18 @@
+- id: aigate-lite
+  name: aigate-lite
+  description: Checks staged changes for common AI-coding mistakes (secrets, fake packages, weakened tests, ...)
+  entry: aigate-lite check --staged
+  language: python
+  pass_filenames: false
+  always_run: true
+  stages: [pre-commit]
+  minimum_pre_commit_version: "3.2.0"
+- id: aigate-lite-push
+  name: aigate-lite (push)
+  description: Checks every commit being pushed, including ones made with --no-verify
+  entry: aigate-lite check --push
+  language: python
+  pass_filenames: false
+  always_run: true
+  stages: [pre-push]
+  minimum_pre_commit_version: "3.2.0"

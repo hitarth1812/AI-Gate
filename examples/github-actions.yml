@@ -1,0 +1,25 @@
+# Optional: run the same checks on pull requests. Free on public repos; private repos use the
+# free monthly Actions minutes. Copy to .github/workflows/aigate-lite.yml and commit
+# .aigate/aigate_lite.py (aigate-lite install --vendor does that copy for you).
+#
+# Note: a pull request can edit this workflow file, so treat this as a safety net, not a security
+# boundary. Pin the actions below to full commit SHAs for production use.
+name: aigate-lite
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Check the pull request
+        run: python .aigate/aigate_lite.py check --range "origin/${{ github.base_ref }}..HEAD" --format github --no-commands

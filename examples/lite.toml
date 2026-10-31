@@ -1,0 +1,51 @@
+# aigate-lite configuration. Every key is optional; delete what you don't change.
+# Rule ids: `aigate-lite explain`. Actions: block | fix | warn | off  (block and fix stop the commit).
+version = 1
+
+[gate]
+fail_closed = true        # if a check crashes, stop the commit instead of passing it
+offline = "warn"          # registry unreachable: warn | block | skip
+max_seconds = 20          # time budget for registry lookups
+
+[rules]
+# "suppress.type" = "warn"
+# "perf.*" = "off"
+
+[paths]
+# sensitive = ["**/auth/**", "**/payments/**"]        # security rules and suppressions are one step stricter here
+# forbidden = ["infra/prod/**"]                       # nobody may change these
+# forbidden_for_agents = [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**"]
+# ignore = ["**/node_modules/**", "dist/**"]
+
+[limits]
+# function_lines = 60
+# complexity = 10
+# loop_depth = 3
+# file_lines = 800
+# diff_added_lines = 400
+# diff_files = 25
+
+[deps]
+# new_package_days = 30
+# cooldown_days = 5
+# private = ["acme-*", "@acme/*"]                     # served by your private index: skip public lookups
+# trusted_sources = ["https://pypi.acme.internal/simple"]
+# import_map = { mylib = "my-lib-dist" }              # import name -> package name when they differ
+
+[provenance]
+# agent_env = ["MY_AGENT_ENV_VAR"]   # extra env vars that mean "an AI agent is committing"
+# default = "agent"                  # treat every commit as AI-written (stricter)
+
+# Run your own checks too. stage: commit | push | both. {files} = changed files.
+# [[commands]]
+# name = "tests"
+# run = "python -m pytest -q"
+# stage = "push"
+# action = "fix"
+
+# Allow a known false positive. Blocking rules need a path or a fingerprint (shown with -v).
+# [[allow]]
+# rule = "secrets.generic"
+# path = "tests/fixtures/**"
+# reason = "fake credentials used by tests"
+# expires = 2027-06-30
