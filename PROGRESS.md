@@ -473,7 +473,7 @@ Review (independent subagent): 6 findings.
 3. MEDIUM `trust` display could hide content; agents could self-approve → **fixed** (escaped, all fields,
    agents refused). No y/N prompt: it would break the approved test line (non-TTY, no flag).
 4. MEDIUM reusing `commands.failed` lets repo `[rules]` silence/upgrade the notice and adds risk score →
-   **open, needs a decision**: a dedicated rule id was not approved. Fails closed in every case (commands
+   **fixed in 8c** after approval (was: open, needs a decision): a dedicated rule id was not approved. Fails closed in every case (commands
    never run untrusted). ROADMAP.
 5. LOW push-stage config not approvable; per-worktree store → `--rev` **added**; common-dir store in ROADMAP.
 6. LOW write failure traceback → **fixed**.
@@ -494,3 +494,31 @@ Perf gates: PASS   (D / A = 1.05)
 ```
   startup median 156.0 vs 208.1 in iteration 10 with p95 227.9: run-to-run noise (this item does not touch
   start-up). docs/PERF.md still shows the iteration-10 run; it was not regenerated.
+
+## Iteration 8c — `commands.untrusted` rule (approved by the user)
+
+User approval: add a dedicated rule instead of reusing `commands.failed`.
+
+Change: new rule `commands.untrusted` (warn, low, confidence 1.0) — 66 rules. It is in `FIXED_RULES`:
+`apply_policy` ignores `[rules]` overrides for it (exact or glob), and `validate_config` reports any key
+that matches it as `gate.config_invalid`. `[[allow]]` entries still work on it. `commands.failed` (actual
+command failures) stays overridable. README rule count and trust text, CHANGELOG updated.
+
+Tests (tests/test_trust.py, +3, helpers switched to the new rule): `"commands.untrusted" = "off"`,
+`= "block"` and `"commands.*" = "block"` all leave exactly one warn notice, exit 0, and add at most 2.0 risk
+compared with `--no-commands`; the config problem names the rule; `"commands.failed" = "warn"` still
+applies to real failures; `explain` lists the new rule. 6 failed before the rule existed.
+
+Verify:
+- `python -m pytest -q` → `1 failed, 115 passed in 157.38s` (only the Windows TOML bug in
+  `test_configured_command_runs`).
+- `python -m pyflakes aigate_lite.py` → clean.
+- `python bench/bench.py --runs 30 --compare bench/baseline.json`:
+```
+startup           208.0     214.9                     -33.4% / -36.9%
+A                 485.4     496.6          6      1   -91.6% / -92.1%
+B                 529.5     541.6          7     21   -90.5% / -90.5%
+C                 714.4     759.9          7    301   -87.6% / -88.2%
+D                 498.5     511.3          6      1   -90.9% / -91.0%
+Perf gates: PASS   (D / A = 1.03)
+```

@@ -49,6 +49,8 @@ MAX_BYTES = 1_000_000            # files larger than this skip content checks
 ACTION_RANK = {"off": 0, "pass": 1, "warn": 2, "fix": 3, "block": 4}
 WEIGHTS = {"critical": 40, "high": 20, "medium": 8, "low": 2}
 BLOCK_AT = 60                    # risk score that escalates a Fix verdict to Block
+FIXED_RULES = {"commands.untrusted"}   # [rules] overrides cannot change these (a repo config must not hide or
+                                       # weaponise the notice that its own commands are unapproved)
 PROFILE = Counter(git_calls=0, blobs_read=0)   # AIGATE_PROFILE=1 prints these to stderr on exit
 
 
@@ -181,6 +183,8 @@ _RULE_ROWS = [
      "Add functools.cache or rewrite it iteratively."),
     # gate
     ("commands.failed", "fix", "high", 1.0, "Configured command failed", "See the command output above."),
+    ("commands.untrusted", "warn", "low", 1.0, "Configured commands not approved yet, so they did not run",
+     "Review the [[commands]] in .aigate/lite.toml, then run `aigate-lite trust`."),
     ("gate.config_invalid", "warn", "low", 1.0, "Problem in .aigate/lite.toml", "Fix the entry named in the message."),
     ("gate.error", "block", "high", 1.0, "aigate-lite could not finish a check",
      "This is a bug or an environment problem, and the gate fails closed. Bypass once with git commit --no-verify and report it."),
@@ -762,6 +766,8 @@ def merge_config(raw: dict, problems: list) -> dict:
 def validate_config(cfg: dict, problems: list) -> None:
     rules = {}
     for key, value in (cfg.get("rules") or {}).items():
+        if any(fnmatch.fnmatchcase(r, key) for r in FIXED_RULES):
+            problems.append(f'rules."{key}" does not apply to {", ".join(sorted(FIXED_RULES))} (it cannot be changed)')
         value = str(value).lower()
         if value not in ("off", "warn", "fix", "block"):
             problems.append(f'rules."{key}" = "{value}": use off, warn, fix or block')
@@ -3568,9 +3574,9 @@ def run_commands(ctx, stage, paths, trusted=False) -> list:
            and (not c["when"] or any(path_matches(p, c["when"]) for p in paths))]
     if due and not trusted and commands_hash(ctx.cfg["commands"]) not in trusted_hashes(ctx.repo):
         names = ", ".join(f"`{c['name']}`" for c in due)
-        return [make("commands.failed", "(command)", None,
+        return [make("commands.untrusted", "(command)", None,
                      f"not run: {names} from {ctx.cfg.origin} not approved yet; review them, then run `aigate-lite trust`",
-                     action="warn", key="untrusted",
+                     key="untrusted",
                      hint="Commands in a repository's config run on your machine, so each new or changed list "
                           "needs one approval: `aigate-lite trust` shows them and records the approval in .git/aigate/trusted.")]
     for c in due:
@@ -3614,7 +3620,9 @@ def apply_policy(findings, ctx, env) -> list:
         if ident in seen:
             continue
         seen.add(ident)
-        if f.rule in overrides:
+        if f.rule in FIXED_RULES:
+            pass
+        elif f.rule in overrides:
             f.action = overrides[f.rule]
         else:
             for pattern, action in overrides.items():

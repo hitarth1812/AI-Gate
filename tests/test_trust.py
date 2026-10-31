@@ -16,11 +16,11 @@ def staged_change(repo):
 
 
 def failed(res):
-    return [f for f in find(res, "commands.failed") if f["action"] != "warn"]
+    return find(res, "commands.failed")
 
 
 def untrusted(res):
-    return [f for f in find(res, "commands.failed") if f["action"] == "warn" and "aigate-lite trust" in f["message"]]
+    return [f for f in find(res, "commands.untrusted") if f["action"] == "warn" and "aigate-lite trust" in f["message"]]
 
 
 def test_repo_commands_do_not_run_until_trusted(repo):
@@ -133,3 +133,32 @@ def test_files_cannot_inject_shell_syntax(repo):
     hint = failed(repo.check())[0]["hint"]
     assert "INJECTED" in hint and not any(ln.strip() == "INJECTED" for ln in hint.splitlines())
     assert "./-rf.py" in hint
+
+
+def test_untrusted_notice_has_its_own_rule_that_repo_rules_cannot_change(repo):
+    from conftest import aigate
+    rule = aigate.RULES["commands.untrusted"]
+    assert (rule.action, rule.severity) == ("warn", "low") and len(aigate.RULES) == 66
+    for override in ('"commands.untrusted" = "off"', '"commands.untrusted" = "block"', '"commands.*" = "block"'):
+        repo.write(".aigate/lite.toml", config() + f"[rules]\n{override}\n")
+        staged_change(repo)
+        res = repo.check()
+        notice = untrusted(res)
+        assert len(notice) == 1 and notice[0]["action"] == "warn" and res["code"] == 0, override
+        assert res["risk"] - repo.check("--no-commands")["risk"] <= 2.0, override    # low: weight 2 at most
+    problems = " ".join(f["message"] for f in find(res, "gate.config_invalid"))
+    assert "commands.untrusted" in problems
+
+
+def test_command_failures_are_still_overridable(repo):
+    repo.write(".aigate/lite.toml", config() + '[rules]\n"commands.failed" = "warn"\n')
+    repo.commit()
+    repo.run("trust")
+    staged_change(repo)
+    res = repo.check()
+    assert failed(res)[0]["action"] == "warn" and res["code"] == 0
+
+
+def test_explain_lists_the_new_rule(repo):
+    out = repo.run("explain").stdout
+    assert "commands.untrusted" in out and "commands.failed" in out

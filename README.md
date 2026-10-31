@@ -65,7 +65,7 @@ still runs first.
 | Bloat and time complexity | Long or complex functions, long files, big diffs, duplicated blocks, unused imports (warn). Loops nested 3 or more deep, nested loops over the same list, `x in list` / `.pop(0)` / sorting inside loops, network or DB calls inside loops, branching recursion without a cache (warn). |
 | Scope creep | `scope.forbidden_path` (block). `scope.out_of_scope` against a declared task scope (fix). `gate.config_changed` (warn). |
 
-`aigate-lite explain` lists all 65 rules. `aigate-lite explain <rule>` shows how to change or allow one.
+`aigate-lite explain` lists all 66 rules. `aigate-lite explain <rule>` shows how to change or allow one.
 
 **Language coverage.** Python gets every check, using its AST. JavaScript/TypeScript get secrets,
 dependencies, tests, suppressions and line-level code checks. Function size, complexity and loop
@@ -174,7 +174,8 @@ the job on exit code 1. `--format json` (schema 1) and `--format sarif` (SARIF 2
   checker, which you can add as a `[[commands]]` entry), sandboxed test runs, mutation testing, and
   LLM review.
 - **Commands in `.aigate/lite.toml` need your approval.** A cloned or pulled config can't run code on your
-  next commit: `[[commands]]` stay off (one `commands.failed` warning says so) until a person runs
+  next commit: `[[commands]]` stay off (one `commands.untrusted` warning says so; a repo's `[rules]` can't
+  change that rule) until a person runs
   `aigate-lite trust`, which prints every command with hidden characters escaped and records exactly that
   list in `.git/aigate/trusted`. Any change to any command needs a new approval; `trust --rev <branch>`
   approves a config you push but have not checked out; AI agents can't approve. `--config FILE` on the
