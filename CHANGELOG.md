@@ -56,6 +56,11 @@
   reports `gate.error` (fail closed).
 
 ### Added
+- `aigate-lite fix [--yes] [--only rule,...]`: removes staged debugger lines (`breakpoint()`, `pdb.set_trace()`,
+  `debugger;` and a debugger import that is no longer used), un-focuses tests (`it.only(` → `it(`, `fit(` → `it(`)
+  and unstages env/key files (`git rm --cached`, file kept on disk, anchored `.gitignore` line). Without `--yes` it
+  only prints the diff. Refuses files with unstaged changes, symlinks and anything it cannot do exactly. Never run
+  by hooks.
 - `aigate-lite baseline [--include-secrets] [--prune]` writes `.aigate/baseline.json` (rule, path and
   fingerprint of each finding a full offline scan reports today; no code, messages or timestamps). Matching
   findings are hidden (`-v` shows them) and do not count. Secrets are never baselined unless

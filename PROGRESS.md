@@ -1210,3 +1210,48 @@ Verify (after the review fixes): Windows `1 failed, 278 passed, 12 skipped in 32
 WSL `291 passed in 67.88s`; pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged;
 startup 185.2 (+12.3 %; this run was noisy: `python -c pass` itself +38.9 %) · A 342.9 · B 407.5 · C 740.6 ·
 D 365.5 · E 343.3 (E/A 1.00) · C-cache 579.1.
+
+## P2 Item 7 ⚠ — `aigate-lite fix`
+
+Explore: the three fixable rules are secrets.env_file (path-level, no line), code.debug_leftover (Python AST
+calls/imports, JS `debugger` line regex) and tests.focused (line text). Finding lines refer to the staged file;
+the worktree may differ (unstaged edits, autocrlf). Hooks only ever run `check`.
+Change: `fix [--yes] [--only rule,...]` (D8: never in hooks — every hook line that runs the script runs
+`check --`; never writes without --yes). Plan from an offline staged check (block/fix findings only, allowed ones
+skipped): debugger lines are removed only when every statement on the line is a one-line `breakpoint()` /
+`pdb|ipdb|pudb.set_trace()` / debugger import (from the AST; JS `debugger;` lines outside template literals); a
+debugger import goes only when nothing else uses the module; Python results must still parse (.py/.pyw), else
+"fix it by hand"; focused tests are fixed only when the statement starts with `fit(` / `fdescribe(` / `ftest(` /
+`it|describe|test.only(`; env files → `git rm --cached -- :(literal)<path>` + an escaped, anchored .gitignore line
+that `git check-ignore` (temporary core.excludesFile) proves covers exactly that path. Refused: files with
+unstaged changes (git's own comparison, so autocrlf checkouts work), symlinks, paths outside the repo, non-UTF-8,
+a symlinked .gitignore or one with unstaged edits. Lines split on `\n` only (git's numbering); CRLF, final
+newline and file mode preserved (in-place writes). Dry run: unified diffs + "would run" lines + a note when an env
+file is already in HEAD (the commit deletes it; rotate it) + `next: aigate-lite fix --yes`, exit 1. --yes: every
+file is opened and re-checked against the plan before anything is written; on an OSError a cause/fix message,
+whatever was written is staged; then the edited files are staged and the check runs again.
+Tests (tests/test_fix.py, new, 22; 3 POSIX-only): dry run changes nothing (index + worktree hashed) and ends with
+`next:`; --yes applies, stages, rechecks; second run "nothing to fix"; import removed only when unused; mixed
+lines / emptied blocks left alone; JS debugger + focused tests; CRLF + UTF-8 + no final newline byte-exact;
+partially staged refused; .env unstaged, kept on disk, ignored once; --only; mode kept + symlink skipped; hook
+path; review cases below.
+Review (independent subagent, reproduced each in temp repos, WSL for POSIX): 9 points.
+1. HIGH autocrlf: every file refused on a default Windows checkout → **fixed** (`git diff --quiet` per literal
+   path) + test with core.autocrlf=true.
+2. HIGH `fit(` / `.only(` rewritten anywhere (model.fit → model.it) → **fixed** (statement start only) + test.
+3. MEDIUM `git rm --cached` globbed `x[ab].env` → **fixed** (`:(literal)`) + test.
+4. MEDIUM unescaped .gitignore lines → **fixed** (escaped, proven with check-ignore, else "add it by hand").
+5. MEDIUM unstaged .gitignore edits staged → **fixed** (refused) + test.
+6. MEDIUM symlinked .gitignore written through → **fixed** (refused) + test (POSIX).
+7. MEDIUM multi-line statements / .pyw / template literals → **fixed** (AST one-line statements, parse check for
+   .pyw, backtick heuristic for JS) + tests.
+8. MEDIUM `splitlines` drift on U+2028 → **fixed** (`split("\n")`) + test.
+9. LOW half-applied edits on a read-only file → **fixed** (open + verify all first, UserError) + test (POSIX).
+Agent exposure: safe after 3-5 (unstaging secrets is the safe direction); the dry run now says when the commit
+will delete a tracked env file. Found 9 / fixed 9.
+Process: tests 1-12 were written before the code (11 failed: no `fix` command); the review tests after.
+Also during this item: `tests/test_code_tests.py` (frozen) was found with the text `git status --short` typed into
+line 3 (not by this session's tools; it broke collection). Restored with `git checkout --` after the user approved.
+Verify: Windows `1 failed, 297 passed, 15 skipped in 251.59s` (BLOCKED D5 test); WSL `313 passed in 73.27s`;
+pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged; startup 184.1 (+11.6 %) · A 346.1 (+6.9 %) ·
+B 412.9 · C 742.8 · D 369.4 · E 351.4 (E/A 1.02) · C-cache 593.2.

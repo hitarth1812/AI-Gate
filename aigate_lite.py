@@ -4957,6 +4957,256 @@ def cmd_baseline(args) -> int:
     return 0
 
 
+FIXABLE = ("secrets.env_file", "code.debug_leftover", "tests.focused")
+DEBUG_MODULES = ("pdb", "ipdb", "pudb")
+JS_DEBUGGER_LINE = re.compile(r"^\s*debugger\s*;?\s*$")
+FOCUS_FIXES = ((re.compile(r"^(\s*)f(it|describe|test)\("), r"\1\2("),
+               (re.compile(r"^(\s*)(it|describe|test)\.only\("), r"\1\2("))
+
+
+@dataclasses.dataclass
+class FixPlan:
+    edits: dict          # path -> (old bytes, new bytes)
+    untrack: list        # paths to `git rm --cached`
+    gitignore: tuple     # (old bytes, new bytes) or None
+    skipped: list        # (path, line, why)
+    notes: list = dataclasses.field(default_factory=list)
+
+
+def _unchanged_since_staged(repo, path) -> bool:
+    """True when the work tree file matches the index (git's own comparison: autocrlf and filters included)."""
+    return subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", "--", f":(literal){path}"],
+                          cwd=repo.root, capture_output=True).returncode == 0
+
+
+def _python_debug_lines(text) -> set:
+    """1-based lines whose statements are all one-line debugger calls or debugger imports (so deleting the line
+    removes exactly those statements and nothing else)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    by_line: dict = defaultdict(list)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt):
+            by_line[node.lineno].append(node)
+
+    def debug_stmt(n) -> bool:
+        if n.lineno != n.end_lineno:
+            return False
+        if isinstance(n, ast.Import):
+            return all(a.name in DEBUG_MODULES and not a.asname for a in n.names)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and not n.value.args and not n.value.keywords:
+            name = dotted_name(n.value.func) or ""
+            return name == "breakpoint" or name in {f"{m}.set_trace" for m in DEBUG_MODULES}
+        return False
+    return {line for line, stmts in by_line.items() if all(debug_stmt(n) for n in stmts)}
+
+
+def _plan_file(repo, path, findings, plan) -> None:
+    full = os.path.join(repo.root, path)
+    root = os.path.realpath(repo.root)
+    if os.path.islink(full) or not os.path.realpath(full).startswith(root + os.sep):
+        plan.skipped.append((path, None, "a symlink or outside the repository"))
+        return
+    if not _unchanged_since_staged(repo, path):
+        plan.skipped.append((path, None, "has unstaged changes; stage or stash them first"))
+        return
+    try:
+        with open(full, "rb") as fh:
+            data = fh.read()
+        text = data.decode("utf-8")
+    except OSError as e:
+        plan.skipped.append((path, None, f"cannot read it ({e.strerror})"))
+        return
+    except UnicodeDecodeError:
+        plan.skipped.append((path, None, "not UTF-8"))
+        return
+    lines = text.split("\n")                       # like git's line numbers: only \n ends a line
+    is_py = path.endswith((".py", ".pyw"))
+    debug_ok = _python_debug_lines(text) if is_py else set()
+    drop, changed = set(), {}
+    for f in findings:
+        i = (f.line or 0) - 1
+        if not 0 <= i < len(lines):
+            continue
+        body = lines[i].rstrip("\r")
+        if f.rule == "tests.focused":
+            for rx, repl in FOCUS_FIXES:
+                new = rx.sub(repl, body, count=1)
+                if new != body:
+                    changed[i] = new + lines[i][len(body):]
+                    break
+            else:
+                plan.skipped.append((path, f.line, "the focused call is not at the start of the line; fix it by hand"))
+        elif is_py and (i + 1) in debug_ok:
+            drop.add(i)
+        elif not is_py and JS_DEBUGGER_LINE.match(body) and "\n".join(lines[:i]).count("`") % 2 == 0:
+            drop.add(i)                             # (an odd number of backticks before it: inside a template)
+        else:
+            plan.skipped.append((path, f.line, "other code on the line or a multi-line statement; fix it by hand"))
+    for i in [i for i in drop if is_py and lines[i].strip().startswith("import ")]:
+        module = lines[i].split()[1].rstrip(";")      # keep `import pdb` while something else still uses pdb
+        rest = "\n".join(changed.get(j, ln) for j, ln in enumerate(lines) if j not in drop)
+        if re.search(rf"\b{re.escape(module)}\b", rest):
+            drop.discard(i)
+    new_text = "\n".join(changed.get(i, ln) for i, ln in enumerate(lines) if i not in drop)
+    if is_py:
+        try:
+            ast.parse(new_text)
+        except SyntaxError:
+            plan.skipped.append((path, None, "removing the line would leave an empty block; fix it by hand"))
+            return
+    if new_text != text:
+        plan.edits[path] = (data, new_text.encode("utf-8"))
+
+
+def _gitignore_line(path: str) -> str:
+    """An anchored .gitignore pattern that matches exactly `path` (special characters escaped)."""
+    escaped = re.sub(r"([\\[\]*?!#])", r"\\\1", path)
+    stripped = escaped.rstrip(" ")
+    return "/" + stripped + "\\ " * (len(escaped) - len(stripped))
+
+
+def _covers(repo, line: str, path: str) -> bool:
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="aigate-ignore-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(line + "\n")
+        return subprocess.run(["git", "-c", f"core.excludesFile={tmp}", "check-ignore", "-q", "--no-index", "--",
+                               path], cwd=repo.root, capture_output=True).returncode == 0
+    finally:
+        os.remove(tmp)
+
+
+def _plan_gitignore(repo, paths, plan) -> None:
+    def ignored(p) -> bool:                    # --no-index: would .gitignore cover it once it is untracked?
+        return subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", p], cwd=repo.root,
+                              capture_output=True).returncode == 0
+    add = [p for p in paths if not ignored(p)]
+    if not add:
+        return
+    gi = os.path.join(repo.root, ".gitignore")
+    if os.path.islink(gi):
+        plan.skipped.append((".gitignore", None, "is a symlink; add the lines by hand"))
+        return
+    if os.path.exists(gi) and not _unchanged_since_staged(repo, ".gitignore"):
+        plan.skipped.append((".gitignore", None, "has unstaged changes; stage or stash them first"))
+        return
+    try:
+        with open(gi, "rb") as fh:
+            old = fh.read()
+    except OSError:
+        old = b""
+    eol = b"\r\n" if b"\r\n" in old else b"\n"
+    present = {ln.strip() for ln in old.splitlines()}
+    lines = []
+    for p in add:
+        line = _gitignore_line(p)
+        if line.encode() in present:
+            continue
+        if _covers(repo, line, p):
+            lines.append(line.encode())
+        else:
+            plan.skipped.append((p, None, "cannot be written as a .gitignore line; add it to .gitignore by hand"))
+    if lines:
+        plan.gitignore = (old, old + (eol if old and not old.endswith(b"\n") else b"") + eol.join(lines) + eol)
+
+
+def plan_fixes(repo, findings, only) -> FixPlan:
+    """What `fix` would change, from the staged check's findings. Nothing is written here."""
+    wanted = set(only or FIXABLE) & set(FIXABLE)
+    plan = FixPlan({}, [], None, [])
+    by_path: dict = defaultdict(list)
+    for f in findings:
+        if f.rule in wanted and not f.allowed and f.action in ("block", "fix"):
+            if f.rule == "secrets.env_file":
+                plan.untrack.append(f.path)
+            else:
+                by_path[f.path].append(f)
+    for path, fs in sorted(by_path.items()):
+        _plan_file(repo, path, fs, plan)
+    plan.untrack = list(dict.fromkeys(plan.untrack))
+    _plan_gitignore(repo, plan.untrack, plan)
+    for p in plan.untrack:
+        if repo.read("HEAD:" + p) is not None:
+            plan.notes.append(f"{p} is already in HEAD: this commit will delete it from the repository (the file stays "
+                              "on disk); it stays in history, so rotate what it contains")
+    return plan
+
+
+def _diff(path, old: bytes, new: bytes) -> str:
+    import difflib
+    a, b = old.decode("utf-8", "replace").splitlines(True), new.decode("utf-8", "replace").splitlines(True)
+    return "".join(ln if ln.endswith("\n") else ln + "\n"
+                   for ln in difflib.unified_diff(a, b, fromfile=f"a/{path}", tofile=f"b/{path}"))
+
+
+def _apply_fixes(repo, plan) -> None:
+    """Write every planned edit, or none: all files are opened (and re-checked against the plan) first."""
+    writes = [(path, old, new) for path, (old, new) in plan.edits.items()]
+    if plan.gitignore:
+        writes.append((".gitignore", *plan.gitignore))
+    handles, done = [], []
+    try:
+        for path, old, new in writes:
+            full = os.path.join(repo.root, path)
+            fh = open(full, "r+b") if os.path.exists(full) else open(full, "w+b")
+            handles.append((path, fh, new))
+            if fh.read() != old:
+                raise UserError(f"{path} changed while fix was running", "run: aigate-lite fix --yes again")
+        for path, fh, new in handles:
+            fh.seek(0)
+            fh.write(new)                          # in place: keeps the file mode
+            fh.truncate()
+            done.append(path)
+    except OSError as e:
+        raise UserError(f"cannot write {e.filename or 'a file'} ({e.strerror})",
+                        "make it writable and run: aigate-lite fix --yes again") from None
+    finally:
+        for _path, fh, _new in handles:
+            fh.close()
+        if done:
+            run_git(repo.root, "add", "--", *(f":(literal){p}" for p in done))
+    for path in plan.untrack:
+        run_git(repo.root, "rm", "--cached", "-q", "--", f":(literal){path}")
+
+
+def cmd_fix(args) -> int:
+    """Mechanical fixes for staged findings. Shows the diff and changes nothing unless --yes; never run by hooks."""
+    repo = Repo.discover()
+    env = dict(os.environ)
+    ns = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--format", "json"])
+    res = run_check(ns, env, collect=True)
+    findings = [] if isinstance(res, int) else res.findings
+    only = [r.strip() for r in (args.only or "").split(",") if r.strip()]
+    plan = plan_fixes(repo, findings, only)
+    for path, line, why in plan.skipped:
+        print(f"skipped {path}{f':{line}' if line else ''}: {why}")
+    if not (plan.edits or plan.untrack or plan.gitignore):
+        print("nothing to fix" + (" automatically" if plan.skipped else ""))
+        return 0
+    if not args.yes:
+        for path in plan.untrack:
+            print(f"would run: git rm --cached -- {path}   (the file stays on disk)")
+        for note in plan.notes:
+            print(f"note: {note}")
+        if plan.gitignore:
+            sys.stdout.write(_diff(".gitignore", *plan.gitignore))
+        for path, (old, new) in plan.edits.items():
+            sys.stdout.write(_diff(path, old, new))
+        print("next: aigate-lite fix --yes")
+        return 1
+    _apply_fixes(repo, plan)
+    for note in plan.notes:
+        print(f"note: {note}")
+    print(f"fixed: {len(plan.edits)} file(s) edited, {len(plan.untrack)} unstaged"
+          + (", .gitignore updated" if plan.gitignore else "") + "; checking again:")
+    recheck = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--color", "never"])
+    return run_check(recheck, env)
+
+
 def cmd_scope(args) -> int:
     repo = Repo.discover()
     path = scope_path(repo)
@@ -5398,6 +5648,9 @@ def build_parser():
     s.add_argument("globs", nargs="*")
     t = sub.add_parser("trust", help="approve the [[commands]] in .aigate/lite.toml so they may run")
     t.add_argument("--rev", help="approve the config as committed in this revision (e.g. a branch you push)")
+    x = sub.add_parser("fix", help="fix debugger lines, focused tests and staged env files (shows a diff; --yes applies)")
+    x.add_argument("--yes", action="store_true", help="apply the changes and stage them")
+    x.add_argument("--only", metavar="RULE[,RULE]", help=f"only these rules ({', '.join(FIXABLE)})")
     b = sub.add_parser("baseline", help="accept today's findings so only new ones stop commits (.aigate/baseline.json)")
     b.add_argument("--include-secrets", action="store_true", help="also accept secrets (rotate them instead)")
     b.add_argument("--prune", action="store_true", help="drop entries that no longer occur")
@@ -5429,7 +5682,8 @@ def main(argv=None) -> int:
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
-                "doctor": cmd_doctor, "baseline": cmd_baseline}[args.command](args)
+                "doctor": cmd_doctor, "baseline": cmd_baseline,
+                "fix": cmd_fix}[args.command](args)
     except UserError as e:
         if debug:
             raise
