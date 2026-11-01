@@ -1,0 +1,67 @@
+# aigate-lite's own configuration (used by `check --all` on this repository).
+# Every [[allow]] names one rule, one file and one fingerprint (see `check --all -v`) for an intentional
+# finding; nothing is allowed by rule or directory alone. Limits, until fingerprints are reworked (Phase 2
+# item 4): a fingerprint identifies a finding by its rule, file and key, and for suppress.* rules the key is
+# the marker text (`# type: ignore`, `# nosec`), so the suppress.* entries below allow every line with that
+# marker in that one test file; the tests/ fixture files are frozen, so they cannot be reworded yet.
+version = 1
+
+# ---- aigate_lite.py: the detector's own text and deliberate design choices
+
+[[allow]]
+rule = "code.placeholder"
+path = "aigate_lite.py"
+fingerprint = "a064457f0120"
+reason = "module docstring lists the rule family by name ('placeholder code, swallowed errors, ...'); not a stub"
+
+[[allow]]
+rule = "secrets.generic"
+path = "aigate_lite.py"
+fingerprint = "f413955b2c02"
+reason = "SECRET_WORDS is a regex of credential words used by the checks, not a credential"
+
+[[allow]]
+rule = "security.shell"
+path = "aigate_lite.py"
+fingerprint = "f0d7a59155cb"
+reason = "user [[commands]] are shell command lines by design; they run only after `aigate-lite trust`, {files} quoted per OS"
+
+# ---- project config
+
+[[allow]]
+rule = "tests.config_changed"
+path = "pyproject.toml"
+fingerprint = "7ba86aed8f63"
+reason = "testpaths = [\"tests\"] is the project's own pytest config; check --all reads every line as newly added"
+
+# ---- tests/: fixture text written into temporary repositories to exercise the rules
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_cache.py"
+fingerprint = "a0bb2f919ca9"
+reason = "fixture line for the result-cache tests (written into a temp repo)"
+
+[[allow]]
+rule = "code.placeholder"
+path = "tests/test_code_tests.py"
+fingerprint = "9d37fefa7e09"
+reason = "fixture for the code.placeholder rule"
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_code_tests.py"
+fingerprint = "52c066bcb49a"
+reason = "fixtures for the suppression rules (two lines share this fingerprint)"
+
+[[allow]]
+rule = "suppress.security"
+path = "tests/test_code_tests.py"
+fingerprint = "148273e1f09c"
+reason = "fixture for the suppress.security rule"
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_gate.py"
+fingerprint = "fc31a8896581"
+reason = "fixture line for the end-to-end gate tests"

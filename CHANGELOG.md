@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased — 0.2.0 (Phase 2: usability)
+
+### Behaviour changes
+- `check --all` reports the risk score but no longer escalates a Fix verdict to Block (the verdict is the
+  strongest finding's action; JSON `escalated` is always false there). Staged, range and push checks still
+  escalate at risk 60.
+- `check --all` run by an AI agent uses the configuration committed in HEAD (before: built-in defaults,
+  because the "base" of a full scan is the empty tree). Uncommitted config edits still never apply to agents.
+- `security.shell` findings in Python files are fingerprinted by the call text instead of its line number,
+  so the fingerprint survives edits above it. `[[allow]]` entries that used an old `security.shell`
+  fingerprint no longer match until legacy fingerprints are supported (Phase 2 item 4).
+- Installed-package metadata is read one distribution at a time: a broken distribution is skipped
+  (before, it silently dropped every distribution after it); an unexpected error is no longer swallowed and
+  reports `gate.error` (fail closed).
+
+### Added
+- `.aigate/lite.toml` for this repository: one `[[allow]]` per intentional finding in the tool's own source
+  and test fixtures (exact rule, file and fingerprint each), so `check --all` on this repo has no fix/block.
+
+### Fixed
+- tests: `test_configured_command_runs` wrote a Windows interpreter path into a TOML basic string (`\U` is an
+  invalid escape, so the config was rejected); it now uses a TOML literal string. It still fails on Windows
+  when the interpreter path contains a space (see PROGRESS.md, BLOCKED).
+
 ## Unreleased (Phase 1 → 1.0)
 
 ### Behaviour changes

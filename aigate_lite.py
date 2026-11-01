@@ -2117,44 +2117,54 @@ def python_environment(ctx):
     """(importable top-level names, import -> distributions) from this interpreter and project venvs."""
     if "py_env" in ctx.cache:
         return ctx.cache["py_env"]
+    import csv
     import importlib.metadata
+    unreadable = (OSError, ValueError, LookupError, csv.Error)    # broken metadata of one distribution: skip it
     names, mapping = set(), defaultdict(set)
-    try:
-        for dist in importlib.metadata.distributions():
-            dname = dist.metadata["Name"] if dist.metadata else None
-            for top in _dist_tops(dist):
-                names.add(top)
-                if dname:
-                    mapping[top].add(dname)
-    except Exception:
-        pass
+    for dist in importlib.metadata.distributions():
+        try:
+            dname, tops = (dist.metadata["Name"] if dist.metadata else None), _dist_tops(dist)
+        except unreadable:
+            continue
+        for top in tops:
+            names.add(top)
+            if dname:
+                mapping[top].add(dname)
     for sp in find_site_packages(ctx.repo.root):
         try:
-            for entry in os.listdir(sp):
-                if entry.endswith(".py"):
-                    names.add(entry[:-3])
-                elif entry.endswith((".so", ".pyd")):
-                    names.add(entry.split(".")[0])
-                elif "." not in entry and entry != "__pycache__" and os.path.isdir(os.path.join(sp, entry)):
-                    names.add(entry)
-            for dist in importlib.metadata.distributions(path=[sp]):
-                dname = dist.metadata["Name"] if dist.metadata else None
-                if not dname:
-                    continue
-                tops = (dist.read_text("top_level.txt") or "").split()
-                if not tops:
-                    for f in dist.files or []:
-                        first = f.parts[0] if f.parts else ""
-                        if first and not first.endswith((".dist-info", ".egg-info", ".pth", ".data")) \
-                                and first not in ("..", "__pycache__", "bin"):
-                            tops.append(first[:-3] if first.endswith(".py") else first.split(".")[0])
-                for t in set(tops):
-                    names.add(t)
-                    mapping[t].add(dname)
-        except Exception:
+            entries = os.listdir(sp)
+        except OSError:
             continue
+        for entry in entries:
+            if entry.endswith(".py"):
+                names.add(entry[:-3])
+            elif entry.endswith((".so", ".pyd")):
+                names.add(entry.split(".")[0])
+            elif "." not in entry and entry != "__pycache__" and os.path.isdir(os.path.join(sp, entry)):
+                names.add(entry)
+        for dist in importlib.metadata.distributions(path=[sp]):
+            try:
+                dname = dist.metadata["Name"] if dist.metadata else None
+                tops = _site_tops(dist) if dname else ()
+            except unreadable:
+                continue
+            for t in tops:
+                names.add(t)
+                mapping[t].add(dname)
     ctx.cache["py_env"] = (names, mapping)
     return names, mapping
+
+
+def _site_tops(dist) -> set:
+    """Top-level import names of a distribution in a project venv: top_level.txt, else its installed files."""
+    tops = (dist.read_text("top_level.txt") or "").split()
+    if not tops:
+        for f in dist.files or []:
+            first = f.parts[0] if f.parts else ""
+            if first and not first.endswith((".dist-info", ".egg-info", ".pth", ".data")) \
+                    and first not in ("..", "__pycache__", "bin"):
+                tops.append(first[:-3] if first.endswith(".py") else first.split(".")[0])
+    return set(tops)
 
 
 def _importable(top: str) -> bool:
@@ -2900,7 +2910,7 @@ def check_tests(ctx) -> list:
 # --------------------------------------------------------------------------- checks: suppressions
 
 SUPPRESSIONS = [
-    ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:allow|(?:#|//)\s*NOSONAR\b|"
+    ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:(?:allow)|(?:#|//)\s*NOSONAR\b|"
                                      r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d")),
     ("suppress.blanket", re.compile(r"#\s*(?:flake8|ruff):\s*noqa\s*$|#\s*mypy:\s*ignore-errors|#\s*pylint:\s*skip-file|"
                                     r"//\s*@ts-nocheck|/\*\s*eslint-disable\s*\*/|^\s*//\s*eslint-disable\s*$|"
@@ -3405,7 +3415,8 @@ def _python_call(fc, node, line, imported_embed) -> list:
     if name in ("eval", "exec"):
         out.append(make("security.eval", fc.path, line, f"{name}() runs code built at runtime", key=f"{name}:{line}"))
     if _is_const(kw.get("shell"), True) or name in SHELL_CALLS:
-        out.append(make("security.shell", fc.path, line, f"{name}(...) runs through a shell", key=f"shell:{line}"))
+        out.append(make("security.shell", fc.path, line, f"{name}(...) runs through a shell",
+                        key=f"shell:{ast.unparse(node)}"))         # the call itself, not its line
     if name in DESER_CALLS:
         out.append(make("security.deserialization", fc.path, line, f"{name}() can run code from the data", key=f"deser:{line}"))
     elif name in ("yaml.load", "yaml.load_all"):
@@ -3664,10 +3675,13 @@ def risk_score(findings, agent: bool) -> float:
     return round(min(100.0, m * fix_sum + min(25.0, m * warn_sum)), 1)
 
 
-def decide(findings, risk):
+def decide(findings, risk, escalate=True):
+    """Verdict = the strongest action among findings that are not allowed. A Fix verdict becomes Block when the
+    risk score reaches BLOCK_AT, except with escalate=False (`check --all`, an audit of the whole tree, where
+    the score would only measure the repository's size)."""
     top = max((ACTION_RANK[f.action] for f in findings if not f.allowed), default=1)
     verdict = {1: "pass", 2: "warn", 3: "fix", 4: "block"}[top]
-    if verdict == "fix" and risk >= BLOCK_AT:
+    if escalate and verdict == "fix" and risk >= BLOCK_AT:
         return "block", True
     return verdict, False
 
@@ -3907,7 +3921,8 @@ def run_check(args, env) -> int:
         if args.config:
             cfg = pre
         elif provenance[0] == "agent":                # an agent cannot loosen the gate for its own change
-            source = (repo.commit("HEAD") or "") if head is None else base
+            # its change's base; for `check --all` (an audit of HEAD, not a change) HEAD itself
+            source = (repo.commit("HEAD") or "") if head is None else head if full else base
             cfg = load_config(repo, source) if source and source != repo.empty_tree() else load_config(repo, "__none__")
         elif head is None:
             cfg = pre
@@ -3967,7 +3982,7 @@ def run_check(args, env) -> int:
     final_ctx = ctx
     findings = apply_policy(findings, final_ctx, env)
     risk = risk_score(findings, provenance[0] == "agent")
-    verdict, escalated = decide(findings, risk)
+    verdict, escalated = decide(findings, risk, escalate=not full)
     stats["seconds"] = round(time.monotonic() - started, 2)
     res = Result(findings, verdict, escalated, risk, provenance, label,
                  {"files": stats["files"], "added": stats["added"], "removed": stats["removed"],

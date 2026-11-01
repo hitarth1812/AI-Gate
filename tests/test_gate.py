@@ -166,7 +166,7 @@ def test_explain(repo):
 
 
 def test_configured_command_runs(repo):
-    repo.write(".aigate/lite.toml", f'[[commands]]\nname = "tests"\nrun = "{sys.executable} -c \\"raise SystemExit(3)\\""\n'
+    repo.write(".aigate/lite.toml", f'[[commands]]\nname = "tests"\nrun = \'{sys.executable} -c "raise SystemExit(3)"\'\n'
                                     'stage = "commit"\n')
     repo.commit()
     assert repo.run("trust").returncode == 0
