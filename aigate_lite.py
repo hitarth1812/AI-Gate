@@ -4503,6 +4503,304 @@ def cmd_explain(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- doctor
+
+# `git rev-parse --absolute-git-dir` (Repo.discover) is the newest git feature the tool relies on: added by
+# git commit a2f5a8762693, first released in v2.13.0. Every other command and flag it runs is older.
+GIT_MIN = (2, 13, 0)
+DOCTOR_URLS = (("PyPI", "https://pypi.org/pypi/pip/json"),
+               ("npm", "https://registry.npmjs.org/-/package/react/dist-tags"),
+               ("OSV", "https://api.osv.dev/v1/query"),
+               ("npm downloads", "https://api.npmjs.org/downloads/point/last-week/react"),
+               ("pypistats", "https://pypistats.org/api/packages/pip/recent"))
+DOCTOR_SNIPPETS = {
+    "husky": "add this line to .husky/pre-commit: python3 .aigate/aigate_lite.py check --staged",
+    "lefthook": "add to lefthook.yml: pre-commit: { commands: { aigate-lite: { run: python3 .aigate/aigate_lite.py "
+                "check --staged } } }",
+}
+
+
+def parse_git_version(text: str):
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def _check(cid, status, detail, fix=""):
+    return {"id": cid, "status": status, "detail": detail, "fix": fix}
+
+
+def _git_text(cwd, *args):
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _doctor_python(env, hooks_dir):
+    out = [_check("python", "ok", f"running Python {sys.version.split()[0]} at {sys.executable}")]
+    pinned = vendored = None
+    try:
+        with open(os.path.join(hooks_dir, "pre-commit"), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if HOOK_MARK in text:
+            m = re.search(r"^PY='((?:[^']|'\\'')*)'$", text, re.M)
+            pinned = m.group(1).replace("'\\''", "'") if m else None
+            vendored = m is None
+    except OSError:
+        pass
+    choice = discover_python(env, pinned=pinned, exists=lambda p: os.access(p, os.X_OK))
+    label = "vendored hook" if vendored else "hook" if pinned else "a hook installed now"
+    if not choice.command:
+        tried = "; ".join(f"{c}: {r}" for c, r in choice.tried)
+        out.append(_check("python.hook", "fail", f"{label} would find no Python 3.11+ ({tried})",
+                          "install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3"))
+    elif choice.pinned_missing:
+        out.append(_check("python.hook", "warn", f"pinned interpreter {pinned} is missing; {label} falls back to "
+                          f"{choice.reason}", "run: aigate-lite install (pins the current Python)"))
+    else:
+        out.append(_check("python.hook", "ok", f"{label} uses {choice.reason}"))
+    return out
+
+
+def _doctor_git(cwd):
+    text = _git_text(cwd, "--version")
+    if text is None:
+        return _check("git", "fail", "git not found on PATH", "install git and make sure `git --version` works")
+    version = parse_git_version(text)
+    if version is None or version < GIT_MIN:
+        need = ".".join(map(str, GIT_MIN[:2]))
+        return _check("git", "warn", f"{text}: older than {need} (needed for `git rev-parse --absolute-git-dir`)",
+                      f"upgrade git to {need} or newer")
+    return _check("git", "ok", text)
+
+
+def _doctor_hooks(repo, hooks_dir):
+    out = []
+    for kind, missing in (("pre-commit", "fail"), ("pre-push", "warn")):
+        path = os.path.join(hooks_dir, kind)
+        if not os.path.exists(path):
+            out.append((missing, f"{kind} hook not installed", "run: aigate-lite install"))
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if HOOK_MARK not in text:
+            out.append((missing, f"{kind} hook is not aigate-lite's",
+                        f"run: aigate-lite install --force (keeps the current one as {kind}.local)"))
+            continue
+        if os.name != "nt" and not os.access(path, os.X_OK):
+            out.append(("fail", f"{kind} hook is not executable", f"run: chmod +x {path}"))
+            continue
+        m = re.search(r"^SCRIPT='((?:[^']|'\\'')*)'$", text, re.M)
+        script = m.group(1).replace("'\\''", "'") if m else os.path.join(repo.root, ".aigate", "aigate_lite.py")
+        if not os.path.isfile(script):
+            out.append(("fail", f"{kind} hook runs {script}, which is missing", "run: aigate-lite install"))
+            continue
+        chained = " (runs your old hook first: " + kind + ".local)" if os.path.exists(path + ".local") else ""
+        out.append(("ok", f"{kind}{chained}", ""))
+    worst = next((s for s in ("fail", "warn") if any(o[0] == s for o in out)), "ok")
+    bad = [o for o in out if o[0] != "ok"]
+    detail = "; ".join(o[1] for o in bad) if bad else "pre-commit and pre-push installed: " + ", ".join(o[1] for o in out)
+    fix = next((o[2] for o in bad if o[2]), "")
+    return _check("hooks", worst, detail, fix)
+
+
+def _doctor_hook_manager(repo):
+    hooks_path = _git_text(repo.root, "config", "--get", "core.hooksPath")
+    root = repo.root
+    if os.path.exists(os.path.join(root, ".pre-commit-config.yaml")):
+        return _check("hooks.manager", "warn", "the pre-commit framework manages hooks (.pre-commit-config.yaml)",
+                      "add under `repos:` in .pre-commit-config.yaml:\n" + PRE_COMMIT_SNIPPET)
+    if hooks_path or os.path.isdir(os.path.join(root, ".husky")):
+        which = "husky" if ".husky" in (hooks_path or ".husky") else None
+        return _check("hooks.manager", "warn", f"core.hooksPath is {hooks_path or 'unset'}"
+                      f"{' (husky)' if which else ''}: git runs hooks from there, not .git/hooks",
+                      DOCTOR_SNIPPETS["husky"] if which else
+                      f"add `python3 .aigate/aigate_lite.py check --staged` to {hooks_path}/pre-commit")
+    if any(os.path.exists(os.path.join(root, n)) for n in ("lefthook.yml", "lefthook.yaml", ".lefthook.yml")):
+        return _check("hooks.manager", "warn", "lefthook manages hooks", DOCTOR_SNIPPETS["lefthook"])
+    return _check("hooks.manager", "ok", "no other hook manager found")
+
+
+def _doctor_version(repo):
+    path = os.path.join(repo.root, ".aigate", "aigate_lite.py")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+    except OSError:
+        return _check("version", "ok", f"aigate-lite {__version__} (not vendored)")
+    vendored = m.group(1) if m else "unknown"
+    if vendored != __version__:
+        return _check("version", "warn", f"vendored .aigate/aigate_lite.py is {vendored}, this is {__version__}",
+                      "run: aigate-lite install --vendor (then commit .aigate/aigate_lite.py)")
+    return _check("version", "ok", f"aigate-lite {__version__}, vendored copy matches")
+
+
+def _doctor_config(cfg):
+    if any("not valid TOML" in p or p.startswith("cannot read") for p in cfg.problems):
+        return _check("config", "fail", "; ".join(cfg.problems), f"fix {CONFIG_PATH} (the gate uses built-in defaults)")
+    if cfg.problems:
+        return _check("config", "warn", "; ".join(cfg.problems), f"fix the entries named above in {CONFIG_PATH}")
+    return _check("config", "ok", f"{cfg.origin}: no problems")
+
+
+def _doctor_commands(repo, cfg):
+    cmds = cfg["commands"]
+    if not cmds:
+        return _check("commands", "ok", "no [[commands]] configured")
+    if commands_hash(cmds) in trusted_hashes(repo):
+        return _check("commands", "ok", f"{len(cmds)} configured command(s), approved")
+    names = ", ".join(c["name"] for c in cmds)
+    return _check("commands", "warn", f"[[commands]] not approved yet, so they do not run: {names}",
+                  "review them, then run: aigate-lite trust")
+
+
+def _doctor_cache(cfg):
+    path = default_cache_dir()
+    state = "result cache on" if cfg["gate"].get("cache") is True else "result cache off (enable: --cache)"
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, f".doctor-{os.getpid()}")
+        with open(probe, "w") as fh:
+            fh.write("")
+        os.remove(probe)
+    except OSError as e:
+        return _check("cache", "warn", f"{state}; cache dir {path} is not writable ({e.strerror})",
+                      "set AIGATE_CACHE_DIR to a writable directory")
+    size, loose = 0, []
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isfile(full):
+            size += os.path.getsize(full)
+            if os.name != "nt" and name.endswith((".json", ".key")) and os.stat(full).st_mode & 0o077:
+                loose.append(name)
+    detail = f"{state}; {path} ({size // 1024} KB)"
+    if loose:
+        return _check("cache", "warn", f"{detail}; readable by others: {', '.join(loose)}",
+                      f"run: chmod 600 {path}/*.json {path}/*.key")
+    return _check("cache", "ok", detail)
+
+
+def _redact_proxy(value: str) -> str:
+    return re.sub(r"//[^/@]*@", "//", value)
+
+
+def _default_fetch(url, timeout):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": f"aigate-lite/{__version__} doctor"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _doctor_network(env, cfg, fetch):
+    import ssl
+    import urllib.error
+    from concurrent.futures import ThreadPoolExecutor
+    proxy = next((env[k] for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy") if env.get(k)), None)
+    via = f" via proxy {_redact_proxy(proxy)}" if proxy else ""
+
+    def one(item):
+        name, url = item
+        try:
+            fetch(url, 3)
+            return name, None
+        except urllib.error.URLError as e:
+            return name, "tls" if isinstance(e.reason, ssl.SSLError) else str(e.reason)
+        except ssl.SSLError:
+            return name, "tls"
+        except (OSError, ValueError) as e:
+            return name, str(e) or type(e).__name__
+    with ThreadPoolExecutor(max_workers=len(DOCTOR_URLS)) as pool:
+        results = list(pool.map(one, DOCTOR_URLS))
+    failed = [(n, why) for n, why in results if why]
+    if not failed:
+        return _check("network", "ok", f"PyPI, npm, OSV, npm downloads and pypistats reachable{via}")
+    status = "fail" if cfg["gate"].get("offline") == "block" else "warn"
+    names = ", ".join(n for n, _ in failed)
+    if any(why == "tls" for _, why in failed):
+        return _check("network", status, f"TLS certificate verification failed for {names}{via}",
+                      "behind a corporate proxy? point SSL_CERT_FILE at your company's CA bundle "
+                      "(SSL_CERT_FILE=/path/to/ca.pem)")
+    return _check("network", status, f"not reachable: {names}{via} ({failed[0][1]}); dependency checks will be "
+                  "incomplete", "check your connection or proxy settings (HTTPS_PROXY), or use --offline")
+
+
+def _doctor_agent(env, cfg):
+    kind, why = detect_provenance(env, cfg["provenance"]["agent_env"], cfg["provenance"]["default"])
+    if kind == "agent":
+        return _check("agent", "ok", f"AI agent detected via {why.lstrip('$')}: commits from this shell count as "
+                      "AI-agent commits")
+    return _check("agent", "ok", "no AI agent detected in this shell: commits count as human commits")
+
+
+def doctor_report(env, offline=False, fetch=None) -> list:
+    """Every doctor check as {id, status: ok|warn|fail, detail, fix}, sorted fail -> warn -> ok."""
+    cwd = os.getcwd()
+    checks = [_doctor_git(cwd)]
+    try:
+        repo = Repo.discover(cwd)
+    except GitError as e:
+        repo = None
+        checks.append(_check("repo", "fail", f"not inside a git work tree ({e})",
+                             "run doctor inside your project (or run: git init)"))
+    if repo is not None:
+        hooks_dir = repo.git_path("hooks")
+        checks += _doctor_python(env, hooks_dir)
+        shallow = _git_text(repo.root, "rev-parse", "--is-shallow-repository") == "true"
+        has_commits = repo.commit("HEAD") is not None
+        if shallow:
+            checks.append(_check("repo", "warn", f"{repo.root}: shallow clone; --range and --push checks may miss "
+                                 "their base", "run: git fetch --unshallow (CI: fetch-depth: 0)"))
+        elif not has_commits:
+            checks.append(_check("repo", "warn", f"{repo.root}: no commits yet", "make a first commit"))
+        else:
+            checks.append(_check("repo", "ok", repo.root))
+        cfg = load_config(repo, "worktree")
+        checks += [_doctor_hooks(repo, hooks_dir), _doctor_hook_manager(repo), _doctor_version(repo),
+                   _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg)]
+        scope = load_scope(repo)
+        checks.append(_check("scope", "ok", "task scope: " + ", ".join(scope) if scope else
+                             "no task scope set (every path is in scope)"))
+    else:
+        checks += _doctor_python(env, os.path.join(cwd, ".git", "hooks"))
+        cfg = merge_config({}, [])
+    checks.append(_check("network", "ok", "skipped (--offline)") if offline
+                  else _doctor_network(env, cfg, fetch or _default_fetch))
+    checks.append(_doctor_agent(env, cfg))
+    return sorted(checks, key=lambda c: ("fail", "warn", "ok").index(c["status"]))
+
+
+def _symbols(stream) -> dict:
+    """✔ ! ✖ → when the output can encode them, else OK ! X ->."""
+    try:
+        "✔✖→".encode(getattr(stream, "encoding", None) or "ascii")
+        return {"ok": "✔", "warn": "!", "fail": "✖", "arrow": "→"}
+    except (UnicodeEncodeError, LookupError):
+        return {"ok": "OK", "warn": "!", "fail": "X", "arrow": "->"}
+
+
+def cmd_doctor(args) -> int:
+    checks = doctor_report(dict(os.environ), offline=args.offline)
+    if args.format == "json":
+        print(json.dumps(checks, indent=2))
+    else:
+        sym = _symbols(sys.stdout)
+        width = max(len(c["id"]) for c in checks)
+        pad = " " * (width + 5)
+        for c in checks:
+            print(f"{sym[c['status']]:<2} {c['id']:<{width}}  {c['detail']}")
+            if c["status"] != "ok" and c["fix"]:
+                print(pad + sym["arrow"] + " " + c["fix"].replace("\n", "\n" + pad + "  "))
+        first = next((c for c in checks if c["status"] != "ok" and c["fix"]), None)
+        hint = first["fix"].splitlines()[0].removeprefix("run: ") if first else "all good; commit as usual"
+        print(f"next: {hint}")
+    return 1 if any(c["status"] == "fail" for c in checks) else 0
+
+
 def build_parser():
     import argparse
     p = argparse.ArgumentParser(prog="aigate-lite", description="Commit-time gate for AI-written code.")
@@ -4539,6 +4837,9 @@ def build_parser():
     s.add_argument("globs", nargs="*")
     t = sub.add_parser("trust", help="approve the [[commands]] in .aigate/lite.toml so they may run")
     t.add_argument("--rev", help="approve the config as committed in this revision (e.g. a branch you push)")
+    d = sub.add_parser("doctor", help="check this setup: Python, git, hooks, config, cache, network")
+    d.add_argument("--offline", action="store_true", help="skip the network checks")
+    d.add_argument("--format", choices=("text", "json"), default="text")
     e = sub.add_parser("explain", help="list rules, or explain one")
     e.add_argument("rule", nargs="?")
     return p
@@ -4559,7 +4860,8 @@ def main(argv=None) -> int:
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
-                "explain": cmd_explain, "trust": cmd_trust}[args.command](args)
+                "explain": cmd_explain, "trust": cmd_trust,
+                "doctor": cmd_doctor}[args.command](args)
     except GitError as e:
         print(f"aigate-lite: {e}", file=sys.stderr)
         return 2

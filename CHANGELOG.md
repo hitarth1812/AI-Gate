@@ -21,6 +21,10 @@
   reports `gate.error` (fail closed).
 
 ### Added
+- `aigate-lite doctor [--offline] [--format text|json]`: checks git (2.13+), the repository, the Python the
+  hooks will use, the hooks (and other hook managers, with the line to add), vendored-copy drift, config,
+  unapproved commands, the cache, registry reachability (proxy, TLS/SSL_CERT_FILE advice) and AI-agent
+  detection; exit 1 when something would make the hook fail.
 - Hooks honour `AIGATE_PYTHON` (path to the interpreter to use; ignored with a note while an AI agent runs the
   commit, like `AIGATE_SKIP`). `install` prints `hook Python: <interpreter> (<version>): <why>`.
 - `.aigate/lite.toml` for this repository: one `[[allow]]` per intentional finding in the tool's own source

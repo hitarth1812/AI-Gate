@@ -986,3 +986,45 @@ Verify (after the review fixes):
   C 727.6 · D 348.5 · C-cache 564.0 (all within ±1.1 %).
 - Pinned hook start-up (Windows, hookbench.py, 30 runs): old 373.4 / new 369.1 ms median (p95 386.6 / 382.1)
   → not slower.
+
+## P2 Item 2 — `aigate-lite doctor`
+
+Explore:
+- Pieces existed: `Repo.discover`, `load_config` problems, `trusted_hashes`/`commands_hash`, `load_scope`,
+  `default_cache_dir`, `detect_provenance`, `PRE_COMMIT_SNIPPET`, and (item 1) `discover_python`.
+- Minimum git version, verified rather than guessed: listed every git command/flag the tool runs
+  (`rev-parse --show-toplevel --absolute-git-dir`, `--git-path`, `--verify -q`, `cat-file --batch`,
+  `diff --raw -z --no-abbrev -M --ignore-submodules=all --no-textconv`, `ls-files -z` with pathspec magic,
+  `ls-tree -r -z --name-only`, `log --no-walk=unsorted -z`, `rev-list`, `merge-base`, `check-ignore -z
+  --stdin`, `hash-object -t tree --stdin`, `config --get`). The newest is `--absolute-git-dir`: GitHub API
+  `commits?path=builtin/rev-parse.c` shows `a2f5a8762693 rev-parse: add '--absolute-git-dir' option`
+  (2017-02-04); `compare/v2.12.0...a2f5a8762693` = "diverged" (not in 2.12), `compare/v2.13.0...` = "behind"
+  (contained) → **git 2.13**. `--git-path` is documented in the 2.12.5 manual (git-scm.com, read verbatim).
+  The release notes (RelNotes 2.13.0/2.5.0) do not mention either option, so they could not be used.
+- Risk: doctor must never traceback (outside a repo, git missing) and must not touch the network with
+  --offline; network code must be injectable.
+Change: `doctor [--offline] [--format text|json]` — `doctor_report(env, offline, fetch)` returns checks
+{id, status ok|warn|fail, detail, fix} sorted fail → warn → ok: git (version, < 2.13 warn), repo (work tree /
+no commits / shallow), python + python.hook (item 1 dry run, pinned interpreter read from the installed hook),
+hooks (pre-commit fail / pre-push warn if missing or foreign; script missing; exec bit on POSIX; chained
+.local), hooks.manager (core.hooksPath / husky / lefthook / pre-commit framework with the snippet), version
+(vendored copy drift), config (invalid TOML fail, other problems incl. unknown keys warn), commands
+(unapproved → `aigate-lite trust`), cache (on/off, writable, size, 0600 on POSIX), network (5 hosts in
+parallel, 3 s each, any HTTP answer = reachable; proxy shown with credentials removed; TLS failure → SSL_CERT_FILE;
+fail only with `gate.offline = "block"`), agent (which variable), scope. Text: one line per check, `→ fix`
+line for warn/fail (ASCII `->` and OK/!/X when stdout cannot encode ✔✖→), one final `next:` line. JSON: a list.
+Exit 1 if any check fails. Everything imported inside functions (nothing new at module load). Legacy
+fingerprints (D10) are checked from item 4.
+Tests (tests/test_doctor.py, new, 20): no hooks → fail + exit 1; after install → ok + pinned interpreter;
+invalid TOML → fail; unknown key → warn; core.hooksPath/.husky → warn + snippet; pre-commit framework →
+snippet; vendored drift → warn; unapproved commands → warn; --offline never calls fetch; 5 hosts with 3 s
+timeouts; TLS → SSL_CERT_FILE and proxy credentials never printed; unreachable → warn, fail with
+offline=block; agent variable named; scope + cache; git version parsing/minimum; shallow clone; outside a
+repo → exit 1 without traceback; JSON shape and order; text has one final `next:` and ASCII symbols on a
+cp1252 pipe; doctor finishes < 5 s. Before: all 20 failed (no `doctor` command).
+Measured (this repo, `py -3.12 aigate_lite.py doctor`, 5 runs each incl. the py launcher): offline median
+0.78 s (max 0.81 s) ≤ 1 s; online median 1.74 s (max 1.80 s) ≤ 5 s.
+Verify: Windows `1 failed, 184 passed, 11 skipped in 191.64s` (BLOCKED D5 test); WSL `196 passed in 46.54s`;
+pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged; startup 172.4 (+4.5 %; the script
+grew by the doctor code and `python -c pass` itself moved +3.9 % in the same run) · A 337.9 (+4.4 %) ·
+B 404.7 · C 735.4 · D 359.7 · C-cache 568.3.
