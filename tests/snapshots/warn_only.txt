@@ -1,0 +1,5 @@
+aigate-lite 0.1.0 · staged · 2 files +12 −3 · human
+app/a.py
+  4  WARN   code.todo  # TODO later
+▲ WARN · risk 3/100 · 1 warn · 0.1s
+next: commit allowed; the warnings are worth a look

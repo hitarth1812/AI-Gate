@@ -3871,50 +3871,171 @@ STYLE = {"block": "\033[1;31m", "fix": "\033[1;33m", "warn": "\033[36m", "pass":
          "reset": "\033[0m"}
 
 
-def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str) -> None:
+SYMBOLS_UTF = {"ok": "✔", "warn": "!", "fail": "✖", "arrow": "→", "dot": "·", "minus": "−", "ellipsis": "…",
+               "dash": "—", "pass": "✔ PASS", "warnmark": "▲ WARN", "fixmark": "✖ FIX", "blockmark": "✖ BLOCK"}
+SYMBOLS_ASCII = {"ok": "OK", "warn": "!", "fail": "X", "arrow": "->", "dot": "-", "minus": "-", "ellipsis": "...",
+                 "dash": "-", "pass": "OK PASS", "warnmark": "! WARN", "fixmark": "X FIX", "blockmark": "X BLOCK"}
+HOOK_CAP = 25
+
+
+def symbols(stream) -> dict:
+    """Unicode symbols when the stream can encode them, else ASCII (a cp1252 pipe on Windows printed `?`)."""
+    try:
+        "✔✖·→…−≈▲—".encode(getattr(stream, "encoding", None) or "ascii")
+        return SYMBOLS_UTF
+    except (UnicodeEncodeError, LookupError):
+        return SYMBOLS_ASCII
+
+
+def use_color(choice: str, stream, env) -> bool:
+    """--color always/never wins; auto = colour on a TTY, NO_COLOR turns it off, FORCE_COLOR on."""
+    if choice != "auto":
+        return choice == "always"
+    if env.get("NO_COLOR"):
+        return False
+    return bool(env.get("FORCE_COLOR")) or stream.isatty()
+
+
+def _summary(res: Result, active, allowed, baselined, stage, sym, s) -> str:
+    dot = sym["dot"]
+    counts = Counter(f.action for f in active)
+    tally = f" {dot} ".join(f"{counts[a]} {a}" for a in ("block", "fix", "warn") if counts[a])
+    if allowed:
+        tally += f"{f' {dot} ' if tally else ''}{len(allowed)} allowed"
+    mark = sym[{"pass": "pass", "warn": "warnmark", "fix": "fixmark", "block": "blockmark"}[res.verdict]]
+    tail = " (risk score escalated it)" if res.escalated else ""
+    stopped = f" {sym['dash']} {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
+    return (f"{s(res.verdict)}{mark}{s('reset')}{tail} {dot} risk {res.risk:g}/100{f' {dot} ' + tally if tally else ''}"
+            f" {dot} {res.stats['seconds']:.1f}s{stopped}")
+
+
+def _next_line(res: Result, active, baselined, stage) -> str | None:
+    hidden = f" ({len(baselined)} baseline finding{'' if len(baselined) == 1 else 's'} hidden)" if baselined else ""
+    act = "push" if stage == "push" else "commit"
+    blocks = [f for f in active if f.action == "block"]
+    fixes = [f for f in active if f.action == "fix"]
+    if res.verdict == "block" and blocks:
+        n = len(blocks)
+        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+    if res.verdict in ("block", "fix"):
+        n, rules = len(fixes), sorted({f.rule for f in fixes})
+        if stage == "scan":
+            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or accept today's findings: " \
+                   f"aigate-lite baseline{hidden}"
+        if len(rules) == 1 and res.provenance[0] != "agent" and not res.escalated:
+            return f"next: fix it, or for this {act} only (humans): AIGATE_ALLOW={rules[0]} git {act} ...{hidden}"
+        return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above (a false positive? aigate-lite explain " \
+               f"<rule>){hidden}"
+    if res.verdict == "warn":
+        return f"next: {act if stage != 'scan' else 'nothing'} {'allowed' if stage != 'scan' else 'blocks'}; " \
+               f"the warnings are worth a look{hidden}"
+    return f"next: nothing to do{hidden}" if baselined else None
+
+
+def _fit(text: str, width, sym) -> str:
+    if width and len(text) > width:
+        return text[:max(0, width - len(sym["ellipsis"]))] + sym["ellipsis"]
+    return text
+
+
+def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="commit", mode="staged",
+                hook=False, width=None, sym=None) -> str:
+    """The text report. Default: compact, grouped by file. -v: the detailed view. -q: only what stops the commit.
+    `width` truncates lines (only passed when stdout is a terminal, so CI logs stay complete)."""
+    sym = sym or SYMBOLS_UTF
     s = (lambda k: STYLE[k]) if color else (lambda k: "")
     active = [f for f in res.findings if not f.allowed]
     allowed = [f for f in res.findings if f.allowed and f.allowed != "baseline"]
     baselined = [f for f in res.findings if f.allowed == "baseline"]
     if quiet and res.verdict == "pass":
-        return
-    prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
+        return ""
+    out = []
     st = res.stats
-    print(f"{s('dim')}aigate-lite {__version__} · {res.label} · {st['files']} file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']})"
-          f" · {prov} · config: {res.config}{s('reset')}")
-    for note in res.notes:
-        print(f"{s('dim')}  note: {note}{s('reset')}")
-    for f in active:
-        if quiet and f.action == "warn":
-            continue
-        loc = f.path + (f":{f.line}" if f.line else "")
-        print(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {loc}")
-        print(f"        {f.message}")
-        hint = f.hint if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
-        if hint:
-            for i, ln in enumerate(hint.splitlines()):
-                print(f"        {s('dim')}{'→ ' if i == 0 else '  '}{ln}{s('reset')}")
+    if verbose or quiet:
+        prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
+        out.append(f"{s('dim')}aigate-lite {__version__} {sym['dot']} {res.label} {sym['dot']} {st['files']} "
+                   f"file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']}) {sym['dot']} {prov} "
+                   f"{sym['dot']} config: {res.config}{s('reset')}")
+        out += [f"{s('dim')}  note: {note}{s('reset')}" for note in res.notes]
+        for f in active:
+            if quiet and f.action == "warn":
+                continue
+            out.append(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {f.path}"
+                       f"{f':{f.line}' if f.line else ''}")
+            out.append(f"        {f.message}")
+            hint = f.hint if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
+            for i, ln in enumerate((hint or "").splitlines()):
+                out.append(f"        {s('dim')}{sym['arrow'] + ' ' if i == 0 else '  '}{ln}{s('reset')}")
+            if verbose:
+                out.append(f"        {s('dim')}fingerprint {f.fingerprint}{s('reset')}")
         if verbose:
-            print(f"        {s('dim')}fingerprint {f.fingerprint}{s('reset')}")
-    if verbose:
-        for f in allowed + baselined:
-            tag = "BASELINE" if f.allowed == "baseline" else "ALLOW"
-            print(f"  {s('dim')}{tag} {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} ({f.allowed})"
-                  f" fingerprint {f.fingerprint}{s('reset')}")
-    counts = Counter(f.action for f in active)
-    tally = " · ".join(f"{counts[a]} {a}" for a in ("block", "fix", "warn") if counts[a])
-    if allowed:
-        tally += f"{' · ' if tally else ''}{len(allowed)} allowed"
-    if baselined:
-        tally += f"{' · ' if tally else ''}{len(baselined)} in baseline (hidden; -v shows them)"
-    mark = {"pass": "✔ PASS", "warn": "▲ WARN", "fix": "✖ FIX", "block": "✖ BLOCK"}[res.verdict]
-    tail = " (risk score escalated it)" if res.escalated else ""
-    stopped = f" — {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
-    print(f"{s(res.verdict)}{mark}{s('reset')}{tail} · risk {res.risk:g}/100{' · ' + tally if tally else ''}"
-          f" · {st['seconds']:.1f}s{stopped}")
-    if res.verdict in ("fix", "block") and stage != "scan":
-        print(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows how to allow it."
-              f" Bypass once (not recommended): git {'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
+            for f in allowed + baselined:
+                tag = "BASELINE" if f.allowed == "baseline" else "ALLOW"
+                out.append(f"  {s('dim')}{tag} {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} "
+                           f"({f.allowed}) fingerprint {f.fingerprint}{s('reset')}")
+        summary = _summary(res, active, allowed, baselined, stage, sym, s)
+        if baselined:
+            summary += f" {sym['dot']} {len(baselined)} in baseline (hidden; -v shows them)" if not verbose \
+                else f" {sym['dot']} {len(baselined)} in baseline"
+        out.append(summary)
+        if quiet:
+            if res.verdict in ("fix", "block") and stage != "scan":
+                out.append(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows "
+                           f"how to allow it. Bypass once (not recommended): git "
+                           f"{'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
+        else:
+            nxt = _next_line(res, active, baselined, stage)
+            if nxt:
+                out.append(nxt)
+        return "\n".join(out) + "\n"
+
+    who = "human" if res.provenance[0] != "agent" else f"AI agent ({res.provenance[1].lstrip('$')})"
+    head = (f"aigate-lite {__version__} {sym['dot']} {mode} {sym['dot']} {st['files']} file"
+            f"{'' if st['files'] == 1 else 's'} +{st['added']} {sym['minus']}{st['removed']} {sym['dot']} {who}")
+    out.append(f"{s('dim')}{_fit(head, width, sym)}{s('reset')}")
+    out += [f"{s('dim')}{_fit('  note: ' + note, width, sym)}{s('reset')}" for note in res.notes]
+    rank = {"block": 0, "fix": 1, "warn": 2}
+    by_file: dict = defaultdict(list)
+    for f in active:
+        by_file[f.path].append(f)
+    files = sorted(by_file, key=lambda p: (min(rank[f.action] for f in by_file[p]), p))
+    lw = max((len(str(f.line or "-")) for f in active), default=1)
+    rw = max((len(f.rule) for f in active), default=0)
+    cap = HOOK_CAP if hook else None
+    shown, hinted = 0, set()
+    for path in files:
+        if cap is not None and shown >= cap:
+            break
+        out.append(f"{s('dim')}{_fit(path, width, sym)}{s('reset')}")
+        for f in sorted(by_file[path], key=lambda f: (f.line or 0, rank[f.action], f.rule)):
+            if cap is not None and shown >= cap:
+                break
+            prefix = f"  {str(f.line or '-'):>{lw}}  "
+            plain = f"{prefix}{f.action.upper():<5}  {f.rule:<{rw}}  {f.message}"
+            plain = _fit(plain, width, sym)
+            out.append(plain[:len(prefix)] + s(f.action) + plain[len(prefix):len(prefix) + 5] + s("reset")
+                       + plain[len(prefix) + 5:])
+            shown += 1
+            hint = (f.hint or f.meta.hint or "").splitlines()
+            if f.action in ("block", "fix") and hint and f.rule not in hinted:
+                hinted.add(f.rule)
+                out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
+                           f"{s('reset')}")
+    if cap is not None and len(active) > shown:
+        out.append(f"  +{len(active) - shown} more {sym['dash']} run: aigate-lite check")
+    out.append(_summary(res, active, allowed, baselined, stage, sym, s))
+    nxt = _next_line(res, active, baselined, stage)
+    if nxt:
+        out.append(_fit(nxt, width, sym))
+    return "\n".join(out) + "\n"
+
+
+def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str, mode="staged",
+                hook=False) -> None:
+    import shutil
+    width = shutil.get_terminal_size().columns if sys.stdout.isatty() else None
+    sys.stdout.write(render_text(res, color=color, verbose=verbose, quiet=quiet, stage=stage, mode=mode, hook=hook,
+                                 width=width, sym=symbols(sys.stdout)))
 
 
 def report_json(res: Result) -> None:
@@ -4191,8 +4312,9 @@ def run_check(args, env, collect=False):
     elif args.format == "sarif":
         report_sarif(res)
     else:
-        color = args.color == "always" or (args.color == "auto" and sys.stdout.isatty() and not env.get("NO_COLOR"))
-        report_text(res, color=color, verbose=args.verbose, quiet=args.quiet, stage=stage)
+        mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
+        report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
+                    stage=stage, mode=mode, hook=bool(args.staged or args.push))
     return 1 if verdict in ("fix", "block") else 0
 
 
@@ -5146,21 +5268,12 @@ def doctor_report(env, offline=False, fetch=None) -> list:
     return sorted(checks, key=lambda c: ("fail", "warn", "ok").index(c["status"]))
 
 
-def _symbols(stream) -> dict:
-    """✔ ! ✖ → when the output can encode them, else OK ! X ->."""
-    try:
-        "✔✖→".encode(getattr(stream, "encoding", None) or "ascii")
-        return {"ok": "✔", "warn": "!", "fail": "✖", "arrow": "→"}
-    except (UnicodeEncodeError, LookupError):
-        return {"ok": "OK", "warn": "!", "fail": "X", "arrow": "->"}
-
-
 def cmd_doctor(args) -> int:
     checks = doctor_report(dict(os.environ), offline=args.offline)
     if args.format == "json":
         print(json.dumps(checks, indent=2))
     else:
-        sym = _symbols(sys.stdout)
+        sym = symbols(sys.stdout)
         width = max(len(c["id"]) for c in checks)
         pad = " " * (width + 5)
         for c in checks:

@@ -1136,3 +1136,38 @@ Verify (final, after the review fixes and the bench fixes):
   startup 176.7 (+7.2 %) · A 333.6 (+3.1 %) · B 404.6 · C 737.9 · D 362.0 · E 341.6 (E/A = 1.02 ≤ 1.10) ·
   C-cache 567.0.
 - Windows `1 failed, 232 passed, 11 skipped in 244.98s` (BLOCKED D5 test).
+
+## P2 Item 5 — compact default output
+
+Explore:
+- `report_text` printed a header with label/provenance/config, then per finding 2-3 lines; the summary line
+  carries `FIX` / `commit stopped` / "(risk score escalated it)", which frozen tests assert.
+- Symbols (`·`, `→`, `✔`, `▲`, `✖`) were literal; on a cp1252 pipe `main()` replaced them with `?`.
+- Colour: `--color always` or auto + TTY + no NO_COLOR; FORCE_COLOR ignored. Hooks run `check --staged` /
+  `check --push`, so those flags identify hook mode.
+Change: `render_text()` (returns the text; `report_text` prints it) — compact default: header
+`aigate-lite <ver> · <staged|range|push|all> · <n> files +a −r · <human | AI agent (VAR)>`, files ordered by
+their most severe finding then path, `line  ACTION  rule  message` aligned, one `→ hint` per rule for block/fix,
+hook cap 25 + `+N more — run: aigate-lite check`, the old summary line, exactly one `next:` line (block → fix
+the N BLOCK lines; fix with one rule and a human → AIGATE_ALLOW=<rule> for this commit; several rules → fix the
+N FIX lines / explain; warn → commit allowed; --all → or accept with `aigate-lite baseline`; baseline hits →
+"(N baseline findings hidden)"; pass without hidden findings → no next line). `-v` = previous detailed view
+(+ next line); `-q` unchanged. `symbols(stream)` chosen once per run (ASCII when the stream cannot encode
+"✔✖·→…−≈▲—"), shared with doctor. `use_color()`: --color, NO_COLOR, FORCE_COLOR, else TTY. Width truncation
+only when stdout is a terminal.
+Tests (tests/test_output.py, new, 30): 12 golden snapshots created in tests/snapshots/ (pass, warn_only,
+fix_one_rule, fix_two_rules, block, escalated, agent_fix, baseline_hidden, hook_cap, ascii, tty_80,
+no_tty_full; colour off; `AIGATE_UPDATE_SNAPSHOTS=1` rewrites them); exactly one final `next:` line for every
+non-pass case; hints once per rule and files by severity; truncation only with a width; -v / -q; a real cp1252
+pipe prints `X FIX` / `->` and no `?`; FORCE_COLOR / NO_COLOR / --color; no secret value in the report.
+Phase 2 test changed: tests/test_baseline.py text test now expects "baseline findings hidden)" (item 5 moved
+the hidden count into the `next:` line, as the spec says).
+Verify: Windows `py -3.12 -m pytest -q` → 2 failed / 261 passed / 11 skipped in 252.95s, where the second
+failure was the baseline text test fixed during that run (re-run: tests/test_baseline.py + tests/test_output.py
+`47 passed`), the other the BLOCKED D5 test; WSL `274 passed in 61.35s`; pyflakes clean.
+bench vs phase2_start: PASS, git calls/blobs unchanged; startup 184.1 (+11.6 %) · A 344.9 (+6.5 %) · B 405.3 ·
+C 740.3 · D 366.7 · E 345.4 (E/A 1.00) · C-cache 574.5.
+⚠ Start-up trend: +4.5 % (item 2) → +5.8 % (3) → +7.2 % (4) → +11.6 % (5). It is the compile time of the growing
+script on Windows (hooks there recompile ~260 KB every run; POSIX hooks reuse bytecode). The timing gate fails
+only when median AND p95 exceed +15 %; items 6-8 add code, so it may cross. The fix is the Phase 1 BLOCKED
+item (bytecode reuse for Windows hooks, needs an ACL check or an approved assumption).

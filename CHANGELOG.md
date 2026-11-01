@@ -3,6 +3,27 @@
 ## Unreleased — 0.2.0 (Phase 2: usability)
 
 ### Behaviour changes
+- **Text output is compact by default** (JSON, SARIF and github formats unchanged): a one-line header, findings
+  grouped by file (most severe file first) with aligned `line  ACTION  rule  message` columns, each rule's fix
+  hint once, at most 25 findings in hooks (`+N more — run: aigate-lite check`), the summary line as before and
+  one final `next:` line. `-v` keeps the previous detailed view (now with the `next:` line instead of the
+  "Fix the findings…" sentence); `-q` is unchanged. Symbols fall back to ASCII (`X FIX`, `->`, `-`) when the
+  output cannot encode them, instead of printing `?`. Colour: `--color`, `NO_COLOR`, `FORCE_COLOR`, otherwise only
+  on a terminal; long lines are cut to the terminal width only on a terminal. Before / after:
+
+      aigate-lite 0.1.0 · staged changes · 1 file (+1 -0) · human · config: built-in defaults
+        FIX   security.eval                a.py:1
+              eval() runs code built at runtime
+              → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+      ✖ FIX · risk 30/100 · 1 fix · 0.1s — commit stopped
+        Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows how to allow it. Bypass…
+
+      aigate-lite 0.2.0 · staged · 1 file +1 −0 · human
+      a.py
+        1  FIX    security.eval  eval() runs code built at runtime
+                  → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+      ✖ FIX · risk 30/100 · 1 fix · 0.1s — commit stopped
+      next: fix it, or for this commit only (humans): AIGATE_ALLOW=security.eval git commit ...
 - **Fingerprints** are 16 hex characters and no longer depend on line numbers (they use the enclosing function
   and the code, or the whole line for suppressions); identical findings in one file are numbered. `[[allow]]`
   entries with 0.1 fingerprints (12 characters) keep matching during 0.2.x, each for the first matching

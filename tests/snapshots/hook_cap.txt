@@ -1,0 +1,54 @@
+aigate-lite 0.1.0 · staged · 2 files +12 −3 · human
+src/f00.py
+   1  WARN   code.todo  # TODO later
+src/f01.py
+   2  WARN   code.todo  # TODO later
+src/f02.py
+   3  WARN   code.todo  # TODO later
+src/f03.py
+   4  WARN   code.todo  # TODO later
+src/f04.py
+   5  WARN   code.todo  # TODO later
+src/f05.py
+   6  WARN   code.todo  # TODO later
+src/f06.py
+   7  WARN   code.todo  # TODO later
+src/f07.py
+   8  WARN   code.todo  # TODO later
+src/f08.py
+   9  WARN   code.todo  # TODO later
+src/f09.py
+  10  WARN   code.todo  # TODO later
+src/f10.py
+  11  WARN   code.todo  # TODO later
+src/f11.py
+  12  WARN   code.todo  # TODO later
+src/f12.py
+  13  WARN   code.todo  # TODO later
+src/f13.py
+  14  WARN   code.todo  # TODO later
+src/f14.py
+  15  WARN   code.todo  # TODO later
+src/f15.py
+  16  WARN   code.todo  # TODO later
+src/f16.py
+  17  WARN   code.todo  # TODO later
+src/f17.py
+  18  WARN   code.todo  # TODO later
+src/f18.py
+  19  WARN   code.todo  # TODO later
+src/f19.py
+  20  WARN   code.todo  # TODO later
+src/f20.py
+  21  WARN   code.todo  # TODO later
+src/f21.py
+  22  WARN   code.todo  # TODO later
+src/f22.py
+  23  WARN   code.todo  # TODO later
+src/f23.py
+  24  WARN   code.todo  # TODO later
+src/f24.py
+  25  WARN   code.todo  # TODO later
+  +5 more — run: aigate-lite check
+▲ WARN · risk 25/100 · 30 warn · 0.1s
+next: commit allowed; the warnings are worth a look

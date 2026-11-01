@@ -260,7 +260,7 @@ def test_text_output_hides_baseline_hits_and_verbose_shows_them(repo):
     repo.commit("bl")
     quiet = repo.run("check", "--all", "--color", "never").stdout
     loud = repo.run("check", "--all", "--color", "never", "-v").stdout
-    assert "in baseline (hidden" in quiet and "BASELINE" not in quiet and "BASELINE" in loud
+    assert "baseline findings hidden)" in quiet and "BASELINE" not in quiet and "BASELINE" in loud
 
 
 def test_corrupt_baseline_is_ignored_with_a_note(repo):
