@@ -738,6 +738,49 @@ def _parse_date(value):
         return None
 
 
+PRESET_NAMES = ("relaxed", "balanced", "strict")
+
+
+def _presets() -> dict:
+    """Built-in presets, the single source for `preset = ...` and the docs/RULES.md table. Effective config =
+    built-in defaults <- preset <- the user's file."""
+    strict_security = {r: "fix" for r in RULES if r.startswith("security.") and RULES[r].action == "warn"}
+    return {
+        "relaxed": {"rules": {"suppress.type": "warn", "suppress.coverage": "warn", "deps.undeclared": "warn",
+                              "deps.version_cooldown": "warn", "code.todo": "off", "size.*": "off"},
+                    "limits": {"function_lines": 100, "complexity": 15}},
+        "balanced": {},
+        "strict": {"rules": {**strict_security, "deps.typosquat": "fix", "tests.no_assertions": "fix",
+                             "tests.expected_changed": "fix"},
+                   "gate": {"offline": "block"},
+                   "limits": {"function_lines": 50, "complexity": 8}},
+    }
+
+
+PRESETS = _presets()
+
+
+def apply_preset(raw: dict, problems: list) -> dict:
+    """The user's raw config laid over its preset. A user [rules] key (exact or glob) replaces every preset
+    rule it matches, so the user's setting always wins; other sections merge key by key."""
+    name = raw.get("preset", "balanced")
+    if name not in PRESETS:
+        problems.append(f"preset must be relaxed, balanced or strict (got {name!r}); using balanced")
+        name = "balanced"
+    out = {k: v for k, v in raw.items() if k != "preset"}
+    for section, values in PRESETS[name].items():
+        user = raw.get(section)
+        if user is not None and not isinstance(user, dict):
+            continue                                   # merge_config reports the wrong type
+        user = user or {}
+        if section == "rules":
+            kept = {p: a for p, a in values.items() if not any(fnmatch.fnmatchcase(p, k) for k in user)}
+            out["rules"] = {**kept, **user}
+        else:
+            out[section] = {**values, **user}
+    return out
+
+
 def merge_config(raw: dict, problems: list) -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     for section, value in raw.items():
@@ -860,7 +903,7 @@ def load_config(repo: Repo, source: str, explicit=None) -> Config:
             raw = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
             problems.append(f"{CONFIG_PATH} is not valid TOML ({e}); using defaults")
-    data = merge_config(raw, problems)
+    data = merge_config(apply_preset(raw, problems), problems)
     validate_config(data, problems)
     return Config(data, problems, origin)
 
@@ -4345,71 +4388,194 @@ def cmd_uninstall(_args) -> int:
     return 0
 
 
-CONFIG_TEMPLATE = """# aigate-lite configuration. Every key is optional; delete what you don't change.
-# Rule ids: `aigate-lite explain`. Actions: block | fix | warn | off  (block and fix stop the commit).
-version = 1
+LANG_EXT = {".py": "Python", ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JavaScript",
+            ".ts": "TypeScript", ".tsx": "TypeScript", ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin",
+            ".rb": "Ruby", ".php": "PHP", ".cs": "C#", ".fs": "F#", ".swift": "Swift", ".dart": "Dart"}
+NPM_PLACEHOLDER = re.compile(r'echo "?Error: no test specified"?')
+DEFAULT_REGISTRIES = ("https://pypi.org/", "https://pypi.python.org/", "https://registry.npmjs.org/")
 
-[gate]
-fail_closed = true        # if a check crashes, stop the commit instead of passing it
-offline = "warn"          # registry unreachable: warn | block | skip
-max_seconds = 20          # time budget for registry lookups
-cache = false             # remember files the per-file checks found clean (same as --cache)
 
-[rules]
-# "suppress.type" = "warn"
-# "perf.*" = "off"
+@dataclasses.dataclass
+class ProjectInfo:
+    languages: list
+    ecosystems: list
+    test_commands: list
+    private: list
+    trusted_sources: list
 
-[paths]
-# sensitive = ["**/auth/**", "**/payments/**"]        # security rules and suppressions are one step stricter here
-# forbidden = ["infra/prod/**"]                       # nobody may change these
-# forbidden_for_agents = [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**"]
-# ignore = ["**/node_modules/**", "dist/**"]
 
-[limits]
-# function_lines = 60
-# complexity = 10
-# loop_depth = 3
-# file_lines = 800
-# diff_added_lines = 400
-# diff_files = 25
+def _read_small(root, rel, limit=1_000_000) -> str:
+    try:
+        with open(os.path.join(root, rel), "rb") as fh:
+            return fh.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
 
-[deps]
-# new_package_days = 30
-# cooldown_days = 5
-# private = ["acme-*", "@acme/*"]                     # served by your private index: skip public lookups
-# trusted_sources = ["https://pypi.acme.internal/simple"]
-# import_map = { mylib = "my-lib-dist" }              # import name -> package name when they differ
 
-[provenance]
-# agent_env = ["MY_AGENT_ENV_VAR"]   # extra env vars that mean "an AI agent is committing"
-# default = "agent"                  # treat every commit as AI-written (stricter)
+def _public_url(url: str):
+    """A registry URL without credentials, query or fragment; None for the public default registries."""
+    import urllib.parse
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    host = parts.hostname + (f":{parts.port}" if parts.port else "")
+    clean = urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return None if clean.startswith(DEFAULT_REGISTRIES) else clean
 
-# Run your own checks too. stage: commit | push | both. {files} = changed files.
-# [[commands]]
-# name = "tests"
-# run = "python -m pytest -q"
-# stage = "push"
-# action = "fix"
 
-# Allow a known false positive. Blocking rules need a path or a fingerprint (shown with -v).
-# [[allow]]
-# rule = "secrets.generic"
-# path = "tests/fixtures/**"
-# reason = "fake credentials used by tests"
-# expires = 2027-06-30
-"""
+def _registry_hints(root, files) -> tuple:
+    private, trusted = [], []
+    for rel in files:
+        name = rel.rsplit("/", 1)[-1]
+        if name == ".npmrc":
+            for line in _read_small(root, rel).splitlines():
+                m = re.match(r"\s*(@[\w.-]+):registry\s*=\s*(\S+)", line)
+                if m:
+                    private.append(f"{m.group(1)}/*")
+                    trusted.append(_public_url(m.group(2)))
+                else:
+                    m = re.match(r"\s*registry\s*=\s*(\S+)", line)
+                    trusted.append(_public_url(m.group(1)) if m else None)
+        elif re.fullmatch(r"requirements[\w.-]*\.txt|constraints[\w.-]*\.txt", name):
+            for line in _read_small(root, rel).splitlines():
+                m = re.match(r"\s*(?:--(?:extra-)?index-url|-i)[=\s]+(\S+)", line)
+                trusted.append(_public_url(m.group(1)) if m else None)
+        elif name == "pyproject.toml":
+            try:
+                tool = tomllib.loads(_read_small(root, rel)).get("tool", {})
+            except tomllib.TOMLDecodeError:
+                continue
+            uv = tool.get("uv", {}) if isinstance(tool.get("uv"), dict) else {}
+            sources = [*(tool.get("poetry", {}) or {}).get("source", []), *uv.get("index", []),
+                       *(tool.get("pdm", {}) or {}).get("source", [])]
+            urls = [s.get("url") for s in sources if isinstance(s, dict)]
+            urls += [uv.get("index-url"), *(uv.get("extra-index-url") or [])]
+            trusted += [_public_url(u) for u in urls if isinstance(u, str)]
+    return list(dict.fromkeys(p for p in private if p)), list(dict.fromkeys(t for t in trusted if t))
+
+
+def detect_project(root, files) -> ProjectInfo:
+    """Languages, package ecosystems, test commands and private-registry hints, from tracked files only."""
+    names = {f.rsplit("/", 1)[-1] for f in files}
+
+    def has(*wanted):
+        return any(n in names for n in wanted)
+    langs = list(dict.fromkeys(LANG_EXT[os.path.splitext(f)[1].lower()] for f in files
+                               if os.path.splitext(f)[1].lower() in LANG_EXT))
+    pyproject = _read_small(root, "pyproject.toml") if "pyproject.toml" in files else ""
+    eco = []
+    if has("poetry.lock") or "[tool.poetry" in pyproject:
+        eco.append("poetry")
+    if has("uv.lock"):
+        eco.append("uv")
+    if has("Pipfile", "Pipfile.lock"):
+        eco.append("pipenv")
+    if has("environment.yml", "environment.yaml"):
+        eco.append("conda")
+    if any(re.fullmatch(r"requirements[\w.-]*\.txt", n) for n in names) or has("setup.py", "setup.cfg") \
+            or (pyproject and not eco):
+        eco.append("pip")
+    js = [e for e, marker in (("deno", ("deno.json", "deno.jsonc")), ("bun", ("bun.lockb", "bun.lock")),
+                              ("pnpm", ("pnpm-lock.yaml",)), ("yarn", ("yarn.lock",)), ("npm", ("package-lock.json",)))
+          if has(*marker)]
+    if not js and has("package.json"):
+        js = ["npm"]
+    eco += js
+    for e, marker in (("go", ("go.mod",)), ("cargo", ("Cargo.toml",)), ("maven", ("pom.xml",)),
+                      ("gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")),
+                      ("bundler", ("Gemfile",)), ("composer", ("composer.json",))):
+        if has(*marker):
+            eco.append(e)
+    if any(n.endswith((".csproj", ".fsproj", ".sln")) for n in names):
+        eco.append("dotnet")
+
+    tests = []
+    if has("pytest.ini", "conftest.py") or "[tool.pytest" in pyproject \
+            or "[tool:pytest]" in (_read_small(root, "setup.cfg") if "setup.cfg" in files else "") \
+            or "[pytest]" in (_read_small(root, "tox.ini") if "tox.ini" in files else ""):
+        tests.append("python -m pytest -q")
+    if "package.json" in files:
+        try:
+            pkg = json.loads(_read_small(root, "package.json") or "{}")
+        except ValueError:
+            pkg = {}
+        script = ((pkg.get("scripts") or {}) if isinstance(pkg, dict) else {}).get("test")
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg, dict) else {}
+        if isinstance(script, str) and script.strip() and not NPM_PLACEHOLDER.search(script):
+            runner = next((e for e in js if e in ("npm", "yarn", "pnpm", "bun")), "npm")
+            tests.append({"npm": "npm test", "yarn": "yarn test", "pnpm": "pnpm test", "bun": "bun run test"}[runner])
+        elif "vitest" in deps:
+            tests.append("npx vitest run")
+        elif "jest" in deps:
+            tests.append("npx jest")
+    if "deno" in eco:
+        tests.append("deno test")
+    for e, cmd in (("go", "go test ./..."), ("cargo", "cargo test"), ("maven", "mvn -q test"),
+                   ("gradle", "./gradlew test" if "gradlew" in files else "gradle test"), ("dotnet", "dotnet test")):
+        if e in eco:
+            tests.append(cmd)
+    if "bundler" in eco and (any(f.endswith("_spec.rb") for f in files) or "rspec" in _read_small(root, "Gemfile")):
+        tests.append("bundle exec rspec")
+    if "composer" in eco and has("phpunit.xml", "phpunit.xml.dist"):
+        tests.append("vendor/bin/phpunit")
+    private, trusted = _registry_hints(root, files)
+    return ProjectInfo(langs, eco, list(dict.fromkeys(tests)), private, trusted)
+
+
+def init_text(preset: str, info: ProjectInfo) -> str:
+    """The .aigate/lite.toml `init` writes: the preset, detected non-default keys, commented test commands."""
+    lines = ["# aigate-lite configuration (written by `aigate-lite init`). Every key is optional; see",
+             "# examples/lite.toml for all of them. Rule ids: `aigate-lite explain`.",
+             "version = 1",
+             f'preset = "{preset}"            # relaxed | balanced | strict']
+    if info.private or info.trusted_sources:
+        lines += ["", "[deps]"]
+        if info.private:
+            lines.append("private = [" + ", ".join(json.dumps(p) for p in info.private) + "]   # internal packages")
+        if info.trusted_sources:
+            lines.append("trusted_sources = [" + ", ".join(json.dumps(u) for u in info.trusted_sources) + "]")
+    if info.test_commands:
+        lines += ["", "# Detected test command(s). Uncomment to run them before every push. Commands in a repository's",
+                  "# config run only after you approve them: aigate-lite trust"]
+        for i, cmd in enumerate(info.test_commands):
+            lines += ["# [[commands]]", f'# name = "{"tests" if i == 0 else f"tests-{i + 1}"}"',
+                      f"# run = {json.dumps(cmd)}", '# stage = "push"']
+    return "\n".join(lines) + "\n"
 
 
 def cmd_init(args) -> int:
     repo = Repo.discover()
     path = os.path.join(repo.root, CONFIG_PATH)
+    files = [f for f in run_git(repo.root, "ls-files", "-z").split("\0") if f]
+    info = detect_project(repo.root, files)
+    what = []
+    if info.languages:
+        what.append(", ".join(info.languages))
+    if info.ecosystems:
+        what.append("packages: " + ", ".join(info.ecosystems))
+    if info.test_commands:
+        what.append("tests: " + "; ".join(info.test_commands))
+    print("Detected: " + ("; ".join(what) if what else "nothing (no tracked project files)"))
+    print(f"Preset: {args.preset}")
+    text = init_text(args.preset, info)
+    if args.print:
+        print(text, end="")
+        return 0
     if os.path.exists(path) and not args.force:
-        print(f"{CONFIG_PATH} already exists (use --force to overwrite)")
+        print(f"{CONFIG_PATH} already exists; to replace it run: aigate-lite init --force (keeps a .bak copy)")
         return 1
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup = ""
+    if os.path.exists(path):
+        os.replace(path, path + ".bak")
+        backup = f" (previous file kept as {CONFIG_PATH}.bak)"
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(CONFIG_TEMPLATE)
-    print(f"wrote {CONFIG_PATH}")
+        fh.write(text)
+    print(f"Wrote {CONFIG_PATH}{backup}")
+    print("next: aigate-lite doctor")
     return 0
 
 
@@ -4830,8 +4996,10 @@ def build_parser():
     i.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ and point the hooks there")
     i.add_argument("--no-pre-push", action="store_true", help="install only the pre-commit hook")
     sub.add_parser("uninstall", help="remove the hooks this tool installed")
-    n = sub.add_parser("init", help="write a starter .aigate/lite.toml")
-    n.add_argument("--force", action="store_true")
+    n = sub.add_parser("init", help="detect the project and write .aigate/lite.toml")
+    n.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
+    n.add_argument("--print", action="store_true", help="show the file instead of writing it")
+    n.add_argument("--force", action="store_true", help="replace an existing file (kept as lite.toml.bak)")
     s = sub.add_parser("scope", help="declare which paths the current task may touch")
     s.add_argument("action", choices=("set", "add", "show", "clear"))
     s.add_argument("globs", nargs="*")

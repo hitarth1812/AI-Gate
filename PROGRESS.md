@@ -1028,3 +1028,37 @@ Verify: Windows `1 failed, 184 passed, 11 skipped in 191.64s` (BLOCKED D5 test);
 pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged; startup 172.4 (+4.5 %; the script
 grew by the doctor code and `python -c pass` itself moved +3.9 % in the same run) · A 337.9 (+4.4 %) ·
 B 404.7 · C 735.4 · D 359.7 · C-cache 568.3.
+
+## P2 Item 3 — `init` presets + project detection
+
+Explore:
+- `init` wrote a fixed CONFIG_TEMPLATE; only one test touches it (`init` twice → second exits 1).
+- `merge_config` lays the raw file over DEFAULT_CONFIG; `[rules]` is replaced wholesale and `apply_policy`
+  prefers an exact rule id over a glob, so a preset's exact id would beat a user's glob unless handled.
+- Spec check: `code.stub` is already `warn` by default, so listing it under relaxed is a no-op → **omitted**
+  (written reason, as the spec asks). "security.* warn → fix" = security.insecure_default, security.weak_crypto,
+  security.xss (computed from RULES, so new security rules follow automatically).
+Change: `PRESETS` (relaxed / balanced / strict, built from RULES) + `apply_preset()` in `load_config`:
+defaults ← preset ← user file; a user `[rules]` key (exact or glob) removes every preset rule it matches;
+unknown preset → `gate.config_invalid` "preset must be relaxed, balanced or strict (got 'x'); using balanced".
+`detect_project(root, tracked files)` → languages, ecosystems (pip/poetry/uv/pipenv/conda, npm/yarn/pnpm/bun/
+deno, go, cargo, maven/gradle, bundler, composer, dotnet), test commands (pytest; package.json scripts.test
+unless npm's placeholder, else vitest/jest via npx; deno test; go test ./...; cargo test; mvn -q test;
+./gradlew test; bundle exec rspec; vendor/bin/phpunit; dotnet test), private registries (.npmrc scopes →
+`private = ["@scope/*"]`; .npmrc / requirements / pyproject index URLs → trusted_sources; credentials, query and
+public default registries dropped; auth-token lines never read into output). `init [--preset] [--print]
+[--force]` writes only `preset`, detected `[deps]` keys and COMMENTED `[[commands]]` blocks with the trust note;
+prints Detected / Preset / Wrote / `next: aigate-lite doctor`; --print writes nothing; --force keeps
+`lite.toml.bak`; never overwrites without --force. `scripts/gen_docs.py` generates docs/RULES.md (presets table +
+rules table) from RULES/PRESETS; `--check` fails when it is stale.
+Tests (tests/test_init.py, new, 31): one synthetic repo per ecosystem (17, parametrized); npm placeholder not
+suggested; jest via npx; untracked files ignored; CRLF package.json + languages; init output/next line and
+commented command; --preset strict layering; user beats preset beats default (incl. a user glob over preset
+ids); relaxed changes a real check; unknown preset reported + balanced; --print writes nothing; --force backup +
+idempotent; private registries without credentials; empty repo; docs table generated. Before: 31 failed.
+Self-scan caught `# type: ignore` fixtures in the new test file → built at run time.
+Verify: Windows `1 failed, 215 passed, 11 skipped in 210.47s` (BLOCKED D5 test); WSL `227 passed in 49.76s`
+(before the fixture fix; test_init re-run after it: 31 passed); pyflakes clean (aigate_lite.py, scripts/gen_docs.py).
+bench vs phase2_start: PASS, git calls/blobs unchanged; startup 174.5 (+5.8 %) · A 335.6 (+3.7 %) · B 400.9 ·
+C 731.8 · D 356.6 · C-cache 568.9. Trend: start-up grows with the script size (doctor + init ≈ +25 KB to compile
+on every Windows hook run; POSIX hooks reuse bytecode). Still inside the 15 % gate; watched per item.
