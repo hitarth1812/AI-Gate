@@ -23,7 +23,9 @@ cached and skipped with --offline.
 import sys
 
 if sys.version_info < (3, 11):
-    sys.stderr.write("aigate-lite needs Python 3.11 or newer (found %s)\n" % sys.version.split()[0])
+    sys.stderr.write("aigate-lite: needs Python 3.11 or newer (found %s)\n"
+                     "  fix: install Python 3.11+ (hooks also use $AIGATE_PYTHON when it is set)\n"
+                     % sys.version.split()[0])
     sys.exit(2)
 
 import ast
@@ -440,13 +442,28 @@ def loads_jsonc(text: str):
 
 # --------------------------------------------------------------------------- git
 
-class GitError(RuntimeError):
+class UserError(Exception):
+    """A problem the user can fix: main() prints `aigate-lite: <cause>` and `  fix: <fix>`, no traceback."""
+
+    def __init__(self, cause: str, fix: str = "", exit_code: int = 2):
+        super().__init__(cause)
+        self.cause, self.fix, self.exit_code = cause, fix, exit_code
+
+
+class GitError(UserError):
     pass
+
+
+def git_missing() -> UserError:
+    return UserError("git was not found on PATH", "install git (2.13 or newer) and check that `git --version` works")
 
 
 def run_git(root, *args, input_bytes=None, check=True) -> str:
     PROFILE["git_calls"] += 1
-    proc = subprocess.run(["git", *args], cwd=root, input=input_bytes, capture_output=True)
+    try:
+        proc = subprocess.run(["git", *args], cwd=root, input=input_bytes, capture_output=True)
+    except FileNotFoundError:
+        raise git_missing() from None
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args[:2])} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return proc.stdout.decode("utf-8", "replace")
@@ -463,11 +480,15 @@ class Repo:
     @classmethod
     def discover(cls, cwd=None) -> "Repo":
         PROFILE["git_calls"] += 1
-        proc = subprocess.run(["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"], cwd=cwd,
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"], cwd=cwd,
+                                  capture_output=True, text=True)
+        except FileNotFoundError:
+            raise git_missing() from None
         lines = proc.stdout.splitlines()
         if proc.returncode != 0 or len(lines) != 2:
-            raise GitError("not inside a git repository")
+            raise GitError("not inside a git repository",
+                           "run it inside your project's folder (or create a repository there: git init)")
         return cls(lines[0].strip(), lines[1].strip())
 
     def git(self, *args, **kw) -> str:
@@ -911,7 +932,10 @@ def load_config(repo: Repo, source: str, explicit=None) -> Config:
         try:
             raw = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
-            problems.append(f"{CONFIG_PATH} is not valid TOML ({e}); using defaults")
+            hint = ""
+            if any(w in str(e).lower() for w in ("escape", "hex value", "unicode")):
+                hint = "; on Windows put paths in single quotes ('C:\\path') or use forward slashes"
+            problems.append(f"{CONFIG_PATH} is not valid TOML ({e}){hint}; using defaults")
     data = merge_config(apply_preset(raw, problems), problems)
     validate_config(data, problems)
     return Config(data, problems, origin)
@@ -1295,6 +1319,29 @@ def default_cache_dir() -> str:
     return os.path.join(base, "aigate-lite")
 
 
+def network_reason(e) -> str:
+    """Why a registry request failed, in words a user can act on."""
+    import socket
+    import ssl
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code} from the registry"
+    r = getattr(e, "reason", e)
+    if isinstance(r, ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError):
+        return "TLS certificate verification failed; behind a company proxy? set SSL_CERT_FILE to its CA bundle"
+    if isinstance(r, ssl.SSLError) or isinstance(e, ssl.SSLError):
+        return f"TLS error ({getattr(r, 'reason', None) or r}); a proxy that intercepts HTTPS?"
+    if isinstance(r, ConnectionRefusedError):
+        return "connection refused; check HTTPS_PROXY / HTTP_PROXY"
+    if isinstance(r, TimeoutError) or "timed out" in str(r):
+        return "timed out"
+    if isinstance(r, socket.gaierror):
+        return "DNS lookup failed (offline?)"
+    if isinstance(e, (ValueError, KeyError, TypeError)):
+        return "unexpected response from the registry"
+    return f"{type(r).__name__}: {str(r)[:80]}"
+
+
 def npm_quote(name: str) -> str:
     import urllib.parse
     return urllib.parse.quote(name, safe="@")
@@ -1317,6 +1364,7 @@ class Registry:
         self.cache_path = None
         self.dirty = False
         self.failures = 0
+        self.failure_reason = None
         if use_cache and self.fixture is None:
             self.cache_path = os.path.join(default_cache_dir(), "registry-v1.json")
             try:
@@ -1437,8 +1485,9 @@ class Registry:
                                "version": key[3]}).encode()
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
-        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
             self.failures += 1
+            self.failure_reason = self.failure_reason or network_reason(e)
             return None
 
     def _fetch_info(self, eco, name):
@@ -4149,19 +4198,35 @@ def _commit_info(repo, shas) -> tuple:
     return messages, authors, parents
 
 
+def range_error(repo, spec, missing) -> GitError:
+    """Why `--range` cannot be resolved, with the fix: no commits, a shallow CI clone, or an unknown ref."""
+    if not repo.commit("HEAD"):
+        return GitError("this repository has no commits yet", "make a first commit, then check a range")
+    if run_git(repo.root, "rev-parse", "--is-shallow-repository", check=False).strip() == "true":
+        return GitError(f"cannot resolve range {spec!r}: {missing!r} is unknown here (a typo, or missing because "
+                        "this clone is shallow)", "check the name; in CI fetch the full history: fetch-depth: 0 "
+                        "(GitHub Actions) / GIT_DEPTH: 0 (GitLab CI), or run: git fetch --unshallow")
+    remotes = run_git(repo.root, "remote", check=False).split()
+    remote, _, branch = missing.partition("/")
+    fix = f"check the name, or run: git fetch {remote} {branch}:refs/remotes/{remote}/{branch}" \
+        if branch and remote in remotes else "check the name (a branch, tag or commit that exists here)"
+    return GitError(f"cannot resolve range {spec!r}: {missing!r} is not a commit or branch here", fix)
+
+
 def plan_runs(repo, args, env) -> list:
     """Each run: (label, base, head, commits)."""
     if getattr(args, "all", False):
         head = repo.commit("HEAD")
         if not head:
-            raise GitError("check --all needs at least one commit")
+            raise GitError("check --all needs at least one commit", "make a first commit")
         return [("full tree", repo.empty_tree(), head, [])]
     if args.range:
         spec = args.range
         a, b = re.split(r"\.\.\.?", spec, 1) if ".." in spec else (spec, "HEAD")
-        head, start = repo.commit(b or "HEAD"), repo.commit(a)
+        a, b = a or "HEAD", b or "HEAD"                 # git reads an empty side as HEAD
+        head, start = repo.commit(b), repo.commit(a)
         if not head or not start:
-            raise GitError(f"cannot resolve range {spec!r}")
+            raise range_error(repo, spec, a if not start else b)
         base = run_git(repo.root, "merge-base", start, head, check=False).strip() or start
         commits = repo.git("rev-list", "--reverse", "--no-merges", f"{start}..{head}").split()
         return [(f"range {spec}", base, head, commits)]
@@ -4293,7 +4358,8 @@ def run_check(args, env, collect=False):
     registry.save()
     results.save()
     if registry.failures:
-        notes.append(f"{registry.failures} registry lookup(s) failed (offline or blocked); results may be incomplete")
+        notes.append(f"{registry.failures} registry lookup(s) failed ({registry.failure_reason or 'offline or blocked'}); "
+                     "dependency checks are incomplete (--offline skips them)")
 
     final_ctx = ctx
     findings = apply_policy(findings, final_ctx, env)
@@ -4498,8 +4564,10 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     if os.name != "nt":                                # see HOOK_LOADER; Windows hooks run the script directly
         lines.append(f"LOADER={_sh_quote(HOOK_LOADER)}")
         run = run.replace('"$SCRIPT"', '-P -c "$LOADER" "$SCRIPT"')
-    lines.append('[ -f "$SCRIPT" ] || { echo "aigate-lite: $SCRIPT is missing; reinstall the hook'
-                 ' (or bypass once with --no-verify)" >&2; exit 1; }')
+    restore = ("restore it (git checkout -- .aigate/aigate_lite.py) or run: aigate-lite install --vendor"
+               if vendored else "run: aigate-lite install")
+    lines.append(f'[ -f "$SCRIPT" ] || {{ printf "aigate-lite: %s is missing\\n  fix: {restore} '
+                 f'(or bypass once with --no-verify)\\n" "$SCRIPT" >&2; exit 1; }}')
     if kind == "pre-push":
         lines.append(f'printf "%s\\n" "$REFS" | {run} check --push --remote "$1"')
     else:
@@ -5288,9 +5356,15 @@ def cmd_doctor(args) -> int:
 
 def build_parser():
     import argparse
-    p = argparse.ArgumentParser(prog="aigate-lite", description="Commit-time gate for AI-written code.")
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"aigate-lite: {message}\n  see: aigate-lite --help\n")
+    p = Parser(prog="aigate-lite", description="Commit-time gate for AI-written code. "
+                                               "--debug (or AIGATE_DEBUG=1) shows tracebacks.")
     p.add_argument("--version", action="version", version=f"aigate-lite {__version__}")
-    sub = p.add_subparsers(dest="command")
+    sub = p.add_subparsers(dest="command", parser_class=Parser)
     c = sub.add_parser("check", help="check staged changes, a range, or a push")
     target = c.add_mutually_exclusive_group()
     target.add_argument("--staged", action="store_true", help="check what `git commit` would record (default)")
@@ -5343,20 +5417,42 @@ def main(argv=None) -> int:
                 and hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     argv = list(sys.argv[1:] if argv is None else argv)
+    debug = "--debug" in argv or os.environ.get("AIGATE_DEBUG") == "1"
+    argv = [a for a in argv if a != "--debug"]
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
         argv = ["check", *argv]
+    command = None
     try:
         args = build_parser().parse_args(argv)
+        command = args.command
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
                 "doctor": cmd_doctor, "baseline": cmd_baseline}[args.command](args)
-    except GitError as e:
-        print(f"aigate-lite: {e}", file=sys.stderr)
-        return 2
+    except UserError as e:
+        if debug:
+            raise
+        print(f"aigate-lite: {e.cause}" + (f"\n  fix: {e.fix}" if e.fix else ""), file=sys.stderr)
+        return e.exit_code
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:                   # the reader went away (e.g. `| head`): nothing to report
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 2
+    except Exception as e:                    # fail closed: exit 2 stops the hook, without a traceback
+        if debug:
+            raise
+        bypass = ""
+        if command == "check" and detect_provenance(dict(os.environ))[0] != "agent":
+            bypass = f"; to {'push' if '--push' in argv else 'commit'} anyway once (humans): git " \
+                     f"{'push' if '--push' in argv else 'commit'} --no-verify"
+        print(f"aigate-lite: internal error ({type(e).__name__}: {str(e)[:200]})\n"
+              "  fix: run it again with --debug (or AIGATE_DEBUG=1) and report the traceback" + bypass, file=sys.stderr)
+        return 2
     finally:
         if os.environ.get("AIGATE_PROFILE") == "1":
             sys.stderr.write("aigate-profile: " + json.dumps(dict(sorted(PROFILE.items()))) + "\n")

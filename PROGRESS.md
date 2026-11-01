@@ -1171,3 +1171,42 @@ C 740.3 · D 366.7 · E 345.4 (E/A 1.00) · C-cache 574.5.
 script on Windows (hooks there recompile ~260 KB every run; POSIX hooks reuse bytecode). The timing gate fails
 only when median AND p95 exceed +15 %; items 6-8 add code, so it may cross. The fix is the Phase 1 BLOCKED
 item (bytecode reuse for Windows hooks, needs an ACL check or an approved assumption).
+
+## P2 Item 6 ⚠ — friendly errors
+
+Explore (probed each catalogue entry before changing anything): git missing → raw `FileNotFoundError`
+traceback; `--range` with a bad ref or no commits → `cannot resolve range '...'` with no fix; argparse errors had
+no pointer to --help; detached HEAD in range mode already worked; invalid TOML already named line/column (as a
+gate.config_invalid finding, defaults used); an unreadable worktree file does not affect `--all` (it reads
+blobs); registry failures gave one generic note.
+Change: `UserError(cause, fix, exit_code=2)` (GitError is a subclass, so existing raises keep working); main()
+prints `aigate-lite: <cause>` + `  fix: <fix>`; any other exception → `internal error (<Type>: <text>)` + how to get
+the traceback (`--debug` anywhere in argv, or AIGATE_DEBUG=1) + for humans only the right bypass (`git commit` /
+`git push --no-verify`), exit 2; BrokenPipeError → exit 2 quietly. Catalogue: (1) not a repo → `git init` fix;
+(2) range without commits → "make a first commit"; (3) detached HEAD works (range + push tested); (4) shallow clone
+→ "unknown here (a typo, or missing because this clone is shallow)" + fetch-depth: 0 / GIT_DEPTH: 0 / git fetch
+--unshallow; (5) unknown ref → "check the name", and `git fetch <remote> <branch>:refs/remotes/<remote>/<branch>`
+only for an existing remote; an empty range side means HEAD; (6) TOML escape errors add "on Windows put paths in
+single quotes ('C:/path' style) or use forward slashes"; (7) unreadable file in --all → scan continues (already
+so; test pins it, POSIX non-root only); (8) registry note carries the first failure's reason (HTTP <code>, TLS
+certificate → SSL_CERT_FILE, other TLS error, connection refused → proxy, timed out, DNS) + "--offline skips them",
+with deps.unverified findings; (9) git missing → "install git (2.13 or newer)"; (10) interpreter guard has a fix
+line; (11) hook: missing script → restore it / `install --vendor` (vendored) or `install`; (12) argparse errors
+end with `see: aigate-lite --help`.
+Tests (tests/test_errors.py, new, 17): one per catalogue entry (1-12, plus empty range side), internal error
+(human/push/agent hints, --debug re-raises), closed pipe, registry reasons, and a seeded fuzz of 200 argv lists
+(80 % built from each subcommand's real options, 20 % random tokens; registry offline, doctor's fetch stubbed,
+stdin empty) asserting exit in {0,1,2}, no traceback, no "internal error", and ≥ 80 runs reaching real code.
+Process note: the code came before the tests again; run against the pre-item-6 commit, 11 of the first 14 failed
+(the 3 that passed cover behaviour that already worked: detached HEAD, unreadable file, fuzz without tracebacks).
+Review (independent subagent): 5 points (+1 nit). 1 fail-closed holds everywhere; BrokenPipe gave a misleading
+"internal error" → **fixed**. 2 MEDIUM internal error showed `git commit --no-verify` to agents and said commit
+during push → **fixed** (+ tests). 3 MEDIUM wrong fetch hints (HEAD~5, tags, SHAs, no remote), empty side,
+shallow false positive, HTTP/TLS reasons → **fixed** (+ tests); TOML hint has no false positives (verified).
+4 Windows printf with `%` in paths OK; vendored hint wrong → **fixed**. 5 MEDIUM fuzz could not catch internal
+errors and mostly hit argparse → **fixed**; test_7 meaningless on Windows/root → marker. Nit: shared GIT_MISSING
+instance → **fixed** (new instance per raise). Found 6 / fixed 6.
+Verify (after the review fixes): Windows `1 failed, 278 passed, 12 skipped in 320.13s` (BLOCKED D5 test);
+WSL `291 passed in 67.88s`; pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged;
+startup 185.2 (+12.3 %; this run was noisy: `python -c pass` itself +38.9 %) · A 342.9 · B 407.5 · C 740.6 ·
+D 365.5 · E 343.3 (E/A 1.00) · C-cache 579.1.

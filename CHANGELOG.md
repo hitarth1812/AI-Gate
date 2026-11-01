@@ -3,6 +3,11 @@
 ## Unreleased — 0.2.0 (Phase 2: usability)
 
 ### Behaviour changes
+- Errors are one cause line plus a `fix:` line, without tracebacks (`--debug` or `AIGATE_DEBUG=1` shows them):
+  not a repository, git missing, unresolvable ranges (empty repo, shallow CI clone, unknown ref), invalid TOML
+  (with a Windows-path hint), unreachable registries (the specific reason), bad flags (`see: aigate-lite --help`),
+  the interpreter guard and a missing vendored script. Any unexpected error exits 2 (the hook blocks) with a short
+  "internal error" message. An empty side of `--range` (e.g. `HEAD~1..`) now means HEAD.
 - **Text output is compact by default** (JSON, SARIF and github formats unchanged): a one-line header, findings
   grouped by file (most severe file first) with aligned `line  ACTION  rule  message` columns, each rule's fix
   hint once, at most 25 findings in hooks (`+N more — run: aigate-lite check`), the summary line as before and
