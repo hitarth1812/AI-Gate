@@ -854,6 +854,20 @@ C-cache           565.5     605.1
   → exit 3 (passes; the item-0 reviewer confirmed the same). **Question:** may the test also double-quote
   the interpreter path inside the literal string? D5 allows only the literal string / as_posix, so this is
   not applied. Linux passes either way.
+- **Item 1, three parts of the candidate spec** (everything else in item 1 is done). Each conflicts with a
+  frozen test (NN7):
+  a) Versioned candidates (`python3.14…3.11`, `py -3.14…-3.11`): `tests/test_hooks.py::
+     test_hook_without_any_python_stops_with_a_message` restricts PATH to the fake bin + git's and sh's
+     directories; on Linux that keeps `/usr/bin`, which has `python3.12`, so with versioned candidates the
+     hook finds a real Python and the test fails (measured: `assert (0 == 1)` on WSL).
+  b) Exact order (versioned names between `python` and `py -3`): `test_vendored_hook_tries_python3_python_then
+     _py_launcher` asserts the literal text `for c in python3 python 'py -3'; do`.
+  c) Pinning vendored hooks: every vendored-hook test installs with the real interpreter; a pin would be used
+     without probing, so the "no Python" test would pass the commit instead of blocking it.
+  **Question:** may those two tests be adjusted — (a) give `fake_bin` stubs for `python3.1x` too (or drop
+  `/usr/bin` from its PATH), (b) assert the order instead of the literal line, (c) install vendored hooks in
+  those tests with a pin to a missing path — so the full spec can be implemented? Today: $AIGATE_PYTHON →
+  pinned (non-vendored) → python3 → python → `py -3`.
 
 ## P2 Item 0 ⚠ — housekeeping
 
@@ -921,3 +935,54 @@ uncommitted config edits still do not apply. Test: committed `"security.shell" =
 `"security.*" = "off"` → under CLAUDECODE the findings are `warn` (failed before: config "built-in defaults").
 Self-scan from this session after the change: `WARN · risk 25/100 · 103 warn · 10 allowed` → 0 block / 0 fix.
 Re-verify after the addendum: Windows `1 failed, 150 passed, 11 skipped` (BLOCKED D5 test); WSL `162 passed`.
+
+## P2 Item 1 ⚠ — Python 3.11+ discovery for hooks (partly BLOCKED, see P2 BLOCKED)
+
+Explore:
+- Vendored hooks tried `python3`, `python`, `py -3` with a silent probe; the failure message named only those.
+- Non-vendored hooks ran the install-time interpreter (`PY='...'`) directly, with no fallback if it vanished.
+- The gate refuses Python < 3.11 at the top of aigate_lite.py; on POSIX the hook's loader passes `-P`
+  first, so an old pinned interpreter fails with "Unknown option: -P" (exit 2, still fail closed).
+- Frozen tests pin the hook text (`for c in python3 python 'py -3'; do`, `PY='C:/Program Files/...'`) and
+  the "no Python" behaviour of vendored hooks → the versioned candidates, exact order and vendored pinning
+  are BLOCKED (question recorded).
+Change (aigate_lite.py): `HOOK_DISCOVERY` sh block (probe `PY_PROBE` prints the version and must exit 0 AND
+print something; failures collected in `TRIED` as "candidate: version, too old" / "not found or not a working
+Python"); order $AIGATE_PYTHON → pinned (non-vendored; `[ -x ]`, no probe) → python3 → python → `py -3`;
+pinned missing → rediscover + one hint "... is missing; using X. To pin it, re-run aigate-lite install.";
+nothing qualifies → every candidate tried + `fix: install Python 3.11+ or set AIGATE_PYTHON=...` + "so the
+commit/push is blocked" + `--no-verify` note, exit 1. `PY` is one quoted word, `PYFLAG` carries `-3`, so paths
+with spaces work. `discover_python()` mirrors it in Python (dry run, injectable probe) and `install` prints
+`hook Python: <choice>: <why>` (doctor reuses it in item 2).
+Tests (tests/test_python_discovery.py, new, 15; sh-based ones run on Windows via Git sh and on Linux):
+too-old python3 skipped for python; Store stubs skipped for the py launcher; AIGATE_PYTHON wins (and is
+the only interpreter called); pinned used without probing from a path with spaces; pinned deleted →
+rediscovered with exactly one hint; nothing qualifies → message lists each candidate, the fix and the block;
+no bashisms; mirror order/choices; install reports pinned / AIGATE_PYTHON choice; agent cannot swap the gate
+via AIGATE_PYTHON (a human can); a program printing no version is not Python; a too-old pinned Python fails
+closed; mirror ignores AIGATE_PYTHON for agents. Before the change: 6 of the first 8 failed (e.g. `{'python3'}
+!= {'custom'}`, "no Python 3.11+ found (tried python3, python, py -3)").
+Hook start-up with a pinned interpreter (`hookbench.py`, 30 interleaved runs of the generated pre-commit hook
+in a repo with nothing staged; old = hook from HEAD's aigate_lite.py), measured before the review fixes:
+Windows old 370.7 / new 375.9 ms median (p95 387.5 / 387.5); Linux old 77.6 / new 78.0 ms (p95 83.6 / 85.4).
+Review (independent subagent; ran hooks under dash in WSL and Git sh): 7 points.
+1. HIGH `AIGATE_PYTHON=true` let an agent commit a secret (verified rc 0 with CLAUDECODE=1; AIGATE_SKIP is
+   refused for agents) → **fixed**: ignored with a one-line note when CLAUDECODE / AI_AGENT / GEMINI_CLI /
+   AIGATE_AGENT is set or AIGATE_PROVENANCE=agent, and a candidate must print a version. Tests: agent blocked,
+   human honoured, silent program rejected; a mutation that disables the agent check fails the test.
+2. LOW a pinned path replaced by a non-Python program passes (needs write access to that path) → accepted,
+   documented (the cost of not probing).
+3. INFO a pinned Python < 3.11 fails closed (POSIX "Unknown option: -P" exit 2; Windows the gate's own
+   message) → test added; message improvement left (would need probing).
+4. INFO sh correctness confirmed in dash and Git sh (quoting, `${2:+"$2"}`, pre-push `$1`, exit codes).
+5. INFO probe passes cleanly to native python.exe from Git sh.
+6. LOW install's report ignored AIGATE_PYTHON and used exists() not -x → **fixed** (uses discover_python).
+7. LOW one test accepted either outcome → **fixed** (deterministic via AIGATE_PYTHON); missing tests → added.
+Found 7 / fixed 4 / accepted 1 / info 2.
+Verify (after the review fixes):
+- Windows `1 failed, 164 passed, 11 skipped in 167.60s` (BLOCKED D5 test); WSL `176 passed in 42.57s`;
+  pyflakes clean.
+- bench vs phase2_start: PASS, git calls/blobs unchanged; startup 165.4 (+0.3 %) · A 322.7 · B 389.6 ·
+  C 727.6 · D 348.5 · C-cache 564.0 (all within ±1.1 %).
+- Pinned hook start-up (Windows, hookbench.py, 30 runs): old 373.4 / new 369.1 ms median (p95 386.6 / 382.1)
+  → not slower.

@@ -3,6 +3,11 @@
 ## Unreleased — 0.2.0 (Phase 2: usability)
 
 ### Behaviour changes
+- Hooks: a non-vendored hook still uses the interpreter pinned at install without probing, but if that path
+  is gone it now looks for python3 / python / `py -3` and prints one hint to re-run `install` (before: the
+  hook failed). A candidate must run Python 3.11+ and print its version. When nothing qualifies the message
+  lists every candidate with its version or error, the fix, and that the commit/push is blocked (it used to
+  list only the names). Re-run `aigate-lite install` to get the new hooks.
 - `check --all` reports the risk score but no longer escalates a Fix verdict to Block (the verdict is the
   strongest finding's action; JSON `escalated` is always false there). Staged, range and push checks still
   escalate at risk 60.
@@ -16,6 +21,8 @@
   reports `gate.error` (fail closed).
 
 ### Added
+- Hooks honour `AIGATE_PYTHON` (path to the interpreter to use; ignored with a note while an AI agent runs the
+  commit, like `AIGATE_SKIP`). `install` prints `hook Python: <interpreter> (<version>): <why>`.
 - `.aigate/lite.toml` for this repository: one `[[allow]]` per intentional finding in the tool's own source
   and test fixtures (exact rule, file and fingerprint each), so `check --all` on this repo has no fix/block.
 

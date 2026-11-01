@@ -4110,6 +4110,38 @@ sys.exit(module.main())
 """
 
 
+# Interpreter discovery shared by hooks (as sh) and `install`/`doctor` (as Python, see discover_python).
+# Order: $AIGATE_PYTHON, the interpreter pinned at install (non-vendored hooks; used without probing), then
+# python3, python, `py -3`. A candidate qualifies when it runs PY_PROBE with exit 0 and prints a version, so
+# the Windows Store `python3`/`python` stubs (non-zero exit, no version) are skipped. AIGATE_PYTHON is ignored
+# while an AI agent runs the commit (like AIGATE_SKIP): it would let an agent swap the gate for any program.
+# (Versioned names such as python3.12 are not tried yet: see PROGRESS.md, Phase 2 BLOCKED.)
+PY_PROBE = "import sys; print(sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+PY_GENERIC = (("python3",), ("python",), ("py", "-3"))
+AIGATE_PYTHON_IGNORED = "AIGATE_PYTHON is ignored while an AI agent runs the commit"
+HOOK_DISCOVERY = """\
+PROBE=%(probe)s
+TRIED=""
+try_py() {
+  v=$("$1" ${2:+"$2"} -c "$PROBE" </dev/null 2>/dev/null) && [ -n "$v" ] && { PY=$1; PYFLAG=$2; return 0; }
+  if [ -n "$v" ]; then v="$v, too old"; else v="not found or not a working Python"; fi
+  TRIED="$TRIED
+  $1${2:+ $2}: $v"
+  return 1
+}
+discover() {
+  for c in python3 python 'py -3'; do try_py $c && return 0; done
+  return 1
+}
+PY=""
+PYFLAG=""
+if [ -n "$AIGATE_PYTHON" ]; then
+  if [ -n "%(agent_vars)s" ] || [ "$AIGATE_PROVENANCE" = agent ]; then
+    echo "aigate-lite: %(ignored)s" >&2
+  else try_py "$AIGATE_PYTHON"; fi
+fi"""
+
+
 def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     local = f'"$HOOK_DIR/{kind}.local"'
     lines = ["#!/bin/sh", f"{HOOK_MARK} ({kind}). Remove with: aigate-lite uninstall",
@@ -4119,23 +4151,31 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
                   f'if [ -x {local} ]; then printf "%s\\n" "$REFS" | {local} "$@" || exit $?; fi']
     else:
         lines.append(f'if [ -x {local} ]; then {local} "$@" || exit $?; fi')
+    if not vendored:
+        lines += [f"PY={_sh_quote(py.replace(chr(92), '/'))}",
+                  f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}",
+                  'PINNED=$PY']
+    # Resets PY and tries AIGATE_PYTHON. PY is always one word (quoted when used) and PYFLAG carries `py`'s
+    # version flag, so paths with spaces work.
+    lines += (HOOK_DISCOVERY % {"probe": _sh_quote(PY_PROBE), "ignored": AIGATE_PYTHON_IGNORED,
+                                "agent_vars": "".join("$" + v for v in BUILTIN_AGENT_ENV)}).splitlines()
     if vendored:
-        # The first interpreter that really runs 3.11+: on Windows `python3` is often the Microsoft Store
-        # stub, which exists on PATH but only prints an install hint. PY stays unquoted below so that
-        # "py -3" splits into the launcher and its flag; every candidate is a fixed word list.
-        lines += ['ROOT="$(git rev-parse --show-toplevel)" || exit 1',
-                  'PY=""',
-                  "for c in python3 python 'py -3'; do",
-                  "  if $c -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' </dev/null >/dev/null 2>&1; then"
-                  ' PY="$c"; break; fi',
-                  "done",
-                  '[ -n "$PY" ] || { echo "aigate-lite: no Python 3.11+ found (tried python3, python, py -3);'
-                  ' stopping (bypass once with --no-verify)" >&2; exit 1; }',
+        lines += ['[ -n "$PY" ] || discover',
+                  'ROOT="$(git rev-parse --show-toplevel)" || exit 1',
                   'SCRIPT="$ROOT/.aigate/aigate_lite.py"']
-        run = '$PY "$SCRIPT"'
     else:
-        lines += [f"PY={_sh_quote(py.replace(chr(92), '/'))}", f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}"]
-        run = '"$PY" "$SCRIPT"'
+        lines += ['if [ -z "$PY" ] && [ -x "$PINNED" ]; then PY=$PINNED',              # fast path: no probe
+                  'elif [ -z "$PY" ]; then',
+                  '  TRIED="$TRIED',
+                  '  $PINNED: missing (pinned at install)"',
+                  '  discover && echo "aigate-lite: $PINNED (pinned at install) is missing; using $PY${PYFLAG:+ $PYFLAG}.'
+                  ' To pin it, re-run aigate-lite install." >&2',
+                  'fi']
+    what = "push" if kind == "pre-push" else "commit"
+    lines.append(f'[ -n "$PY" ] || {{ printf "aigate-lite: no Python 3.11+ found, so the {what} is blocked. Tried:%s\\n'
+                 f'  fix: install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3 '
+                 f'(bypass once with git {what} --no-verify)\\n" "$TRIED" >&2; exit 1; }}')
+    run = '"$PY" $PYFLAG "$SCRIPT"'
     if os.name != "nt":                                # see HOOK_LOADER; Windows hooks run the script directly
         lines.append(f"LOADER={_sh_quote(HOOK_LOADER)}")
         run = run.replace('"$SCRIPT"', '-P -c "$LOADER" "$SCRIPT"')
@@ -4146,6 +4186,71 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     else:
         lines.append(f'exec {run} check --staged')
     return "\n".join(lines) + "\n"
+
+
+@dataclasses.dataclass
+class PythonChoice:
+    command: list            # e.g. ["/usr/bin/python3"] or ["py", "-3.12"]; empty when nothing qualifies
+    reason: str
+    tried: list              # (candidate, result) in the order tried
+    pinned_missing: bool = False
+
+
+def _probe_python(cmd) -> tuple:
+    """(qualifies, version text) for one candidate, like the hook's try_py."""
+    import shutil
+    if not (os.path.isabs(cmd[0]) and os.path.exists(cmd[0])) and not shutil.which(cmd[0]):
+        return False, ""
+    try:
+        proc = subprocess.run([*cmd, "-c", PY_PROBE], capture_output=True, text=True, timeout=15,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    return proc.returncode == 0, (proc.stdout.strip().splitlines() or [""])[0]
+
+
+def hook_python_line(vendored: bool) -> str:
+    """One line for `install`: which interpreter the hooks will run and why (a dry run of the hook's search)."""
+    choice = discover_python(os.environ, pinned=None if vendored else sys.executable,
+                             exists=lambda p: os.access(p, os.X_OK))
+    if choice.command:
+        return f"hook Python: {choice.reason}"
+    tried = "; ".join(f"{c}: {r}" for c, r in choice.tried)
+    return (f"hook Python: no Python 3.11+ found ({tried}), so the hooks will block commits\n"
+            "  fix: install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3")
+
+
+def discover_python(env, pinned=None, probe=None, exists=os.path.exists) -> PythonChoice:
+    """The interpreter a hook would use, found in the same order as the hook script (dry run)."""
+    probe = probe or _probe_python
+    tried = []
+
+    def attempt(cmd, why):
+        ok, version = probe(list(cmd))
+        ok = ok and bool(version)                     # like the hook: a program that prints nothing is not Python
+        label = " ".join(cmd)
+        tried.append((label, version + ("" if ok else ", too old") if version else "not found or not a working Python"))
+        return PythonChoice(list(cmd), f"{label} ({version}): {why}", tried) if ok else None
+
+    if env.get("AIGATE_PYTHON"):
+        if any(env.get(v) for v in BUILTIN_AGENT_ENV) or env.get("AIGATE_PROVENANCE") == "agent":
+            tried.append(("AIGATE_PYTHON", "ignored: " + AIGATE_PYTHON_IGNORED))
+        else:
+            found = attempt([env["AIGATE_PYTHON"]], "set by AIGATE_PYTHON")
+            if found:
+                return found
+    if pinned:
+        if exists(pinned):
+            tried.append((pinned, "pinned at install"))
+            version = f" ({sys.version.split()[0]})" if pinned == sys.executable else ""
+            return PythonChoice([pinned], f"{pinned}{version}: pinned at install (used without probing)", tried)
+        tried.append((pinned, "missing (pinned at install)"))
+    for cmd in PY_GENERIC:
+        found = attempt(cmd, "first working Python 3.11+ on PATH")
+        if found:
+            found.pinned_missing = bool(pinned)
+            return found
+    return PythonChoice([], "no Python 3.11+ found", tried, bool(pinned))
 
 
 def _sh_quote(value: str) -> str:
@@ -4218,6 +4323,7 @@ def cmd_install(args) -> int:
             fh.write(hook_script(kind, args.vendor, sys.executable, script))
         os.chmod(path, 0o755)
         print(f"installed {kind} hook -> {path}")
+    print(hook_python_line(args.vendor))
     if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
         print("optional: `aigate-lite init` writes .aigate/lite.toml to tune rules and add your test command")
     return 0
