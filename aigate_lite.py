@@ -281,8 +281,17 @@ def redact(value: str) -> str:
 
 
 def fingerprint(*parts) -> str:
+    """The 0.1 fingerprint (12 hex characters). Kept as `legacy_fingerprint` so [[allow]] entries and baselines
+    written by 0.1.x still match during 0.2.x."""
     import hashlib
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def fingerprint_v2(*parts) -> str:
+    """The 0.2 fingerprint (16 hex characters, so old ones are recognisable): rule, path and a key that does
+    not depend on line numbers, so it survives edits elsewhere in the file."""
+    import hashlib
+    return hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def utcnow() -> dt.datetime:
@@ -908,6 +917,40 @@ def load_config(repo: Repo, source: str, explicit=None) -> Config:
     return Config(data, problems, origin)
 
 
+BASELINE_PATH = ".aigate/baseline.json"
+BASELINE_NEVER = ("gate.", "commands.", "scope.")   # the gate's own state, never accepted by a baseline
+
+
+def load_baseline(repo, source) -> tuple:
+    """({(rule, path, fingerprint)}, problems) from .aigate/baseline.json in the worktree or a commit. Anything
+    unreadable is ignored (more findings, never fewer)."""
+    if source is None:
+        return set(), []
+    if source == "worktree":
+        try:
+            with open(os.path.join(repo.root, BASELINE_PATH), "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return set(), []
+    else:                                              # "" = the index (staged content), else a commit
+        data = repo.read(f"{source}:{BASELINE_PATH}")
+        if data is None:
+            return set(), []
+    try:
+        doc = json.loads(data.decode("utf-8-sig"))
+        rows = doc["entries"] if isinstance(doc, dict) and type(doc.get("version")) is int and doc["version"] == 1 \
+            else None
+    except (ValueError, KeyError, UnicodeDecodeError, RecursionError):
+        rows = None
+    if not isinstance(rows, list):
+        return set(), [f"{BASELINE_PATH} is not a version 1 baseline; ignored (re-create it: aigate-lite baseline)"]
+    valid = [e for e in rows if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("rule", "path", "fingerprint"))]
+    entries = {(e["rule"], e["path"], e["fingerprint"]) for e in valid
+               if not e["rule"].startswith(BASELINE_NEVER)}
+    bad = len(rows) - len(valid)
+    return entries, ([f"{bad} malformed {BASELINE_PATH} entr{'y' if bad == 1 else 'ies'} ignored"] if bad else [])
+
+
 # --------------------------------------------------------------------------- provenance
 
 AI_TRAILER_RE = re.compile(
@@ -950,6 +993,9 @@ class Finding:
     hint: str | None = None
     allowed: str | None = None     # why it was allowed, when it was
     sensitive: bool = False
+    legacy_key: str | None = None  # the 0.1 key, when it differs (it used line numbers)
+    base_key: str | None = None    # key before twin numbering (set by number_twins)
+    twin: int = 1                  # 1 for the first finding with this rule, file and key; 2, 3, ... after it
 
     @property
     def meta(self) -> Rule:
@@ -957,11 +1003,53 @@ class Finding:
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(self.rule, self.path, self.key or self.message)
+        return fingerprint_v2(self.rule, self.path, self.key or self.message)
+
+    @property
+    def legacy_fingerprint(self) -> str:
+        return fingerprint(self.rule, self.path, self.legacy_key if self.legacy_key is not None
+                           else self.key or self.message)
 
 
-def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=None) -> Finding:
-    return Finding(rule, path, line, message, action or RULES[rule].action, key=key, hint=hint)
+def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=None, legacy_key=None) -> Finding:
+    return Finding(rule, path, line, message, action or RULES[rule].action, key=key, hint=hint, legacy_key=legacy_key)
+
+
+def number_twins(findings) -> None:
+    """Findings with the same rule, file and key (e.g. two identical `except Exception: pass`) get #2, #3, ...
+    in line order, so each has its own fingerprint and a baseline entry never covers a new twin."""
+    groups = defaultdict(list)
+    for f in findings:
+        f.base_key = f.key or f.message
+        groups[(f.rule, f.path, f.base_key)].append(f)
+    for twins in groups.values():
+        for n, f in enumerate(sorted(twins, key=lambda f: f.line or 0)[1:], 2):
+            if f.legacy_key is None:
+                f.legacy_key = f.base_key
+            f.key, f.twin = f"{f.base_key}#{n}", n
+
+
+def _removed_keys(ctx, path) -> Counter:
+    """How many findings per (rule, base key) the change's removed lines of `path` carried in the old version:
+    the four per-file checks run over the removed lines as if they were added. Outside `check --all` a baseline
+    entry only accepts as many added findings as were removed (an edited line keeps its debt; a new copy of a
+    baselined pattern is reported)."""
+    memo = ctx.cache.setdefault("removed_keys", {})
+    if path not in memo:
+        found = []
+        for fc in ctx.changes:
+            if fc.path == path and fc.removed and fc.old_spec and not fc.binary:
+                old = dataclasses.replace(fc, path=fc.old_path or fc.path, added=dict(fc.removed), removed=[],
+                                          new_spec=fc.old_spec, old_spec=None, new_sha=fc.old_sha, old_sha=None)
+                for run in (lambda: _secrets_file(ctx, old, ""), lambda: _suppressions_file(ctx, old),
+                            lambda: _code_lines_file(ctx, old), lambda: _python_file(ctx, old) if old.ext == ".py" else []):
+                    try:
+                        found += run()
+                    except Exception:                          # unknown means nothing accepted (fail safe)
+                        found = []
+                        break
+        memo[path] = Counter((f.rule, f.key or f.message) for f in found)
+    return memo[path]
 
 
 class Context:
@@ -978,6 +1066,7 @@ class Context:
         self._asts: dict = {}
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
+        self.baseline: set = set()     # (rule, path, fingerprint) accepted by .aigate/baseline.json
 
     @property
     def agent(self) -> bool:
@@ -2989,7 +3078,9 @@ def _suppressions_file(ctx, fc) -> list:
                 if before[rule]:
                     before[rule] -= 1            # the same suppression existed on an edited line
                 else:
-                    out.append(make(rule, fc.path, line, f"`{m.group(0).strip()}` added", key=m.group(0).strip()))
+                    marker = m.group(0).strip()                  # key: the whole line, so each one is distinct
+                    out.append(make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
+                                    legacy_key=marker))
                 break
         if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
             out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
@@ -3397,6 +3488,16 @@ def _loop_patterns(fc, qual, fn, scan) -> list:
 def _python_nodes(ctx, fc, tree, test) -> list:
     out, added = [], fc.added
     imported_embed = False
+    owners: dict = {}
+
+    def qual(node) -> str:
+        """Qualified name of the function around `node` (built on first use: most files have no findings)."""
+        if not owners:
+            owners[None] = "<module>"
+            for fn, _cls, name in iter_functions(tree):          # outer first, so inner functions win
+                for n in ast.walk(fn):
+                    owners[id(n)] = name
+        return owners.get(id(node), "<module>")
     for node in ast.walk(tree):
         line = getattr(node, "lineno", None)
         if line not in added:
@@ -3409,7 +3510,7 @@ def _python_nodes(ctx, fc, tree, test) -> list:
                     any(a.name == "embed" for a in node.names):
                 imported_embed = True
         elif isinstance(node, ast.Call):
-            out += _python_call(fc, node, line, imported_embed)
+            out += _python_call(fc, node, line, imported_embed, qual)
         elif isinstance(node, ast.ExceptHandler):
             types = [] if node.type is None else (node.type.elts if isinstance(node.type, ast.Tuple) else [node.type])
             broad = node.type is None or any((dotted_name(t) or "").split(".")[-1] in ("Exception", "BaseException")
@@ -3419,16 +3520,18 @@ def _python_nodes(ctx, fc, tree, test) -> list:
             if broad and empty:
                 out.append(make("code.swallowed_exception", fc.path, line,
                                 f"`except{'' if node.type is None else ' ' + ast.unparse(node.type)}:` with an empty body",
-                                key=f"except:{line}"))
+                                key=f"except:{qual(node)}:{'' if node.type is None else ast.unparse(node.type)}",
+                                legacy_key=f"except:{line}"))
             elif node.type is None:
-                out.append(make("code.bare_except", fc.path, line, "bare `except:`", key=f"bare:{line}"))
+                out.append(make("code.bare_except", fc.path, line, "bare `except:`", key=f"bare:{qual(node)}",
+                                legacy_key=f"bare:{line}"))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 ce = item.context_expr
                 if isinstance(ce, ast.Call) and (dotted_name(ce.func) or "").split(".")[-1] == "suppress" and any(
                         (dotted_name(a) or "").split(".")[-1] in ("Exception", "BaseException") for a in ce.args):
                     out.append(make("code.swallowed_exception", fc.path, line, "`suppress(Exception)` hides every error",
-                                    key=f"suppress:{line}"))
+                                    key=f"suppress:{qual(node)}:{ast.unparse(ce)}", legacy_key=f"suppress:{line}"))
         elif isinstance(node, ast.Assign):
             names = {t.id for t in node.targets if isinstance(t, ast.Name)}
             attrs = {t.attr for t in node.targets if isinstance(t, ast.Attribute)}
@@ -3450,38 +3553,42 @@ def _python_nodes(ctx, fc, tree, test) -> list:
     return out
 
 
-def _python_call(fc, node, line, imported_embed) -> list:
+def _python_call(fc, node, line, imported_embed, qual=lambda n: "<module>") -> list:
     out = []
     name = dotted_name(node.func) or ""
     last = name.split(".")[-1]
     kw = {k.arg: k.value for k in node.keywords if k.arg}
+
+    def ids(tag):
+        """Fingerprint key from the enclosing function and the call's source; the 0.1 key used the line."""
+        return {"key": f"{tag}:{qual(node)}:{ast.unparse(node)}", "legacy_key": f"{tag}:{line}"}
     if name in ("eval", "exec"):
-        out.append(make("security.eval", fc.path, line, f"{name}() runs code built at runtime", key=f"{name}:{line}"))
+        out.append(make("security.eval", fc.path, line, f"{name}() runs code built at runtime", **ids(name)))
     if _is_const(kw.get("shell"), True) or name in SHELL_CALLS:
         out.append(make("security.shell", fc.path, line, f"{name}(...) runs through a shell",
-                        key=f"shell:{ast.unparse(node)}"))         # the call itself, not its line
+                        **ids("shell")))
     if name in DESER_CALLS:
-        out.append(make("security.deserialization", fc.path, line, f"{name}() can run code from the data", key=f"deser:{line}"))
+        out.append(make("security.deserialization", fc.path, line, f"{name}() can run code from the data", **ids("deser")))
     elif name in ("yaml.load", "yaml.load_all"):
         loader = kw.get("Loader", node.args[1] if len(node.args) > 1 else None)
         if (dotted_name(loader) or "").split(".")[-1] not in ("SafeLoader", "CSafeLoader", "BaseLoader"):
-            out.append(make("security.deserialization", fc.path, line, f"{name}() without SafeLoader", key=f"yaml:{line}"))
+            out.append(make("security.deserialization", fc.path, line, f"{name}() without SafeLoader", **ids("yaml")))
     elif name == "torch.load" and _is_const(kw.get("weights_only"), False):
         out.append(make("security.deserialization", fc.path, line, "torch.load(weights_only=False) unpickles arbitrary code",
-                        key=f"torch:{line}"))
+                        **ids("torch")))
     if last in SQL_METHODS and node.args and _dynamic_sql(node.args[0]):
-        out.append(make("security.sql_injection", fc.path, line, f"{last}() with SQL built from variables", key=f"sql:{line}"))
+        out.append(make("security.sql_injection", fc.path, line, f"{last}() with SQL built from variables", **ids("sql")))
     if _is_const(kw.get("verify"), False) or name == "ssl._create_unverified_context":
         out.append(make("security.verification_disabled", fc.path, line, f"{name or 'call'}(... verify=False)"
-                        if name != "ssl._create_unverified_context" else "unverified SSL context", key=f"verify:{line}"))
+                        if name != "ssl._create_unverified_context" else "unverified SSL context", **ids("verify")))
     if last == "run" and _is_const(kw.get("debug"), True):
-        out.append(make("security.insecure_default", fc.path, line, f"{name}(debug=True)", key=f"debug:{line}"))
+        out.append(make("security.insecure_default", fc.path, line, f"{name}(debug=True)", **ids("debug")))
     if "allow_origins" in kw and "'*'" in ast.unparse(kw["allow_origins"]):
-        out.append(make("security.insecure_default", fc.path, line, "allow_origins=['*']", key=f"cors:{line}"))
+        out.append(make("security.insecure_default", fc.path, line, "allow_origins=['*']", **ids("cors")))
     if last in ("mark_safe", "Markup"):
-        out.append(make("security.xss", fc.path, line, f"{last}() marks content as safe HTML", key=f"xss:{line}"))
+        out.append(make("security.xss", fc.path, line, f"{last}() marks content as safe HTML", **ids("xss")))
     if name in DEBUG_CALLS or (name == "embed" and imported_embed):
-        out.append(make("code.debug_leftover", fc.path, line, f"{name}()", key=f"debug:{line}"))
+        out.append(make("code.debug_leftover", fc.path, line, f"{name}()", **ids("debug")))
     return out
 
 
@@ -3668,15 +3775,36 @@ class Result:
     notes: list
 
 
+def _baseline_accepts(ctx, f, baseline, granted) -> bool:
+    """Whether .aigate/baseline.json covers `f`. In `check --all` the numbered fingerprint must be listed. In
+    staged/range/push checks only findings on changed lines are seen, so twin numbers mean nothing there: a
+    baseline group (rule, file, base key) accepts at most as many added findings as the change removed."""
+    if getattr(ctx, "full", False):
+        return (f.rule, f.path, f.fingerprint) in baseline
+    if (f.rule, f.path, fingerprint_v2(f.rule, f.path, f.base_key or f.key or f.message)) not in baseline:
+        return False
+    group = (f.rule, f.path, f.base_key or f.key or f.message)
+    if granted[group] >= _removed_keys(ctx, f.path)[(f.rule, group[2])]:
+        return False
+    granted[group] += 1
+    return True
+
+
 def apply_policy(findings, ctx, env) -> list:
     overrides, allows = ctx.cfg["rules"], ctx.cfg["allow"]
     env_allow = [r.strip() for r in env.get("AIGATE_ALLOW", "").split(",") if r.strip()]
-    out, seen = [], set()
+    unique, seen = [], set()
     for f in findings:
-        ident = (f.fingerprint, f.line)
-        if ident in seen:
-            continue
-        seen.add(ident)
+        ident = (f.rule, f.path, f.key or f.message, f.line)
+        if ident not in seen:
+            seen.add(ident)
+            unique.append(f)
+    number_twins(unique)
+    baseline = getattr(ctx, "baseline", None) or set()
+    granted: Counter = Counter()
+    legacy_used: set = set()       # a 0.1 fingerprint allows one finding per file (the first), never its copies
+    out = []
+    for f in sorted(unique, key=lambda f: (f.path, f.line or 0)):
         if f.rule in FIXED_RULES:
             pass
         elif f.rule in overrides:
@@ -3691,11 +3819,19 @@ def apply_policy(findings, ctx, env) -> list:
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
         if f.sensitive and f.meta.escalate:
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
+        legacy_id = (f.rule, f.path, f.legacy_fingerprint)
         for a in allows:
             if fnmatch.fnmatchcase(f.rule, a["rule"]) and (not a["paths"] or path_matches(f.path, a["paths"])) \
-                    and (not a["fingerprint"] or a["fingerprint"] == f.fingerprint):
-                f.allowed = f"allow entry: {a['reason']}"
+                    and (not a["fingerprint"] or a["fingerprint"] == f.fingerprint
+                         or (a["fingerprint"] == f.legacy_fingerprint and legacy_id not in legacy_used)):
+                old = ""
+                if a["fingerprint"] and a["fingerprint"] != f.fingerprint:
+                    legacy_used.add(legacy_id)
+                    old = " (0.1 fingerprint: update it to " + f.fingerprint + ")"
+                f.allowed = f"allow entry{old}: {a['reason']}"
                 break
+        if not f.allowed and baseline and _baseline_accepts(ctx, f, baseline, granted):
+            f.allowed = "baseline"
         if not f.allowed and env_allow and not ctx.agent and f.action in ("warn", "fix") \
                 and any(fnmatch.fnmatchcase(f.rule, p) for p in env_allow):
             f.allowed = "AIGATE_ALLOW"
@@ -3738,7 +3874,8 @@ STYLE = {"block": "\033[1;31m", "fix": "\033[1;33m", "warn": "\033[36m", "pass":
 def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str) -> None:
     s = (lambda k: STYLE[k]) if color else (lambda k: "")
     active = [f for f in res.findings if not f.allowed]
-    allowed = [f for f in res.findings if f.allowed]
+    allowed = [f for f in res.findings if f.allowed and f.allowed != "baseline"]
+    baselined = [f for f in res.findings if f.allowed == "baseline"]
     if quiet and res.verdict == "pass":
         return
     prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
@@ -3759,13 +3896,17 @@ def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: 
                 print(f"        {s('dim')}{'→ ' if i == 0 else '  '}{ln}{s('reset')}")
         if verbose:
             print(f"        {s('dim')}fingerprint {f.fingerprint}{s('reset')}")
-    if allowed and verbose:
-        for f in allowed:
-            print(f"  {s('dim')}ALLOW {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} ({f.allowed}){s('reset')}")
+    if verbose:
+        for f in allowed + baselined:
+            tag = "BASELINE" if f.allowed == "baseline" else "ALLOW"
+            print(f"  {s('dim')}{tag} {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} ({f.allowed})"
+                  f" fingerprint {f.fingerprint}{s('reset')}")
     counts = Counter(f.action for f in active)
     tally = " · ".join(f"{counts[a]} {a}" for a in ("block", "fix", "warn") if counts[a])
     if allowed:
         tally += f"{' · ' if tally else ''}{len(allowed)} allowed"
+    if baselined:
+        tally += f"{' · ' if tally else ''}{len(baselined)} in baseline (hidden; -v shows them)"
     mark = {"pass": "✔ PASS", "warn": "▲ WARN", "fix": "✖ FIX", "block": "✖ BLOCK"}[res.verdict]
     tail = " (risk score escalated it)" if res.escalated else ""
     stopped = f" — {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
@@ -3784,7 +3925,8 @@ def report_json(res: Result) -> None:
         "exit_code": 1 if res.verdict in ("fix", "block") else 0, "stats": res.stats, "notes": res.notes,
         "findings": [{"rule": f.rule, "action": f.action, "severity": f.meta.severity, "confidence": f.meta.confidence,
                       "path": f.path, "line": f.line, "message": f.message, "hint": f.hint or f.meta.hint,
-                      "fingerprint": f.fingerprint, "sensitive_path": f.sensitive, "allowed": f.allowed}
+                      "fingerprint": f.fingerprint, "legacy_fingerprint": f.legacy_fingerprint,
+                      "sensitive_path": f.sensitive, "allowed": f.allowed}
                      for f in res.findings],
     }, indent=2))
 
@@ -3810,7 +3952,8 @@ def report_sarif(res: Result) -> None:
     results = []
     for f in res.findings:
         r = {"ruleId": f.rule, "ruleIndex": used.index(f.rule), "level": level.get(f.action, "note"),
-             "message": {"text": f.message}, "partialFingerprints": {"aigateFingerprint/v1": f.fingerprint},
+             "message": {"text": f.message}, "partialFingerprints": {"aigateFingerprint/v1": f.legacy_fingerprint,
+                                                                 "aigateFingerprint/v2": f.fingerprint},
              "properties": {"action": f.action, "sensitivePath": f.sensitive}}
         # code scanning needs a location; repo-wide findings ("(gate)", "(commit)") point at the config
         path = CONFIG_PATH if f.path.startswith("(") else f.path
@@ -3934,7 +4077,8 @@ def plan_runs(repo, args, env) -> list:
     return [("staged changes", head or repo.empty_tree(), None, [])]
 
 
-def run_check(args, env) -> int:
+def run_check(args, env, collect=False):
+    """Run the gate and print the report; with collect=True return the Result instead (int when nothing ran)."""
     started = time.monotonic()
     repo = Repo.discover()
     full = bool(getattr(args, "all", False))
@@ -3962,15 +4106,17 @@ def run_check(args, env) -> int:
         provenance = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"],
                                        messages, authors)
         if args.config:
-            cfg = pre
+            cfg, bl_source = pre, "worktree"
         elif provenance[0] == "agent":                # an agent cannot loosen the gate for its own change
             # its change's base; for `check --all` (an audit of HEAD, not a change) HEAD itself
             source = (repo.commit("HEAD") or "") if head is None else head if full else base
-            cfg = load_config(repo, source) if source and source != repo.empty_tree() else load_config(repo, "__none__")
+            committed = bool(source) and source != repo.empty_tree()
+            cfg = load_config(repo, source) if committed else load_config(repo, "__none__")
+            bl_source = source if committed else None
         elif head is None:
-            cfg = pre
+            cfg, bl_source = pre, ""                  # the baseline as staged, not whatever is on disk
         else:
-            cfg = load_config(repo, head)
+            cfg, bl_source = load_config(repo, head), head
         changes = collect_changes(repo, base, head)
         if full:
             changes = [fc for fc in changes if not path_matches(fc.path, cfg["paths"]["ignore"])]
@@ -3982,6 +4128,12 @@ def run_check(args, env) -> int:
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
                       provenance=provenance, registry=registry, merge=merge, label=run_label, results=results,
                       full=full)
+        if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+            bl_source = None                          # no git reads for repositories without a baseline
+        ctx.baseline, bl_problems = load_baseline(repo, bl_source)
+        if bl_source == "" and repo.read(":" + BASELINE_PATH) != repo.read("HEAD:" + BASELINE_PATH):
+            bl_problems.append(f"using the staged {BASELINE_PATH}, which differs from HEAD")
+        notes += [p for p in bl_problems if p not in notes]
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
         stats["files"] += len(counted)
         stats["added"] += sum(len(fc.added) for fc in counted)
@@ -4030,6 +4182,8 @@ def run_check(args, env) -> int:
     res = Result(findings, verdict, escalated, risk, provenance, label,
                  {"files": stats["files"], "added": stats["added"], "removed": stats["removed"],
                   "seconds": stats["seconds"]}, cfg.origin, notes)
+    if collect:
+        return res
     if args.format == "json":
         report_json(res)
     elif args.format == "github":
@@ -4579,6 +4733,40 @@ def cmd_init(args) -> int:
     return 0
 
 
+def cmd_baseline(args) -> int:
+    """Write .aigate/baseline.json: the findings a full offline scan reports today, so an existing project can
+    adopt the gate and only new findings stop commits. Never run for an AI agent."""
+    env = dict(os.environ)
+    repo = Repo.discover()
+    cfg = load_config(repo, "worktree")
+    kind, why = detect_provenance(env, cfg["provenance"]["agent_env"], cfg["provenance"]["default"])
+    if kind == "agent":
+        print(f"aigate-lite: baseline refuses to run for an AI agent ({why.lstrip('$')}): accepting existing findings "
+              "is a person's decision", file=sys.stderr)
+        return 1
+    ns = build_parser().parse_args(["check", "--all", "--offline", "--no-commands", "--format", "json"])
+    res = run_check(ns, env, collect=True)
+    found = [] if isinstance(res, int) else [f for f in res.findings if f.allowed in (None, "baseline")
+                                              and not f.rule.startswith(BASELINE_NEVER)]
+    secrets = [f for f in found if f.rule.startswith("secrets.")]
+    current = {(f.rule, f.path, f.fingerprint) for f in found
+               if args.include_secrets or not f.rule.startswith("secrets.")}
+    old, _problems = load_baseline(repo, "worktree")
+    entries = current if args.prune else old | current
+    rows = [{"rule": r, "path": p, "fingerprint": fp} for r, p, fp in sorted(entries, key=lambda e: (e[1], e[0], e[2]))]
+    path = os.path.join(repo.root, BASELINE_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"version": 1, "tool": __version__, "entries": rows}, indent=2) + "\n")
+    removed = f", {len(old - entries)} removed" if args.prune else ""
+    print(f"Wrote {BASELINE_PATH}: {len(rows)} entries ({len(current - old)} new{removed})")
+    left = 0 if args.include_secrets else len(secrets)
+    print(f"{left} secret finding{'' if left == 1 else 's'} not baselined; rotate {'it' if left == 1 else 'them'}"
+          if left else "0 secret findings not baselined")
+    print(f"next: review and commit {BASELINE_PATH}")
+    return 0
+
+
 def cmd_scope(args) -> int:
     repo = Repo.discover()
     path = scope_path(repo)
@@ -4807,7 +4995,25 @@ def _doctor_config(cfg):
         return _check("config", "fail", "; ".join(cfg.problems), f"fix {CONFIG_PATH} (the gate uses built-in defaults)")
     if cfg.problems:
         return _check("config", "warn", "; ".join(cfg.problems), f"fix the entries named above in {CONFIG_PATH}")
+    legacy = [a for a in cfg["allow"] if re.fullmatch(r"[0-9a-f]{12}", a.get("fingerprint") or "")]
+    if legacy:
+        return _check("config", "warn", f"{len(legacy)} [[allow]] entr{'y uses' if len(legacy) == 1 else 'ies use'} 0.1 "
+                      "fingerprints (12 characters); they still match during 0.2.x",
+                      "run: aigate-lite check --all -v, and copy each finding's new fingerprint into its entry")
     return _check("config", "ok", f"{cfg.origin}: no problems")
+
+
+def _doctor_baseline(repo):
+    if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+        return _check("baseline", "ok", "no baseline (every finding counts)")
+    entries, problems = load_baseline(repo, "worktree")
+    if problems:
+        return _check("baseline", "warn", "; ".join(problems), "run: aigate-lite baseline --prune")
+    legacy = sum(1 for e in entries if re.fullmatch(r"[0-9a-f]{12}", e[2]))
+    if legacy:
+        return _check("baseline", "warn", f"{len(entries)} entries, {legacy} with 0.1 fingerprints",
+                      "run: aigate-lite baseline --prune (rewrites them in the 0.2 format)")
+    return _check("baseline", "ok", f"{len(entries)} accepted findings in {BASELINE_PATH}")
 
 
 def _doctor_commands(repo, cfg):
@@ -4927,7 +5133,7 @@ def doctor_report(env, offline=False, fetch=None) -> list:
             checks.append(_check("repo", "ok", repo.root))
         cfg = load_config(repo, "worktree")
         checks += [_doctor_hooks(repo, hooks_dir), _doctor_hook_manager(repo), _doctor_version(repo),
-                   _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg)]
+                   _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg), _doctor_baseline(repo)]
         scope = load_scope(repo)
         checks.append(_check("scope", "ok", "task scope: " + ", ".join(scope) if scope else
                              "no task scope set (every path is in scope)"))
@@ -5005,6 +5211,9 @@ def build_parser():
     s.add_argument("globs", nargs="*")
     t = sub.add_parser("trust", help="approve the [[commands]] in .aigate/lite.toml so they may run")
     t.add_argument("--rev", help="approve the config as committed in this revision (e.g. a branch you push)")
+    b = sub.add_parser("baseline", help="accept today's findings so only new ones stop commits (.aigate/baseline.json)")
+    b.add_argument("--include-secrets", action="store_true", help="also accept secrets (rotate them instead)")
+    b.add_argument("--prune", action="store_true", help="drop entries that no longer occur")
     d = sub.add_parser("doctor", help="check this setup: Python, git, hooks, config, cache, network")
     d.add_argument("--offline", action="store_true", help="skip the network checks")
     d.add_argument("--format", choices=("text", "json"), default="text")
@@ -5029,7 +5238,7 @@ def main(argv=None) -> int:
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
-                "doctor": cmd_doctor}[args.command](args)
+                "doctor": cmd_doctor, "baseline": cmd_baseline}[args.command](args)
     except GitError as e:
         print(f"aigate-lite: {e}", file=sys.stderr)
         return 2

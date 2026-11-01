@@ -13,6 +13,7 @@ Scenarios (all staged-mode, --offline, warm cache):
     B  20 files / 400 lines, mixed Python + JS
     C  300-file change
     D  the A change on top of a 50,000-file repo
+    E  the A change with a 1,000-entry .aigate/baseline.json present (lookups must stay O(1))
 """
 from __future__ import annotations
 
@@ -29,8 +30,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
-FIXTURE_VERSION = "1"            # bump when generated content changes; forces a rebuild
-SCENARIOS = ("A", "B", "C", "D")
+FIXTURE_VERSION = "3"            # bump when generated content changes; forces a rebuild
+SCENARIOS = ("A", "B", "C", "D", "E")
+BASELINE_ENTRIES = 1000          # scenario E: the A change with a baseline of this size present
 COLD = ("A", "C")                # also measured with each EXTRA flag below, not gated
 EXTRA = {"cold": "--no-cache",   # result and lookup caches off
          "cache": "--cache"}     # result cache on (it is off by default); the first run fills it
@@ -166,17 +168,43 @@ def stage_change(repo, scenario):
     git(repo, "add", "-A", "--", "app", "web")
 
 
+def write_baseline(repo, n):
+    """A baseline of n entries that match nothing in the change (the worst case: every lookup misses)."""
+    rows = [{"rule": "code.todo", "path": f"src/legacy_{i:04d}.py", "fingerprint": f"{i:016x}"} for i in range(n)]
+    os.makedirs(os.path.join(repo, ".aigate"), exist_ok=True)
+    with open(os.path.join(repo, ".aigate", "baseline.json"), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"version": 1, "tool": "bench", "entries": rows}, fh, indent=2)
+    git(repo, "add", ".aigate/baseline.json")
+    git(repo, "commit", "-q", "-m", "baseline")
+
+
+def remove_tree(path):
+    """rmtree that also removes read-only files (git objects on Windows), and fails loudly otherwise."""
+    import stat
+
+    def retry(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+    if os.path.exists(path):
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=retry)
+        else:
+            shutil.rmtree(path, onerror=retry)
+
+
 def build_fixtures(force=False) -> dict:
     stamp = os.path.join(WORK, "stamp")
     repos = {s: os.path.join(WORK, s) for s in SCENARIOS}
     if not force and os.path.exists(stamp) and open(stamp).read() == FIXTURE_VERSION:
         return repos
-    shutil.rmtree(WORK, ignore_errors=True)
+    remove_tree(WORK)
     os.makedirs(os.path.join(WORK, "home"))
     for s, repo in repos.items():
         t = time.monotonic()
         (init_large(repo, D_FILES) if s == "D" else init_small(repo))
-        stage_change(repo, s)
+        if s == "E":
+            write_baseline(repo, BASELINE_ENTRIES)        # committed first: staged checks read it from the index
+        stage_change(repo, "A" if s == "E" else s)
         print(f"  built fixture {s} in {time.monotonic() - t:.1f}s", file=sys.stderr)
     with open(stamp, "w") as fh:
         fh.write(FIXTURE_VERSION)
@@ -281,7 +309,11 @@ def pct(new, old) -> str:
 def gates(res, base) -> list:
     """Failures as strings; empty means every gate passed."""
     fails = []
+    if "E" in res and res["E"]["median_ms"] > res["A"]["median_ms"] * 1.10:
+        fails.append(f"E: median {res['E']['median_ms']} ms > A {res['A']['median_ms']} ms x 1.10 (baseline lookups)")
     for s in ("startup", *SCENARIOS):
+        if s not in base:                       # an older baseline file without this scenario
+            continue
         new, old = res[s], base[s]
         for counter in ("git_calls", "blobs_read"):
             n, o = (new.get("counters") or {}).get(counter), (old.get("counters") or {}).get(counter)

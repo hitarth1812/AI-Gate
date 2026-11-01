@@ -1062,3 +1062,77 @@ Verify: Windows `1 failed, 215 passed, 11 skipped in 210.47s` (BLOCKED D5 test);
 bench vs phase2_start: PASS, git calls/blobs unchanged; startup 174.5 (+5.8 %) · A 335.6 (+3.7 %) · B 400.9 ·
 C 731.8 · D 356.6 · C-cache 568.9. Trend: start-up grows with the script size (doctor + init ≈ +25 KB to compile
 on every Windows hook run; POSIX hooks reuse bytecode). Still inside the 15 % gate; watched per item.
+
+## P2 Item 4 ⚠ — stable fingerprints (D10) + `baseline`
+
+Explore:
+- Fingerprint = sha1(rule, path, key or message)[:12]. 13 keys used the line (`eval:{line}`, `shell:{line}`,
+  `except:{line}`, `bare:{line}`, `suppress:{line}`, `deser/yaml/torch/sql/verify/debug/cors/xss:{line}`), all in
+  the Python AST checks; other keys were already content (secret value hashes, test names, line text,
+  package names). suppress.* keys were the marker alone (the item-0 "too broad" problem).
+- Identical findings in one file shared a fingerprint, so a baseline/allow entry for one would cover a copy.
+- The allow file and SARIF `partialFingerprints` (`aigateFingerprint/v1`) carry fingerprints.
+Change (4a): `fingerprint_v2` = sha256(rule, path, key)[:16] (16 hex, so 0.1 ones are recognisable); line keys →
+`{tag}:{enclosing function qualname}:{ast.unparse(call or handler type)}` (owner map built lazily, only when a
+file has a finding); suppress.* key = marker + whole normalized line; `number_twins` numbers identical
+(rule, path, key) findings #2, #3 in line order. Every finding keeps `legacy_fingerprint` (the 0.1 formula with
+the 0.1 key; e.g. security.shell `shell:{line}`); `[[allow]]` matches either, a 0.1 fingerprint only once per
+file (the first finding in line order) and the allow reason names the new fingerprint. JSON adds optional
+`legacy_fingerprint`; SARIF `aigateFingerprint/v1` now carries the 0.1 value and `/v2` the new one.
+.aigate/lite.toml rewritten with 16-hex fingerprints (the shared suppress.type entry became two exact ones).
+Change (4b): `baseline [--include-secrets] [--prune]` → offline `check --all`, writes `.aigate/baseline.json`
+{version 1, tool, entries [{rule, path, fingerprint}]} sorted by path/rule/fingerprint, byte-identical on re-run;
+secrets.* excluded unless asked ("N secret findings not baselined; rotate them" always printed); gate.*,
+commands.*, scope.* never written or loaded; without --prune entries are kept (union), --prune keeps only
+current ones and prints how many were removed; refuses for AI agents. Matching: allowed = "baseline" (hidden;
+`-v` shows BASELINE lines with fingerprints; excluded from verdict and score). In `check --all` the numbered
+fingerprint must be listed; in staged/range/push a baseline group (rule, file, key) accepts at most as many
+added findings as the change removed from that file (removed side = the four per-file checks run over the
+removed lines of the old version), so an edited line keeps its debt and a new copy is reported. Sources: agents
+read it from the same commit as their config, humans from the index (note when it differs from HEAD) or the
+range head; BOM accepted; non-int version / bad JSON / wrong types → ignored with a note (more findings, never
+fewer). doctor: baseline present, entry count, 0.1-format entries; 0.1 [[allow]] fingerprints → warn.
+bench: scenario E = the A change with a committed 1,000-entry baseline (fixture v3); gates skip rows missing
+from an older baseline file; new hard gate E ≤ A × 1.10.
+Tests (tests/test_baseline.py, new, 17): corpus triggering all 13 line-keyed rules + code.todo/suppress.type/
+secrets → 5 lines inserted above every file keep every fingerprint (and the 0.1 ones change); 16/12-hex formats;
+legacy allow still matches and names the new fingerprint; twins distinct; baseline → old repo passes, new
+finding fails, secrets still block; line shift still matches; secrets excluded/included + message; prune;
+deterministic bytes, no code/secret-shaped text (checked with PROVIDER_SECRETS); agent refused and reads HEAD,
+unstaged/staged edits never accept new code; text hides/-v shows; corrupt baseline ignored with a note; doctor
+baseline + legacy entries; NEW: a copy of a baselined finding is reported staged (human + agent) and in range;
+an edited line keeps its debt; a 0.1 allow covers only the first twin; BOM accepted, `version: true` and gate.*
+entries rejected. tests/test_housekeeping.py: the item-0 twin assertion changed from "twins share a fingerprint"
+to "twins get distinct fingerprints" (deliberate D10 behaviour; stricter).
+Process note: for this item the implementation was written before tests/test_baseline.py (not test-first). To
+check the tests anyway, they were run against the pre-item-4 commit: 12 of the first 13 failed (the twins test
+passed there only because the old keys contained the line).
+Review (independent subagent, ran temp repos): 9 points.
+1. CRITICAL staged/range: twin numbering saw only added lines, so a new copy of a baselined pattern got the
+   original's fingerprint and was hidden (verified for human, agent and range) → **fixed** (removed-count
+   limit above); tests added; a mutation removing the limit fails 2 tests.
+2. MEDIUM a 0.1 fingerprint covered every twin; 0.1 matching in the baseline only added risk → **fixed** (no
+   0.1 matching for baselines; a 0.1 allow covers the first finding only; test).
+3. MEDIUM humans read an unstaged baseline from disk → **fixed** (index + note when it differs from HEAD).
+   `--config` makes agents read the worktree baseline (like config); hooks never pass it → accepted.
+4. LOW loader accepted gate.*/commands.*/scope.* → **fixed**.
+5. Fail-closed OK (deep nesting, wrong types, 40 MB/500k entries 1.5 s); BOM ignored the whole file → **fixed**;
+   `version: true` accepted → **fixed**; duplicates called malformed → **fixed**. (A deep JSON file elsewhere
+   raising RecursionError in check_files → gate.error: pre-existing, outside this item → ROADMAP.)
+6. LOW with --include-secrets, a weak secrets.generic value can be found by dictionary attack on the unsalted
+   fingerprint; suppress/todo keys hash the whole line → documented (opt-in; the value is already in HEAD).
+7. INFO renaming the enclosing function or the file brings findings back → documented.
+8. INFO latency ≈ 75 µs per finding; acceptable.
+9. Tests missed the critical case → **added** (see above).
+Found 9 / fixed 6 / documented 2 / accepted 1.
+Verify (final, after the review fixes and the bench fixes):
+- Windows: see the line below; WSL `244 passed in 59.43s`; pyflakes clean (aigate_lite.py, bench/bench.py).
+- First bench run after the review fixes FAILED the hard gate (blobs_read +2 in A-D): every staged check read
+  the baseline from the index and from HEAD, even without a baseline. Fixed: a baseline is consulted only when
+  `.aigate/baseline.json` exists on disk (otherwise ignored, i.e. more findings, never fewer). Also fixed a
+  Phase 1 bench bug the fixture rebuild exposed: `shutil.rmtree(..., ignore_errors=True)` silently left
+  read-only git objects on Windows, then the rebuild crashed (`remove_tree` clears the read-only bit).
+- `py -3.12 bench/bench.py --runs 30 --compare bench/phase2_start.json` → PASS; git calls/blobs unchanged:
+  startup 176.7 (+7.2 %) · A 333.6 (+3.1 %) · B 404.6 · C 737.9 · D 362.0 · E 341.6 (E/A = 1.02 ≤ 1.10) ·
+  C-cache 567.0.
+- Windows `1 failed, 232 passed, 11 skipped in 244.98s` (BLOCKED D5 test).

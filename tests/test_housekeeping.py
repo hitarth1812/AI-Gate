@@ -53,7 +53,7 @@ def test_different_shell_calls_get_different_fingerprints_and_twins_both_report(
     repo.add()
     hits = find(repo.check(), "security.shell")
     assert [f["line"] for f in hits] == [5, 9, 13]
-    assert hits[0]["fingerprint"] == hits[2]["fingerprint"] != hits[1]["fingerprint"]
+    assert len({f["fingerprint"] for f in hits}) == 3          # identical twins are numbered (item 4, D10)
 
 
 def test_shell_fingerprint_is_the_same_for_the_same_call_on_another_line(repo):
