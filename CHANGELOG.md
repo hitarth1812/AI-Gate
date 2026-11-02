@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.2.0 (Phase 2: usability)
+## 0.2.0 — Phase 2: usability
 
 ### Behaviour changes
 - Errors are one cause line plus a `fix:` line, without tracebacks (`--debug` or `AIGATE_DEBUG=1` shows them):
@@ -89,6 +89,16 @@
 - tests: `test_configured_command_runs` wrote a Windows interpreter path into a TOML basic string (`\U` is an
   invalid escape, so the config was rejected); it now uses a TOML literal string. It still fails on Windows
   when the interpreter path contains a space (see PROGRESS.md, BLOCKED).
+
+### Not run / known limits
+- CI matrix cells other than Windows/3.12 and Linux/3.12 (macOS, Python 3.11, 3.13, 3.14) were never executed; the
+  workflow has not run on GitHub.
+- `tests/test_gate.py::test_configured_command_runs` fails on Windows when the interpreter path contains a space
+  (needs path quoting, which decision D5 does not allow); it passes on Linux.
+- Hook start-up on Windows is about 13-15% slower than at phase start (a larger script is recompiled on every run);
+  Windows bytecode reuse is not implemented.
+- Item 1 is partial: versioned `python3.N` candidates and pinning for vendored installs conflict with frozen tests.
+- The version literal in existing tests (`test_bytecode_cache`, `test_cache`, `test_perf`) was bumped to 0.2.0.
 
 ## Unreleased (Phase 1 → 1.0)
 

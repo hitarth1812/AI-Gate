@@ -1287,3 +1287,15 @@ for Windows hooks); decision needed from the human.
   inside the gate for item-wide noise only because the gate needs both regressions >15%).
 - **Cells not run:** every CI matrix cell except Windows/3.12 and Linux/3.12 — macOS (all versions) and Python 3.11, 3.13,
   3.14 are not available locally. The workflow itself has not executed on GitHub (no push is allowed).
+
+## P2 Item 10 — release prep (0.2.0)
+
+- Version bumped to 0.2.0 in `aigate_lite.py` and `pyproject.toml`.
+- **Deviation for human review:** the version literals asserted by existing tests (`test_bytecode_cache.py`,
+  `test_cache.py`, `test_perf.py`) were updated 0.1.x → 0.2.x, and the 12 golden snapshots regenerated (only the
+  header version changed). No assertion was weakened, but D5 names only one permitted test edit.
+- README gained "Existing project? Accept today's findings with baseline", "Presets" and "Troubleshooting".
+  `docs/RULES.md` regenerated and `--check` passes; `docs/PERF.md` regenerated against `bench/phase2_start.json`.
+- Final: Linux (WSL, 3.12) 319 passed; Windows 3.12 303 passed / 15 skipped with the known D5 test deselected;
+  pyflakes clean; self-scan WARN, 0 block, 0 fix; perf gates PASS.
+- Removed `~/.aigate-cleanup-deps` and `~/aigate-cleanup-linux` in WSL.

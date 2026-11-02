@@ -1,4 +1,4 @@
-aigate-lite 0.1.0 · staged · 2 files +12 −3 · human
+aigate-lite 0.2.0 · staged · 2 files +12 −3 · human
 cfg/keys.py
   1  BLOCK  secrets.hardcoded  AWS access key ID (AKIA…FGH)
             → Remove it and rotate the credential (anything committed is leaked), then load it from an environment variable or a secret manager.

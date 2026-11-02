@@ -67,7 +67,7 @@ def test_tool_version_or_source_change_invalidates(repo, tmp_path):
         fh.write("# a different build\n")
     res, prof = profiled(repo, script=copy)
     assert prof.get("cache_hits", 0) == 0 and find(res, "secrets.hardcoded")
-    text = copy.read_text(encoding="utf-8").replace('__version__ = "0.1.0"', '__version__ = "0.1.1"')
+    text = copy.read_text(encoding="utf-8").replace('__version__ = "0.2.0"', '__version__ = "0.2.1"')
     copy.write_text(text, encoding="utf-8")
     assert profiled(repo, script=copy)[1].get("cache_hits", 0) == 0
 

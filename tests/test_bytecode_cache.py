@@ -90,19 +90,19 @@ def test_bytecode_is_checked_hash_in_a_private_dir_and_reused(repo, tmp_path):
     assert pyc.read_bytes()[4:8] == b"\x03\x00\x00\x00"                     # hash-based, checked against source
     assert stat.S_IMODE(os.stat(cache / "pycache").st_mode) == 0o700
     before = os.stat(pyc).st_mtime_ns
-    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.1.0"
+    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.2.0"
     assert os.stat(pyc).st_mtime_ns == before                                # reused, not rewritten
 
 
 def test_same_size_same_second_edit_is_recompiled(repo, tmp_path):
     script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
     env = env_for(repo, cache)
-    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.1.0"
+    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.2.0"
     st = os.stat(script)
-    script.write_bytes(script.read_bytes().replace(b'__version__ = "0.1.0"', b'__version__ = "0.1.9"'))
+    script.write_bytes(script.read_bytes().replace(b'__version__ = "0.2.0"', b'__version__ = "0.2.9"'))
     os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns))                    # a timestamp pyc would not notice
     assert os.stat(script).st_size == st.st_size
-    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.1.9"
+    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 0.2.9"
 
 
 def test_unusable_cache_dir_falls_back_silently(repo, tmp_path):
@@ -110,7 +110,7 @@ def test_unusable_cache_dir_falls_back_silently(repo, tmp_path):
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
     proc = via_loader(script, env_for(repo, blocker), "--version")
-    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.1.0", "")
+    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.2.0", "")
     assert not (script.parent / "__pycache__").exists()
 
 
@@ -123,7 +123,7 @@ def test_read_only_cache_dir_falls_back_silently(repo, tmp_path):
         proc = via_loader(script, env_for(repo, cache), "--version")
     finally:
         cache.chmod(0o700)
-    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.1.0", "")
+    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.2.0", "")
     assert pycs(cache) == []
 
 
@@ -132,7 +132,7 @@ def test_paths_with_spaces_and_unicode(repo, tmp_path):
     env = env_for(repo, cache)
     for _ in range(2):
         proc = via_loader(script, env, "--version")
-        assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.1.0", "")
+        assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.2.0", "")
     assert len(pycs(cache)) == (1 if POSIX else 0)
 
 
@@ -142,7 +142,7 @@ def test_bytecode_planted_next_to_the_script_is_never_run(repo, tmp_path):
     plant(tmp_path, cache_path_for(script, None))
     for env in (env_for(repo, cache), env_for(repo, tmp_path / "missing" / "x")):
         proc = via_loader(script, env, "--version")
-        assert "PWNED" not in proc.stdout and proc.stdout.strip() == "aigate-lite 0.1.0"
+        assert "PWNED" not in proc.stdout and proc.stdout.strip() == "aigate-lite 0.2.0"
 
 
 @posix_only
@@ -153,7 +153,7 @@ def test_unchecked_bytecode_in_the_cache_is_replaced_not_run(repo, tmp_path):
     [pyc] = pycs(cache)
     plant(tmp_path, str(pyc))
     proc = via_loader(script, env, "--version")
-    assert "PWNED" not in proc.stdout and proc.stdout.strip() == "aigate-lite 0.1.0"
+    assert "PWNED" not in proc.stdout and proc.stdout.strip() == "aigate-lite 0.2.0"
     assert pyc.read_bytes()[4:8] == b"\x03\x00\x00\x00"
 
 
@@ -178,7 +178,7 @@ def warmed(repo, tmp_path):
 
 
 def clean_version(proc):
-    return (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.1.0", "")
+    return (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, "aigate-lite 0.2.0", "")
 
 
 @posix_only

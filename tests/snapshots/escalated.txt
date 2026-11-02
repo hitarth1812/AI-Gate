@@ -1,4 +1,4 @@
-aigate-lite 0.1.0 · staged · 2 files +12 −3 · human
+aigate-lite 0.2.0 · staged · 2 files +12 −3 · human
 app/m0.py
   5  FIX    security.shell  subprocess.run(...) runs through a shell
             → Pass an argument list without a shell.
