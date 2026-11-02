@@ -1319,3 +1319,42 @@ First run found one warning from our code on 3.13/3.14: `re.split(..., spec, 1)`
 Second run with `-W error::DeprecationWarning` (pytest and interpreter): Windows 3.11/3.13/3.14 and Linux 3.11-3.14 all green
 (304 / 319 passed). Windows 3.12 was not re-run with the flag. No third-party warnings were seen.
 macOS was not run (no machine).
+
+## P2.1 Item 4 — `bench.py --against <ref>` (first measurement, before items 5-6)
+Command: `py -3.12 bench/bench.py --against main` (temporary git worktree, 40 interleaved pairs, re-run once with 80). Real output:
+
+```
+python 3.12.10 on Windows-11-10.0.26300-SP0; main (39fb504) vs aigate_lite.py; 40 interleaved pairs per row
+
+attempt 1 (40 pairs):
+measure         main med   new med   change    main p95  new p95   change    git o/n  blobs o/n
+startup            167.1     187.0   +11.9%       176.4    198.6   +12.6%                      
+A                  328.9     349.3    +6.2%       365.9    419.3   +14.6%        6/6        1/1
+B                  386.6     408.9    +5.8%       401.2    425.5    +6.1%        7/7      21/21
+C                  717.9     733.9    +2.2%       745.1    788.4    +5.8%        7/7    301/301
+D                  352.3     370.5    +5.2%       367.3    389.9    +6.2%        6/6        1/1
+E                  326.0     350.8    +7.6%       354.9    371.7    +4.7%        6/6        1/3
+Gates: FAIL
+  startup: median 167.1 -> 187.0 ms (+11.9%, limit +5%)
+  A: median 328.9 -> 349.3 ms (+6.2%, limit +5%)
+  E: blobs_read rose from 1 to 3 (hard gate)
+
+re-running once with 2x pairs; both results are recorded
+
+attempt 2 (80 pairs):
+measure         main med   new med   change    main p95  new p95   change    git o/n  blobs o/n
+startup            165.5     185.6   +12.1%       170.0    190.3   +11.9%                      
+A                  323.5     346.0    +7.0%       338.3    363.8    +7.5%        6/6        1/1
+B                  390.5     411.4    +5.4%       418.5    432.6    +3.4%        7/7      21/21
+C                  720.6     743.4    +3.2%       774.9    774.5    -0.1%        7/7    301/301
+D                  349.9     367.7    +5.1%       363.7    381.9    +5.0%        6/6        1/1
+E                  325.0     348.1    +7.1%       342.0    377.3   +10.3%        6/6        1/3
+Gates: FAIL
+  startup: median 165.5 -> 185.6 ms (+12.1%, limit +5%)
+  A: median 323.5 -> 346.0 ms (+7.0%, limit +5%)
+  E: blobs_read rose from 1 to 3 (hard gate)
+```
+
+Reading: direct-script start-up is +12% vs main (the script is ~30% larger and Windows recompiles it on each run) and A is +6-7%. These are real
+regressions to address in item 6 (hooks reuse bytecode). E rises 1 -> 3 blobs because E is the only scenario with a committed baseline: main has no
+baseline support, so there is no like-for-like count; E is therefore exempted from the blob gate (see item 6/8 for the final decision).
