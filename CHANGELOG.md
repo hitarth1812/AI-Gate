@@ -56,6 +56,9 @@
   reports `gate.error` (fail closed).
 
 ### Added
+- CI: `.github/workflows/ci.yml` runs pyflakes, pytest and the self-scan on {ubuntu, macos, windows} × Python
+  {3.11, 3.12, 3.13, 3.14}, with a non-blocking benchmark smoke on 3.12. Actions are pinned by commit SHA, the token is
+  read-only, and dev tools are pinned in `requirements-dev.txt`.
 - `check --format agent`: a short ASCII-only report for AI coding agents (`AIGATE verdict=… risk=… exit=…`, one
   `<ACTION> <rule> <path>:<line> <message> | fix: <hint>` line per finding, `MORE <n>` when capped at 50 block/fix
   and 20 warn lines, `END`). README: "Using with AI coding agents".

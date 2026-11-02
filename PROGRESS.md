@@ -1273,3 +1273,17 @@ re-run PASSED: startup 186.3 (+13.0 %, p95 +10.3 %). Timing is noisy on this box
 aigate_lite.py grew 218,393 -> 286,375 bytes (+31 %) this phase and Windows hooks recompile it on every run
 (POSIX hooks reuse bytecode). git calls / blobs unchanged. The fix is the Phase 1 BLOCKED item (bytecode reuse
 for Windows hooks); decision needed from the human.
+
+## P2 Item 9 ⚠ — CI matrix
+
+- Added `.github/workflows/ci.yml` and `requirements-dev.txt` (pytest 9.1.1, pyflakes 3.4.0).
+- Action SHAs checked against `git ls-remote` by the reviewer: checkout v7.0.1, setup-python v7.1.0, upload-artifact v7.0.2.
+- Review fixes: push trigger limited to `main` (no double runs on PR branches); cancel-in-progress only for PRs;
+  Windows step that fails early if `git`/`sh` are missing; `AIGATE_PROVENANCE=human` on the self-scan step; 10-minute
+  timeout on the bench smoke step.
+- Verified locally: Windows/3.12 — 303 passed, 15 skipped, 1 failed (the known D5 `test_configured_command_runs`
+  path-with-space failure, see P2 BLOCKED). Linux (WSL)/3.12 — 319 passed. pyflakes clean. Self-scan WARN, 0 block, 0 fix.
+  `bench --compare bench/phase2_start.json`: perf gates PASS (git calls and blobs unchanged; startup +14.9% median / +13.5% p95,
+  inside the gate for item-wide noise only because the gate needs both regressions >15%).
+- **Cells not run:** every CI matrix cell except Windows/3.12 and Linux/3.12 — macOS (all versions) and Python 3.11, 3.13,
+  3.14 are not available locally. The workflow itself has not executed on GitHub (no push is allowed).
