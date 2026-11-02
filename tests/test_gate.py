@@ -1,5 +1,6 @@
 import json
 import os
+import subprocess
 import sys
 
 from conftest import SCRIPT, aigate, find, rules
@@ -165,8 +166,16 @@ def test_explain(repo):
     assert "AIGATE_ALLOW=tests.deleted" in out and "[[allow]]" in out
 
 
+def quoted_executable() -> str:
+    """The interpreter path, quoted for the shell the gate uses (cmd.exe on Windows, /bin/sh elsewhere)."""
+    if os.name == "nt":
+        return subprocess.list2cmdline([sys.executable])
+    import shlex
+    return shlex.quote(sys.executable)
+
+
 def test_configured_command_runs(repo):
-    repo.write(".aigate/lite.toml", f'[[commands]]\nname = "tests"\nrun = \'{sys.executable} -c "raise SystemExit(3)"\'\n'
+    repo.write(".aigate/lite.toml", f'[[commands]]\nname = "tests"\nrun = \'{quoted_executable()} -c "raise SystemExit(3)"\'\n'
                                     'stage = "commit"\n')
     repo.commit()
     assert repo.run("trust").returncode == 0
