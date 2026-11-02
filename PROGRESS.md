@@ -1255,3 +1255,21 @@ line 3 (not by this session's tools; it broke collection). Restored with `git ch
 Verify: Windows `1 failed, 297 passed, 15 skipped in 251.59s` (BLOCKED D5 test); WSL `313 passed in 73.27s`;
 pyflakes clean. bench vs phase2_start: PASS, git calls/blobs unchanged; startup 184.1 (+11.6 %) · A 346.1 (+6.9 %) ·
 B 412.9 · C 742.8 · D 369.4 · E 351.4 (E/A 1.02) · C-cache 593.2.
+
+## P2 Item 8 — `--format agent` + docs
+
+Change: `render_agent()` / `check --format agent`: `AIGATE verdict=<v> risk=<r> exit=<code>`, one line per
+non-allowed finding `<ACTION> <rule> <path>[:<line>] <message> | fix: <first hint line>` sorted by action, path,
+line, rule, message; at most 50 block/fix lines then 20 warn lines and `MORE <n>`; `END`. ASCII only (known
+symbols mapped, anything else `?`), whitespace collapsed, no colour; "nothing to check" prints header + END.
+README "Using with AI coding agents": the format and instruction text for CLAUDE.md / .cursor rules /
+.github/copilot-instructions.md (no tool-specific hook features documented, so nothing to verify against vendor docs).
+Tests (tests/test_agent_format.py, 6): exact golden text (inline, not a snapshot file: NN7); ASCII-only + no ANSI;
+caps (50 + 20 + `MORE 20`); stable order when input is reversed; pass = header + END; CLI on a cp1252 pipe.
+Written before the code (all failed: no `render_agent`).
+Verify: Windows `1 failed, 303 passed, 15 skipped in 297.64s` (BLOCKED D5); WSL `319 passed in 73.11s`; pyflakes clean.
+Bench: first run FAILED the timing gate (startup 164.9 -> 197.2 ms median, p95 177.3 -> 223.2, both > 15 %; A +10 %);
+re-run PASSED: startup 186.3 (+13.0 %, p95 +10.3 %). Timing is noisy on this box, but the trend is real:
+aigate_lite.py grew 218,393 -> 286,375 bytes (+31 %) this phase and Windows hooks recompile it on every run
+(POSIX hooks reuse bytecode). git calls / blobs unchanged. The fix is the Phase 1 BLOCKED item (bytecode reuse
+for Windows hooks); decision needed from the human.

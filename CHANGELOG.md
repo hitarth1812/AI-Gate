@@ -56,6 +56,9 @@
   reports `gate.error` (fail closed).
 
 ### Added
+- `check --format agent`: a short ASCII-only report for AI coding agents (`AIGATE verdict=… risk=… exit=…`, one
+  `<ACTION> <rule> <path>:<line> <message> | fix: <hint>` line per finding, `MORE <n>` when capped at 50 block/fix
+  and 20 warn lines, `END`). README: "Using with AI coding agents".
 - `aigate-lite fix [--yes] [--only rule,...]`: removes staged debugger lines (`breakpoint()`, `pdb.set_trace()`,
   `debugger;` and a debugger import that is no longer used), un-focuses tests (`it.only(` → `it(`, `fit(` → `it(`)
   and unstages env/key files (`git rm --cached`, file kept on disk, anchored `.gitignore` line). Without `--yes` it

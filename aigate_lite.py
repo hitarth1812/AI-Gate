@@ -4087,6 +4087,39 @@ def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: 
                                  width=width, sym=symbols(sys.stdout)))
 
 
+ASCII_MAP = {"→": "->", "…": "...", "·": "-", "−": "-", "—": "-", "–": "-", "✔": "OK", "✖": "X", "▲": "!", "≈": "~",
+             "‘": "'", "’": "'", "“": '"', "”": '"'}
+AGENT_CAPS = (50, 20)              # block/fix lines, then warn lines
+
+
+def to_ascii(text: str) -> str:
+    return "".join(ASCII_MAP.get(c, c) for c in text).encode("ascii", "replace").decode("ascii")
+
+
+def render_agent(res: Result) -> str:
+    """`--format agent`: ASCII, deterministic, one finding per line, for coding agents to act on.
+
+        AIGATE verdict=<v> risk=<r> exit=<code>
+        <ACTION> <rule> <path>:<line> <message> | fix: <hint>
+        MORE <n>          (only when capped: 50 block/fix lines, then 20 warn lines)
+        END
+    """
+    rank = {"block": 0, "fix": 1, "warn": 2}
+    active = sorted((f for f in res.findings if not f.allowed),
+                    key=lambda f: (rank[f.action], f.path, f.line or 0, f.rule, f.message))
+    loud = [f for f in active if f.action in ("block", "fix")][:AGENT_CAPS[0]]
+    quiet = [f for f in active if f.action == "warn"][:AGENT_CAPS[1]]
+    out = [f"AIGATE verdict={res.verdict} risk={res.risk:g} exit={1 if res.verdict in ('fix', 'block') else 0}"]
+    for f in loud + quiet:
+        hint = (f.hint or f.meta.hint or "").splitlines()
+        line = f"{f.action.upper()} {f.rule} {f.path}{f':{f.line}' if f.line else ''} {f.message}"
+        out.append(to_ascii(" ".join((line + (f" | fix: {hint[0]}" if hint else "")).split())))
+    if len(active) > len(loud) + len(quiet):
+        out.append(f"MORE {len(active) - len(loud) - len(quiet)}")
+    out.append("END")
+    return "\n".join(out) + "\n"
+
+
 def report_json(res: Result) -> None:
     print(json.dumps({
         "tool": "aigate-lite", "version": __version__, "schema": 1, "label": res.label,
@@ -4278,6 +4311,8 @@ def run_check(args, env, collect=False):
     if not runs:
         if args.format == "text" and not args.quiet:
             print("aigate-lite: nothing to check")
+        elif args.format == "agent":
+            print("AIGATE verdict=pass risk=0 exit=0\nEND")
         return 0
 
     registry = Registry(offline=args.offline or env.get("AIGATE_OFFLINE") == "1",
@@ -4309,6 +4344,8 @@ def run_check(args, env, collect=False):
         if head is None and not changes:
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
+            elif args.format == "agent":
+                print("AIGATE verdict=pass risk=0 exit=0\nEND")
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
@@ -4377,6 +4414,8 @@ def run_check(args, env, collect=False):
         report_github(res)
     elif args.format == "sarif":
         report_sarif(res)
+    elif args.format == "agent":
+        sys.stdout.write(render_agent(res))
     else:
         mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
         report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
@@ -5623,7 +5662,8 @@ def build_parser():
     target.add_argument("--all", action="store_true",
                         help="scan every tracked file in HEAD as if newly added (an audit; not for hooks)")
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
-    c.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text")
+    c.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text",
+                   help="agent: ASCII lines for AI coding agents (AIGATE ... / <ACTION> <rule> <path>:<line> ... / END)")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
     c.add_argument("--offline", action="store_true", help="skip registry lookups")
     c.add_argument("--cache", action="store_true",

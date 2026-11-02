@@ -94,6 +94,28 @@ author name, or AI co-author trailers in pushed commits. You can add your own va
 
 Detection is best effort. An agent that runs with none of these signals looks like a human.
 
+### Using with AI coding agents
+
+`--format agent` prints a short, ASCII-only, stable report an agent can act on line by line:
+
+    AIGATE verdict=fix risk=30 exit=1
+    FIX security.eval app/a.py:7 eval() runs code built at runtime | fix: Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+    END
+
+At most 50 block/fix lines and 20 warn lines are listed; a `MORE <n>` line says how many were left out.
+Add instructions like these to your agent's instruction file (`CLAUDE.md`, a `.cursor/rules` file,
+`.github/copilot-instructions.md`, …):
+
+```text
+Before every commit, run: python3 .aigate/aigate_lite.py check --format agent
+Fix every BLOCK and FIX line it prints, then run it again until the first line says exit=0.
+Never use `git commit --no-verify` and never edit files under .aigate/ (the gate's config and baseline).
+If a finding looks wrong, stop and tell the user instead of working around it.
+```
+
+These instructions ask; the hooks enforce. Keep the hooks installed (`aigate-lite install`) and run the gate in
+CI, because an agent can ignore instructions.
+
 ## Configuration: `.aigate/lite.toml`
 
 See `examples/lite.toml` for every key. The most useful ones:
