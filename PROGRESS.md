@@ -1419,3 +1419,12 @@ not gated and is +12.6% / +10.6%: the script is ~30% larger and a directly-run s
   What I did measure (Windows 11, Python 3.12, fresh `git init` repo, `install --vendor`, `doctor`, a staged fake AWS key, `git commit`), command time only:
   `elapsed: 3.2115390300750732 s`; the commit was stopped with `secrets.hardcoded` (BLOCK, risk 45.6/100) and `doctor` printed `next: all good; commit as usual`.
   (The shell was an AI-agent shell, `CLAUDECODE` set, so the report said "AI agent"; the wall-clock time excludes anyone reading the README.)
+
+## P2.1 Item 8 — release 0.2.1
+- Version 0.2.1 (`aigate_lite.py`, `pyproject.toml`), CHANGELOG "0.2.1" section, `docs/PERF.md` regenerated with `bench.py --against main --markdown docs/PERF.md` (40 pairs, gates PASS on the first attempt).
+- Final matrix on the release build, `uv run --no-project --python X --with pytest --with pyflakes python -W error::DeprecationWarning -m pytest -q -W error::DeprecationWarning`:
+  Windows 11: 3.11, 3.12, 3.13, 3.14 each `329 passed, 11 skipped`. Linux (WSL2 Ubuntu): 3.11, 3.12, 3.13, 3.14 each `339 passed, 1 skipped`. 0 failures.
+  (The 11 Windows skips are POSIX permission/ownership tests; the Linux skip is the Windows-only default-dir test.)
+- pyflakes clean on `aigate_lite.py`, `bench/bench.py`, `scripts/gen_docs.py`; `gen_docs.py --check` passes; self-scan `check --all --offline`: WARN, risk 25, 0 block, 0 fix.
+- WSL temp copy `~/aigate-cleanup-linux` removed. uv and the uv-managed Pythons stay installed (Windows and WSL) — remove with `uv python uninstall` if unwanted.
+- Local tag `v0.2.1` created; `v0.2.0` left untouched. Nothing pushed or merged.
