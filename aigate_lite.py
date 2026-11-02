@@ -45,7 +45,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 MAX_BYTES = 1_000_000            # files larger than this skip content checks
 ACTION_RANK = {"off": 0, "pass": 1, "warn": 2, "fix": 3, "block": 4}

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.2.1 — fix-up before merge
+
+### Changed
+- Hooks find Python in this order: `$AIGATE_PYTHON` (ignored for AI agents), the interpreter pinned at install, `python3`,
+  `python`, `python3.14`..`python3.11`, `py -3.14`..`py -3.11`, `py -3`. The Windows Store alias stubs are still skipped.
+- Vendored installs (`install --vendor`) now pin the interpreter too. The pin lives in the hook under `.git/hooks`, which is
+  never committed; if the pinned interpreter is gone the hook rediscovers one and prints how to re-pin.
+- Windows hooks now reuse the gate's bytecode like POSIX hooks do (one loader for every OS). The cache is
+  `%LOCALAPPDATA%igate-lite\pycache`; there is no ACL check on Windows (write access to your profile already allows editing
+  `.git/hooks`). It is never used when an AI agent runs the commit, never inside the repository or next to the script, and
+  `sys.path` is no longer changed by the loader. `sys.pycache_prefix` is deliberately not set (see PROGRESS.md).
+- `bench/bench.py --against <ref>` compares interleaved runs against a git ref (temporary worktree, at least 40 pairs).
+- `docs/PERF.md` is now the interleaved comparison against `main`.
+
+### Fixed
+- `test_configured_command_runs` no longer fails when the Python path contains a space (the test now quotes the path).
+- `re.split` with a positional `maxsplit` (DeprecationWarning on Python 3.13+) in range parsing.
+- `AIGATE_PROVENANCE` spellings such as `Agent` are treated like `agent` by the hook's `AIGATE_PYTHON` check and the loader.
+- Tests and snapshots no longer hardcode the version; `docs/RULES.md` no longer prints it.
+
+### Not run / known limits
+- macOS and the GitHub Actions workflow have never run. Tested by hand: Windows 11 and Ubuntu (WSL2) on Python 3.11-3.14.
+- Windows direct runs (`python aigate_lite.py ...`, not via a hook) are about 11-13% slower to start than 0.1.x; hooks are faster.
+
 ## 0.2.0 — Phase 2: usability
 
 ### Behaviour changes
