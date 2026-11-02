@@ -57,7 +57,7 @@ CASES = {
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_golden_snapshot(name):
     build, opts = CASES[name]
-    text = aigate.render_text(build(), **opts)
+    text = aigate.render_text(build(), **opts).replace(f"aigate-lite {aigate.__version__} ", "aigate-lite <VERSION> ")
     path = SNAP / f"{name}.txt"
     if UPDATE:
         SNAP.mkdir(exist_ok=True)

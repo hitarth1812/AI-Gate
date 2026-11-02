@@ -1,4 +1,4 @@
-aigate-lite 0.2.0 · staged · 2 files +12 −3 · human
+aigate-lite <VERSION> · staged · 2 files +12 −3 · human
 src/f00.py
    1  WARN   code.todo  # TODO later
 src/f01.py
