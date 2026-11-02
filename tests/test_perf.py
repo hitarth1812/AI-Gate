@@ -1,7 +1,7 @@
 import json
 import os
 
-from conftest import find
+from conftest import aigate, find
 
 
 def profile(proc) -> dict:
@@ -62,7 +62,7 @@ def test_heavy_modules_still_load_when_a_feature_needs_them():
 
 def test_version_output_unchanged(repo):
     proc = repo.run("--version")
-    assert proc.returncode == 0 and proc.stdout.strip() == "aigate-lite 0.1.0"
+    assert proc.returncode == 0 and proc.stdout.strip() == f"aigate-lite {aigate.__version__}"
 
 
 # ---------------------------------------------------------------- work avoidance

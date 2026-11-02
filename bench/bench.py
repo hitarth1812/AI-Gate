@@ -7,12 +7,14 @@ AIGATE_PROFILE=1 counters (git subprocesses, blobs read) from stderr.
     python bench/bench.py                                  # print results
     python bench/bench.py --save bench/baseline.json       # record a baseline
     python bench/bench.py --compare bench/baseline.json    # perf gates against a baseline
+    python bench/bench.py --against main                   # interleaved old/new runs against a git ref
 
 Scenarios (all staged-mode, --offline, warm cache):
     A  1 file / 20 lines added to a small repo
     B  20 files / 400 lines, mixed Python + JS
     C  300-file change
     D  the A change on top of a 50,000-file repo
+    E  the A change with a 1,000-entry .aigate/baseline.json present (lookups must stay O(1))
 """
 from __future__ import annotations
 
@@ -29,8 +31,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
-FIXTURE_VERSION = "1"            # bump when generated content changes; forces a rebuild
-SCENARIOS = ("A", "B", "C", "D")
+FIXTURE_VERSION = "3"            # bump when generated content changes; forces a rebuild
+SCENARIOS = ("A", "B", "C", "D", "E")
+BASELINE_ENTRIES = 1000          # scenario E: the A change with a baseline of this size present
 COLD = ("A", "C")                # also measured with each EXTRA flag below, not gated
 EXTRA = {"cold": "--no-cache",   # result and lookup caches off
          "cache": "--cache"}     # result cache on (it is off by default); the first run fills it
@@ -166,17 +169,43 @@ def stage_change(repo, scenario):
     git(repo, "add", "-A", "--", "app", "web")
 
 
+def write_baseline(repo, n):
+    """A baseline of n entries that match nothing in the change (the worst case: every lookup misses)."""
+    rows = [{"rule": "code.todo", "path": f"src/legacy_{i:04d}.py", "fingerprint": f"{i:016x}"} for i in range(n)]
+    os.makedirs(os.path.join(repo, ".aigate"), exist_ok=True)
+    with open(os.path.join(repo, ".aigate", "baseline.json"), "w", encoding="utf-8", newline="\n") as fh:
+        json.dump({"version": 1, "tool": "bench", "entries": rows}, fh, indent=2)
+    git(repo, "add", ".aigate/baseline.json")
+    git(repo, "commit", "-q", "-m", "baseline")
+
+
+def remove_tree(path):
+    """rmtree that also removes read-only files (git objects on Windows), and fails loudly otherwise."""
+    import stat
+
+    def retry(func, target, _exc):
+        os.chmod(target, stat.S_IWRITE)
+        func(target)
+    if os.path.exists(path):
+        if sys.version_info >= (3, 12):
+            shutil.rmtree(path, onexc=retry)
+        else:
+            shutil.rmtree(path, onerror=retry)
+
+
 def build_fixtures(force=False) -> dict:
     stamp = os.path.join(WORK, "stamp")
     repos = {s: os.path.join(WORK, s) for s in SCENARIOS}
     if not force and os.path.exists(stamp) and open(stamp).read() == FIXTURE_VERSION:
         return repos
-    shutil.rmtree(WORK, ignore_errors=True)
+    remove_tree(WORK)
     os.makedirs(os.path.join(WORK, "home"))
     for s, repo in repos.items():
         t = time.monotonic()
         (init_large(repo, D_FILES) if s == "D" else init_small(repo))
-        stage_change(repo, s)
+        if s == "E":
+            write_baseline(repo, BASELINE_ENTRIES)        # committed first: staged checks read it from the index
+        stage_change(repo, "A" if s == "E" else s)
         print(f"  built fixture {s} in {time.monotonic() - t:.1f}s", file=sys.stderr)
     with open(stamp, "w") as fh:
         fh.write(FIXTURE_VERSION)
@@ -281,7 +310,11 @@ def pct(new, old) -> str:
 def gates(res, base) -> list:
     """Failures as strings; empty means every gate passed."""
     fails = []
+    if "E" in res and res["E"]["median_ms"] > res["A"]["median_ms"] * 1.10:
+        fails.append(f"E: median {res['E']['median_ms']} ms > A {res['A']['median_ms']} ms x 1.10 (baseline lookups)")
     for s in ("startup", *SCENARIOS):
+        if s not in base:                       # an older baseline file without this scenario
+            continue
         new, old = res[s], base[s]
         for counter in ("git_calls", "blobs_read"):
             n, o = (new.get("counters") or {}).get(counter), (old.get("counters") or {}).get(counter)
@@ -342,6 +375,177 @@ def markdown(res, base, cmd) -> str:
     return "\n".join(out) + "\n"
 
 
+# ---------------------------------------------------------------------------- interleaved comparison
+
+AGAINST_MEASURES = ("startup", "startup-direct", *SCENARIOS)
+
+
+def worktree_script(ref):
+    """Check `ref` out into a temporary detached worktree; returns (directory, its aigate_lite.py)."""
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="aigate-bench-")
+    proc = subprocess.run(["git", "-C", ROOT, "worktree", "add", "--detach", tmp, ref], capture_output=True, text=True)
+    if proc.returncode:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise SystemExit(f"cannot check out {ref!r}: {proc.stderr.strip()}")
+    return tmp, os.path.join(tmp, "aigate_lite.py")
+
+
+def drop_worktree(tmp):
+    subprocess.run(["git", "-C", ROOT, "worktree", "remove", "--force", tmp], capture_output=True, text=True)
+    remove_tree(tmp)
+    subprocess.run(["git", "-C", ROOT, "worktree", "prune"], capture_output=True, text=True)
+
+
+def hook_style(script):
+    """The loader this script's hooks start it with on this OS, or None (they then run the script directly)."""
+    loader = hook_loader(script)
+    return loader if loader and (os.name != "nt" or "NT = os.name" in loader) else None
+
+
+def command_for(measure, py, script):
+    """Commands run the way an installed hook runs them (through the bytecode loader where the build has one);
+    `startup-direct` is `python script --version`, the way a person types it."""
+    args = ["--version"] if measure.startswith("startup") else         ["check", "--staged", "--offline", "--no-commands", "--format", "json"]
+    loader = None if measure == "startup-direct" else hook_style(script)
+    return [py, "-P", "-c", loader, script, *args] if loader else [py, script, *args]
+
+
+def measure_against(old, new, pairs, py) -> dict:
+    """Alternate old and new runs of each measure (old first on even pairs, new first on odd ones)."""
+    import tempfile
+    repos = build_fixtures()
+    env = base_env()
+    out = {}
+    # the loader refuses a cache dir inside the repository (bench/.work is), so use one outside it
+    env["AIGATE_CACHE_DIR"] = tempfile.mkdtemp(prefix="aigate-bench-cache-")
+    try:
+        return _measure_against(old, new, pairs, py, repos, env, out)
+    finally:
+        remove_tree(env["AIGATE_CACHE_DIR"])
+
+
+def _measure_against(old, new, pairs, py, repos, env, out) -> dict:
+    for name in AGAINST_MEASURES:
+        cwd = repos.get(name, ROOT)
+        cmds = {"old": command_for(name, py, old), "new": command_for(name, py, new)}
+        for c in cmds.values():
+            run_once(c, cwd, env)                                    # warm the OS cache and any bytecode cache
+        samples = {"old": [], "new": []}
+        for i in range(pairs):
+            for side in (("old", "new") if i % 2 == 0 else ("new", "old")):
+                samples[side].append(run_once(cmds[side], cwd, env)[0])
+        row = {side: summarize(samples[side]) for side in samples}
+        if name in SCENARIOS:
+            for side in cmds:
+                prof = run_once(cmds[side], cwd, {**env, "AIGATE_PROFILE": "1"})[1]
+                row[side]["counters"] = profile_counters(prof.stderr)
+        out[name] = row
+    return out
+
+
+def against_gates(res) -> list:
+    fails = []
+    for name, row in res.items():
+        o, n = row["old"], row["new"]
+        med, p95 = n["median_ms"] / o["median_ms"] - 1, n["p95_ms"] / o["p95_ms"] - 1
+        if name == "startup-direct":
+            continue                                   # informational: not how hooks start the gate
+        if name in ("startup", "A"):
+            if med > 0.05:
+                fails.append(f"{name}: median {o['median_ms']} -> {n['median_ms']} ms ({med * 100:+.1f}%, limit +5%)")
+        elif name in SCENARIOS:
+            if med > 0.15 or p95 > 0.15:
+                fails.append(f"{name}: median {med * 100:+.1f}% / p95 {p95 * 100:+.1f}% (limit +15% for both)")
+        for counter in ("git_calls", "blobs_read"):
+            a, b = (o.get("counters") or {}).get(counter), (n.get("counters") or {}).get(counter)
+            if name == "E" and counter == "blobs_read":
+                continue               # E has a baseline file that older builds ignore: not like-for-like
+            if a is not None and b is not None and b > a:
+                fails.append(f"{name}: {counter} rose from {a} to {b} (hard gate)")
+    return fails
+
+
+def counter_pair(row, key) -> str:
+    o, n = (row["old"].get("counters") or {}).get(key), (row["new"].get("counters") or {}).get(key)
+    return "" if o is None and n is None else f"{o}/{n}"
+
+
+def against_table(res, ref) -> str:
+    rows = [f"{'measure':<13} {ref + ' med':>10} {'new med':>9} {'change':>8}   {ref + ' p95':>9} {'new p95':>8} {'change':>8}"
+            f"   {'git o/n':>8} {'blobs o/n':>10}"]
+    for name, row in res.items():
+        o, n = row["old"], row["new"]
+        rows.append(f"{name:<13} {o['median_ms']:>10.1f} {n['median_ms']:>9.1f} {pct(n['median_ms'], o['median_ms']):>8}   "
+                    f"{o['p95_ms']:>9.1f} {n['p95_ms']:>8.1f} {pct(n['p95_ms'], o['p95_ms']):>8}"
+                    f"   {counter_pair(row, 'git_calls'):>8} {counter_pair(row, 'blobs_read'):>10}")
+    return "\n".join(rows)
+
+
+def markdown_against(ref, attempts, cmd) -> str:
+    out = ["# Performance", "", "<!-- Generated by bench/bench.py --against --markdown. Do not edit by hand. -->", "",
+           f"Measured {time.strftime('%Y-%m-%dT%H:%M:%S')} on {platform.platform()}, Python {platform.python_version()}, "
+           f"`--offline`, warm OS cache. Command:", "", f"    {cmd}", "",
+           f"Each row alternates runs of `{ref}` (checked out into a temporary worktree) and the working tree, so slow drift "
+           "on the machine hits both sides equally. Scenarios: A = 1 file / 20 lines; B = 20 files / 400 lines (Python + JS); "
+           "C = 300-file change; D = the A change in a 50,000-file repo; E = A with a 1,000-entry baseline present. "
+           "Rows run the way an installed hook starts the gate (through the bytecode loader when the build has one for this OS); "
+           "`startup-direct` is `python aigate_lite.py --version` as typed by a person and is not gated. "
+           "E blob counts are not gated: only E has a baseline file, which older builds do not read.", "",
+           "Gates: startup and A median <= +5%; B-E median and p95 <= +15%; git calls and blobs read never rise."]
+    for i, a in enumerate(attempts, 1):
+        out += ["", f"## Attempt {i} ({a['pairs']} pairs per row): {'PASS' if not a['failures'] else 'FAIL'}", "",
+                f"| measure | {ref} median ms | new median ms | change | {ref} p95 ms | new p95 ms | change "
+                "| git calls (old/new) | blobs (old/new) |",
+                "|---|---:|---:|---:|---:|---:|---:|---:|---:|"]
+        for name, row in a["results"].items():
+            o, n = row["old"], row["new"]
+            out.append(f"| {name} | {o['median_ms']:.1f} | {n['median_ms']:.1f} | {pct(n['median_ms'], o['median_ms'])} | "
+                       f"{o['p95_ms']:.1f} | {n['p95_ms']:.1f} | {pct(n['p95_ms'], o['p95_ms'])} | "
+                       f"{counter_pair(row, 'git_calls')} | {counter_pair(row, 'blobs_read')} |")
+        out += [""] + [f"- {f}" for f in a["failures"]]
+    return "\n".join(out).rstrip() + "\n"
+
+
+def run_against(args) -> int:
+    pairs = max(args.pairs, 40)
+    tmp, old = worktree_script(args.against)
+    try:
+        new = os.path.abspath(args.script)
+        sha = subprocess.run(["git", "-C", ROOT, "rev-parse", "--short", args.against], capture_output=True, text=True)
+        print(f"python {platform.python_version()} on {platform.platform()}; {args.against} ({sha.stdout.strip()}) "
+              f"vs {os.path.relpath(new, ROOT)}; {pairs} interleaved pairs per row")
+        attempts = []
+        for attempt in (1, 2):
+            n = pairs * attempt
+            res = measure_against(old, new, n, args.python)
+            fails = against_gates(res)
+            attempts.append({"pairs": n, "results": res, "failures": fails})
+            print(f"\nattempt {attempt} ({n} pairs):")
+            print(against_table(res, args.against))
+            print("Gates: " + ("PASS" if not fails else "FAIL"))
+            for f in fails:
+                print("  " + f)
+            if not fails:
+                break
+            if attempt == 1:
+                print("\nre-running once with 2x pairs; both results are recorded")
+        if args.json:
+            with open(args.json, "w", encoding="utf-8", newline="\n") as fh:
+                json.dump({"against": args.against, "python": platform.python_version(),
+                           "platform": platform.platform(), "date": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                           "attempts": attempts}, fh, indent=2)
+                fh.write("\n")
+        if args.markdown:
+            os.makedirs(os.path.dirname(os.path.abspath(args.markdown)), exist_ok=True)
+            cmd = "python bench/bench.py " + " ".join(sys.argv[1:])
+            with open(args.markdown, "w", encoding="utf-8", newline="\n") as fh:
+                fh.write(markdown_against(args.against, attempts, cmd))
+        return 1 if attempts[-1]["failures"] else 0
+    finally:
+        drop_worktree(tmp)
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--runs", type=int, default=30)
@@ -352,9 +556,13 @@ def main(argv=None) -> int:
     p.add_argument("--rebuild", action="store_true", help="regenerate the fixture repos")
     p.add_argument("--json", metavar="FILE", help="also write this run's results as JSON")
     p.add_argument("--markdown", metavar="FILE", help="write a Markdown report (e.g. docs/PERF.md)")
+    p.add_argument("--against", metavar="REF", help="interleave runs of the git ref REF with this tree and apply the gates")
+    p.add_argument("--pairs", type=int, default=40, help="with --against: pairs per row (at least 40)")
     args = p.parse_args(argv)
     if args.rebuild:
         build_fixtures(force=True)
+    if args.against:
+        return run_against(args)
     res = measure(os.path.abspath(args.script), args.runs, args.python)
     base = None
     if args.compare:

@@ -23,7 +23,9 @@ cached and skipped with --offline.
 import sys
 
 if sys.version_info < (3, 11):
-    sys.stderr.write("aigate-lite needs Python 3.11 or newer (found %s)\n" % sys.version.split()[0])
+    sys.stderr.write("aigate-lite: needs Python 3.11 or newer (found %s)\n"
+                     "  fix: install Python 3.11+ (hooks also use $AIGATE_PYTHON when it is set)\n"
+                     % sys.version.split()[0])
     sys.exit(2)
 
 import ast
@@ -43,7 +45,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 
 MAX_BYTES = 1_000_000            # files larger than this skip content checks
 ACTION_RANK = {"off": 0, "pass": 1, "warn": 2, "fix": 3, "block": 4}
@@ -281,8 +283,17 @@ def redact(value: str) -> str:
 
 
 def fingerprint(*parts) -> str:
+    """The 0.1 fingerprint (12 hex characters). Kept as `legacy_fingerprint` so [[allow]] entries and baselines
+    written by 0.1.x still match during 0.2.x."""
     import hashlib
     return hashlib.sha1("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def fingerprint_v2(*parts) -> str:
+    """The 0.2 fingerprint (16 hex characters, so old ones are recognisable): rule, path and a key that does
+    not depend on line numbers, so it survives edits elsewhere in the file."""
+    import hashlib
+    return hashlib.sha256("\x1f".join(str(p) for p in parts).encode("utf-8", "replace")).hexdigest()[:16]
 
 
 def utcnow() -> dt.datetime:
@@ -431,13 +442,28 @@ def loads_jsonc(text: str):
 
 # --------------------------------------------------------------------------- git
 
-class GitError(RuntimeError):
+class UserError(Exception):
+    """A problem the user can fix: main() prints `aigate-lite: <cause>` and `  fix: <fix>`, no traceback."""
+
+    def __init__(self, cause: str, fix: str = "", exit_code: int = 2):
+        super().__init__(cause)
+        self.cause, self.fix, self.exit_code = cause, fix, exit_code
+
+
+class GitError(UserError):
     pass
+
+
+def git_missing() -> UserError:
+    return UserError("git was not found on PATH", "install git (2.13 or newer) and check that `git --version` works")
 
 
 def run_git(root, *args, input_bytes=None, check=True) -> str:
     PROFILE["git_calls"] += 1
-    proc = subprocess.run(["git", *args], cwd=root, input=input_bytes, capture_output=True)
+    try:
+        proc = subprocess.run(["git", *args], cwd=root, input=input_bytes, capture_output=True)
+    except FileNotFoundError:
+        raise git_missing() from None
     if check and proc.returncode != 0:
         raise GitError(f"git {' '.join(args[:2])} failed: {proc.stderr.decode('utf-8', 'replace').strip()}")
     return proc.stdout.decode("utf-8", "replace")
@@ -454,11 +480,15 @@ class Repo:
     @classmethod
     def discover(cls, cwd=None) -> "Repo":
         PROFILE["git_calls"] += 1
-        proc = subprocess.run(["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"], cwd=cwd,
-                              capture_output=True, text=True)
+        try:
+            proc = subprocess.run(["git", "rev-parse", "--show-toplevel", "--absolute-git-dir"], cwd=cwd,
+                                  capture_output=True, text=True)
+        except FileNotFoundError:
+            raise git_missing() from None
         lines = proc.stdout.splitlines()
         if proc.returncode != 0 or len(lines) != 2:
-            raise GitError("not inside a git repository")
+            raise GitError("not inside a git repository",
+                           "run it inside your project's folder (or create a repository there: git init)")
         return cls(lines[0].strip(), lines[1].strip())
 
     def git(self, *args, **kw) -> str:
@@ -738,6 +768,49 @@ def _parse_date(value):
         return None
 
 
+PRESET_NAMES = ("relaxed", "balanced", "strict")
+
+
+def _presets() -> dict:
+    """Built-in presets, the single source for `preset = ...` and the docs/RULES.md table. Effective config =
+    built-in defaults <- preset <- the user's file."""
+    strict_security = {r: "fix" for r in RULES if r.startswith("security.") and RULES[r].action == "warn"}
+    return {
+        "relaxed": {"rules": {"suppress.type": "warn", "suppress.coverage": "warn", "deps.undeclared": "warn",
+                              "deps.version_cooldown": "warn", "code.todo": "off", "size.*": "off"},
+                    "limits": {"function_lines": 100, "complexity": 15}},
+        "balanced": {},
+        "strict": {"rules": {**strict_security, "deps.typosquat": "fix", "tests.no_assertions": "fix",
+                             "tests.expected_changed": "fix"},
+                   "gate": {"offline": "block"},
+                   "limits": {"function_lines": 50, "complexity": 8}},
+    }
+
+
+PRESETS = _presets()
+
+
+def apply_preset(raw: dict, problems: list) -> dict:
+    """The user's raw config laid over its preset. A user [rules] key (exact or glob) replaces every preset
+    rule it matches, so the user's setting always wins; other sections merge key by key."""
+    name = raw.get("preset", "balanced")
+    if name not in PRESETS:
+        problems.append(f"preset must be relaxed, balanced or strict (got {name!r}); using balanced")
+        name = "balanced"
+    out = {k: v for k, v in raw.items() if k != "preset"}
+    for section, values in PRESETS[name].items():
+        user = raw.get(section)
+        if user is not None and not isinstance(user, dict):
+            continue                                   # merge_config reports the wrong type
+        user = user or {}
+        if section == "rules":
+            kept = {p: a for p, a in values.items() if not any(fnmatch.fnmatchcase(p, k) for k in user)}
+            out["rules"] = {**kept, **user}
+        else:
+            out[section] = {**values, **user}
+    return out
+
+
 def merge_config(raw: dict, problems: list) -> dict:
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     for section, value in raw.items():
@@ -859,10 +932,47 @@ def load_config(repo: Repo, source: str, explicit=None) -> Config:
         try:
             raw = tomllib.loads(text)
         except tomllib.TOMLDecodeError as e:
-            problems.append(f"{CONFIG_PATH} is not valid TOML ({e}); using defaults")
-    data = merge_config(raw, problems)
+            hint = ""
+            if any(w in str(e).lower() for w in ("escape", "hex value", "unicode")):
+                hint = "; on Windows put paths in single quotes ('C:\\path') or use forward slashes"
+            problems.append(f"{CONFIG_PATH} is not valid TOML ({e}){hint}; using defaults")
+    data = merge_config(apply_preset(raw, problems), problems)
     validate_config(data, problems)
     return Config(data, problems, origin)
+
+
+BASELINE_PATH = ".aigate/baseline.json"
+BASELINE_NEVER = ("gate.", "commands.", "scope.")   # the gate's own state, never accepted by a baseline
+
+
+def load_baseline(repo, source) -> tuple:
+    """({(rule, path, fingerprint)}, problems) from .aigate/baseline.json in the worktree or a commit. Anything
+    unreadable is ignored (more findings, never fewer)."""
+    if source is None:
+        return set(), []
+    if source == "worktree":
+        try:
+            with open(os.path.join(repo.root, BASELINE_PATH), "rb") as fh:
+                data = fh.read()
+        except OSError:
+            return set(), []
+    else:                                              # "" = the index (staged content), else a commit
+        data = repo.read(f"{source}:{BASELINE_PATH}")
+        if data is None:
+            return set(), []
+    try:
+        doc = json.loads(data.decode("utf-8-sig"))
+        rows = doc["entries"] if isinstance(doc, dict) and type(doc.get("version")) is int and doc["version"] == 1 \
+            else None
+    except (ValueError, KeyError, UnicodeDecodeError, RecursionError):
+        rows = None
+    if not isinstance(rows, list):
+        return set(), [f"{BASELINE_PATH} is not a version 1 baseline; ignored (re-create it: aigate-lite baseline)"]
+    valid = [e for e in rows if isinstance(e, dict) and all(isinstance(e.get(k), str) for k in ("rule", "path", "fingerprint"))]
+    entries = {(e["rule"], e["path"], e["fingerprint"]) for e in valid
+               if not e["rule"].startswith(BASELINE_NEVER)}
+    bad = len(rows) - len(valid)
+    return entries, ([f"{bad} malformed {BASELINE_PATH} entr{'y' if bad == 1 else 'ies'} ignored"] if bad else [])
 
 
 # --------------------------------------------------------------------------- provenance
@@ -907,6 +1017,9 @@ class Finding:
     hint: str | None = None
     allowed: str | None = None     # why it was allowed, when it was
     sensitive: bool = False
+    legacy_key: str | None = None  # the 0.1 key, when it differs (it used line numbers)
+    base_key: str | None = None    # key before twin numbering (set by number_twins)
+    twin: int = 1                  # 1 for the first finding with this rule, file and key; 2, 3, ... after it
 
     @property
     def meta(self) -> Rule:
@@ -914,11 +1027,53 @@ class Finding:
 
     @property
     def fingerprint(self) -> str:
-        return fingerprint(self.rule, self.path, self.key or self.message)
+        return fingerprint_v2(self.rule, self.path, self.key or self.message)
+
+    @property
+    def legacy_fingerprint(self) -> str:
+        return fingerprint(self.rule, self.path, self.legacy_key if self.legacy_key is not None
+                           else self.key or self.message)
 
 
-def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=None) -> Finding:
-    return Finding(rule, path, line, message, action or RULES[rule].action, key=key, hint=hint)
+def make(rule: str, path: str, line, message: str, *, action=None, key="", hint=None, legacy_key=None) -> Finding:
+    return Finding(rule, path, line, message, action or RULES[rule].action, key=key, hint=hint, legacy_key=legacy_key)
+
+
+def number_twins(findings) -> None:
+    """Findings with the same rule, file and key (e.g. two identical `except Exception: pass`) get #2, #3, ...
+    in line order, so each has its own fingerprint and a baseline entry never covers a new twin."""
+    groups = defaultdict(list)
+    for f in findings:
+        f.base_key = f.key or f.message
+        groups[(f.rule, f.path, f.base_key)].append(f)
+    for twins in groups.values():
+        for n, f in enumerate(sorted(twins, key=lambda f: f.line or 0)[1:], 2):
+            if f.legacy_key is None:
+                f.legacy_key = f.base_key
+            f.key, f.twin = f"{f.base_key}#{n}", n
+
+
+def _removed_keys(ctx, path) -> Counter:
+    """How many findings per (rule, base key) the change's removed lines of `path` carried in the old version:
+    the four per-file checks run over the removed lines as if they were added. Outside `check --all` a baseline
+    entry only accepts as many added findings as were removed (an edited line keeps its debt; a new copy of a
+    baselined pattern is reported)."""
+    memo = ctx.cache.setdefault("removed_keys", {})
+    if path not in memo:
+        found = []
+        for fc in ctx.changes:
+            if fc.path == path and fc.removed and fc.old_spec and not fc.binary:
+                old = dataclasses.replace(fc, path=fc.old_path or fc.path, added=dict(fc.removed), removed=[],
+                                          new_spec=fc.old_spec, old_spec=None, new_sha=fc.old_sha, old_sha=None)
+                for run in (lambda: _secrets_file(ctx, old, ""), lambda: _suppressions_file(ctx, old),
+                            lambda: _code_lines_file(ctx, old), lambda: _python_file(ctx, old) if old.ext == ".py" else []):
+                    try:
+                        found += run()
+                    except Exception:                          # unknown means nothing accepted (fail safe)
+                        found = []
+                        break
+        memo[path] = Counter((f.rule, f.key or f.message) for f in found)
+    return memo[path]
 
 
 class Context:
@@ -935,6 +1090,7 @@ class Context:
         self._asts: dict = {}
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
+        self.baseline: set = set()     # (rule, path, fingerprint) accepted by .aigate/baseline.json
 
     @property
     def agent(self) -> bool:
@@ -1163,6 +1319,29 @@ def default_cache_dir() -> str:
     return os.path.join(base, "aigate-lite")
 
 
+def network_reason(e) -> str:
+    """Why a registry request failed, in words a user can act on."""
+    import socket
+    import ssl
+    import urllib.error
+    if isinstance(e, urllib.error.HTTPError):
+        return f"HTTP {e.code} from the registry"
+    r = getattr(e, "reason", e)
+    if isinstance(r, ssl.SSLCertVerificationError) or isinstance(e, ssl.SSLCertVerificationError):
+        return "TLS certificate verification failed; behind a company proxy? set SSL_CERT_FILE to its CA bundle"
+    if isinstance(r, ssl.SSLError) or isinstance(e, ssl.SSLError):
+        return f"TLS error ({getattr(r, 'reason', None) or r}); a proxy that intercepts HTTPS?"
+    if isinstance(r, ConnectionRefusedError):
+        return "connection refused; check HTTPS_PROXY / HTTP_PROXY"
+    if isinstance(r, TimeoutError) or "timed out" in str(r):
+        return "timed out"
+    if isinstance(r, socket.gaierror):
+        return "DNS lookup failed (offline?)"
+    if isinstance(e, (ValueError, KeyError, TypeError)):
+        return "unexpected response from the registry"
+    return f"{type(r).__name__}: {str(r)[:80]}"
+
+
 def npm_quote(name: str) -> str:
     import urllib.parse
     return urllib.parse.quote(name, safe="@")
@@ -1185,6 +1364,7 @@ class Registry:
         self.cache_path = None
         self.dirty = False
         self.failures = 0
+        self.failure_reason = None
         if use_cache and self.fixture is None:
             self.cache_path = os.path.join(default_cache_dir(), "registry-v1.json")
             try:
@@ -1305,8 +1485,9 @@ class Registry:
                                "version": key[3]}).encode()
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
-        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError):
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
             self.failures += 1
+            self.failure_reason = self.failure_reason or network_reason(e)
             return None
 
     def _fetch_info(self, eco, name):
@@ -2117,44 +2298,54 @@ def python_environment(ctx):
     """(importable top-level names, import -> distributions) from this interpreter and project venvs."""
     if "py_env" in ctx.cache:
         return ctx.cache["py_env"]
+    import csv
     import importlib.metadata
+    unreadable = (OSError, ValueError, LookupError, csv.Error)    # broken metadata of one distribution: skip it
     names, mapping = set(), defaultdict(set)
-    try:
-        for dist in importlib.metadata.distributions():
-            dname = dist.metadata["Name"] if dist.metadata else None
-            for top in _dist_tops(dist):
-                names.add(top)
-                if dname:
-                    mapping[top].add(dname)
-    except Exception:
-        pass
+    for dist in importlib.metadata.distributions():
+        try:
+            dname, tops = (dist.metadata["Name"] if dist.metadata else None), _dist_tops(dist)
+        except unreadable:
+            continue
+        for top in tops:
+            names.add(top)
+            if dname:
+                mapping[top].add(dname)
     for sp in find_site_packages(ctx.repo.root):
         try:
-            for entry in os.listdir(sp):
-                if entry.endswith(".py"):
-                    names.add(entry[:-3])
-                elif entry.endswith((".so", ".pyd")):
-                    names.add(entry.split(".")[0])
-                elif "." not in entry and entry != "__pycache__" and os.path.isdir(os.path.join(sp, entry)):
-                    names.add(entry)
-            for dist in importlib.metadata.distributions(path=[sp]):
-                dname = dist.metadata["Name"] if dist.metadata else None
-                if not dname:
-                    continue
-                tops = (dist.read_text("top_level.txt") or "").split()
-                if not tops:
-                    for f in dist.files or []:
-                        first = f.parts[0] if f.parts else ""
-                        if first and not first.endswith((".dist-info", ".egg-info", ".pth", ".data")) \
-                                and first not in ("..", "__pycache__", "bin"):
-                            tops.append(first[:-3] if first.endswith(".py") else first.split(".")[0])
-                for t in set(tops):
-                    names.add(t)
-                    mapping[t].add(dname)
-        except Exception:
+            entries = os.listdir(sp)
+        except OSError:
             continue
+        for entry in entries:
+            if entry.endswith(".py"):
+                names.add(entry[:-3])
+            elif entry.endswith((".so", ".pyd")):
+                names.add(entry.split(".")[0])
+            elif "." not in entry and entry != "__pycache__" and os.path.isdir(os.path.join(sp, entry)):
+                names.add(entry)
+        for dist in importlib.metadata.distributions(path=[sp]):
+            try:
+                dname = dist.metadata["Name"] if dist.metadata else None
+                tops = _site_tops(dist) if dname else ()
+            except unreadable:
+                continue
+            for t in tops:
+                names.add(t)
+                mapping[t].add(dname)
     ctx.cache["py_env"] = (names, mapping)
     return names, mapping
+
+
+def _site_tops(dist) -> set:
+    """Top-level import names of a distribution in a project venv: top_level.txt, else its installed files."""
+    tops = (dist.read_text("top_level.txt") or "").split()
+    if not tops:
+        for f in dist.files or []:
+            first = f.parts[0] if f.parts else ""
+            if first and not first.endswith((".dist-info", ".egg-info", ".pth", ".data")) \
+                    and first not in ("..", "__pycache__", "bin"):
+                tops.append(first[:-3] if first.endswith(".py") else first.split(".")[0])
+    return set(tops)
 
 
 def _importable(top: str) -> bool:
@@ -2900,7 +3091,7 @@ def check_tests(ctx) -> list:
 # --------------------------------------------------------------------------- checks: suppressions
 
 SUPPRESSIONS = [
-    ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:allow|(?:#|//)\s*NOSONAR\b|"
+    ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:(?:allow)|(?:#|//)\s*NOSONAR\b|"
                                      r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d")),
     ("suppress.blanket", re.compile(r"#\s*(?:flake8|ruff):\s*noqa\s*$|#\s*mypy:\s*ignore-errors|#\s*pylint:\s*skip-file|"
                                     r"//\s*@ts-nocheck|/\*\s*eslint-disable\s*\*/|^\s*//\s*eslint-disable\s*$|"
@@ -2936,7 +3127,9 @@ def _suppressions_file(ctx, fc) -> list:
                 if before[rule]:
                     before[rule] -= 1            # the same suppression existed on an edited line
                 else:
-                    out.append(make(rule, fc.path, line, f"`{m.group(0).strip()}` added", key=m.group(0).strip()))
+                    marker = m.group(0).strip()                  # key: the whole line, so each one is distinct
+                    out.append(make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
+                                    legacy_key=marker))
                 break
         if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
             out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
@@ -3344,6 +3537,16 @@ def _loop_patterns(fc, qual, fn, scan) -> list:
 def _python_nodes(ctx, fc, tree, test) -> list:
     out, added = [], fc.added
     imported_embed = False
+    owners: dict = {}
+
+    def qual(node) -> str:
+        """Qualified name of the function around `node` (built on first use: most files have no findings)."""
+        if not owners:
+            owners[None] = "<module>"
+            for fn, _cls, name in iter_functions(tree):          # outer first, so inner functions win
+                for n in ast.walk(fn):
+                    owners[id(n)] = name
+        return owners.get(id(node), "<module>")
     for node in ast.walk(tree):
         line = getattr(node, "lineno", None)
         if line not in added:
@@ -3356,7 +3559,7 @@ def _python_nodes(ctx, fc, tree, test) -> list:
                     any(a.name == "embed" for a in node.names):
                 imported_embed = True
         elif isinstance(node, ast.Call):
-            out += _python_call(fc, node, line, imported_embed)
+            out += _python_call(fc, node, line, imported_embed, qual)
         elif isinstance(node, ast.ExceptHandler):
             types = [] if node.type is None else (node.type.elts if isinstance(node.type, ast.Tuple) else [node.type])
             broad = node.type is None or any((dotted_name(t) or "").split(".")[-1] in ("Exception", "BaseException")
@@ -3366,16 +3569,18 @@ def _python_nodes(ctx, fc, tree, test) -> list:
             if broad and empty:
                 out.append(make("code.swallowed_exception", fc.path, line,
                                 f"`except{'' if node.type is None else ' ' + ast.unparse(node.type)}:` with an empty body",
-                                key=f"except:{line}"))
+                                key=f"except:{qual(node)}:{'' if node.type is None else ast.unparse(node.type)}",
+                                legacy_key=f"except:{line}"))
             elif node.type is None:
-                out.append(make("code.bare_except", fc.path, line, "bare `except:`", key=f"bare:{line}"))
+                out.append(make("code.bare_except", fc.path, line, "bare `except:`", key=f"bare:{qual(node)}",
+                                legacy_key=f"bare:{line}"))
         elif isinstance(node, (ast.With, ast.AsyncWith)):
             for item in node.items:
                 ce = item.context_expr
                 if isinstance(ce, ast.Call) and (dotted_name(ce.func) or "").split(".")[-1] == "suppress" and any(
                         (dotted_name(a) or "").split(".")[-1] in ("Exception", "BaseException") for a in ce.args):
                     out.append(make("code.swallowed_exception", fc.path, line, "`suppress(Exception)` hides every error",
-                                    key=f"suppress:{line}"))
+                                    key=f"suppress:{qual(node)}:{ast.unparse(ce)}", legacy_key=f"suppress:{line}"))
         elif isinstance(node, ast.Assign):
             names = {t.id for t in node.targets if isinstance(t, ast.Name)}
             attrs = {t.attr for t in node.targets if isinstance(t, ast.Attribute)}
@@ -3397,37 +3602,42 @@ def _python_nodes(ctx, fc, tree, test) -> list:
     return out
 
 
-def _python_call(fc, node, line, imported_embed) -> list:
+def _python_call(fc, node, line, imported_embed, qual=lambda n: "<module>") -> list:
     out = []
     name = dotted_name(node.func) or ""
     last = name.split(".")[-1]
     kw = {k.arg: k.value for k in node.keywords if k.arg}
+
+    def ids(tag):
+        """Fingerprint key from the enclosing function and the call's source; the 0.1 key used the line."""
+        return {"key": f"{tag}:{qual(node)}:{ast.unparse(node)}", "legacy_key": f"{tag}:{line}"}
     if name in ("eval", "exec"):
-        out.append(make("security.eval", fc.path, line, f"{name}() runs code built at runtime", key=f"{name}:{line}"))
+        out.append(make("security.eval", fc.path, line, f"{name}() runs code built at runtime", **ids(name)))
     if _is_const(kw.get("shell"), True) or name in SHELL_CALLS:
-        out.append(make("security.shell", fc.path, line, f"{name}(...) runs through a shell", key=f"shell:{line}"))
+        out.append(make("security.shell", fc.path, line, f"{name}(...) runs through a shell",
+                        **ids("shell")))
     if name in DESER_CALLS:
-        out.append(make("security.deserialization", fc.path, line, f"{name}() can run code from the data", key=f"deser:{line}"))
+        out.append(make("security.deserialization", fc.path, line, f"{name}() can run code from the data", **ids("deser")))
     elif name in ("yaml.load", "yaml.load_all"):
         loader = kw.get("Loader", node.args[1] if len(node.args) > 1 else None)
         if (dotted_name(loader) or "").split(".")[-1] not in ("SafeLoader", "CSafeLoader", "BaseLoader"):
-            out.append(make("security.deserialization", fc.path, line, f"{name}() without SafeLoader", key=f"yaml:{line}"))
+            out.append(make("security.deserialization", fc.path, line, f"{name}() without SafeLoader", **ids("yaml")))
     elif name == "torch.load" and _is_const(kw.get("weights_only"), False):
         out.append(make("security.deserialization", fc.path, line, "torch.load(weights_only=False) unpickles arbitrary code",
-                        key=f"torch:{line}"))
+                        **ids("torch")))
     if last in SQL_METHODS and node.args and _dynamic_sql(node.args[0]):
-        out.append(make("security.sql_injection", fc.path, line, f"{last}() with SQL built from variables", key=f"sql:{line}"))
+        out.append(make("security.sql_injection", fc.path, line, f"{last}() with SQL built from variables", **ids("sql")))
     if _is_const(kw.get("verify"), False) or name == "ssl._create_unverified_context":
         out.append(make("security.verification_disabled", fc.path, line, f"{name or 'call'}(... verify=False)"
-                        if name != "ssl._create_unverified_context" else "unverified SSL context", key=f"verify:{line}"))
+                        if name != "ssl._create_unverified_context" else "unverified SSL context", **ids("verify")))
     if last == "run" and _is_const(kw.get("debug"), True):
-        out.append(make("security.insecure_default", fc.path, line, f"{name}(debug=True)", key=f"debug:{line}"))
+        out.append(make("security.insecure_default", fc.path, line, f"{name}(debug=True)", **ids("debug")))
     if "allow_origins" in kw and "'*'" in ast.unparse(kw["allow_origins"]):
-        out.append(make("security.insecure_default", fc.path, line, "allow_origins=['*']", key=f"cors:{line}"))
+        out.append(make("security.insecure_default", fc.path, line, "allow_origins=['*']", **ids("cors")))
     if last in ("mark_safe", "Markup"):
-        out.append(make("security.xss", fc.path, line, f"{last}() marks content as safe HTML", key=f"xss:{line}"))
+        out.append(make("security.xss", fc.path, line, f"{last}() marks content as safe HTML", **ids("xss")))
     if name in DEBUG_CALLS or (name == "embed" and imported_embed):
-        out.append(make("code.debug_leftover", fc.path, line, f"{name}()", key=f"debug:{line}"))
+        out.append(make("code.debug_leftover", fc.path, line, f"{name}()", **ids("debug")))
     return out
 
 
@@ -3614,15 +3824,36 @@ class Result:
     notes: list
 
 
+def _baseline_accepts(ctx, f, baseline, granted) -> bool:
+    """Whether .aigate/baseline.json covers `f`. In `check --all` the numbered fingerprint must be listed. In
+    staged/range/push checks only findings on changed lines are seen, so twin numbers mean nothing there: a
+    baseline group (rule, file, base key) accepts at most as many added findings as the change removed."""
+    if getattr(ctx, "full", False):
+        return (f.rule, f.path, f.fingerprint) in baseline
+    if (f.rule, f.path, fingerprint_v2(f.rule, f.path, f.base_key or f.key or f.message)) not in baseline:
+        return False
+    group = (f.rule, f.path, f.base_key or f.key or f.message)
+    if granted[group] >= _removed_keys(ctx, f.path)[(f.rule, group[2])]:
+        return False
+    granted[group] += 1
+    return True
+
+
 def apply_policy(findings, ctx, env) -> list:
     overrides, allows = ctx.cfg["rules"], ctx.cfg["allow"]
     env_allow = [r.strip() for r in env.get("AIGATE_ALLOW", "").split(",") if r.strip()]
-    out, seen = [], set()
+    unique, seen = [], set()
     for f in findings:
-        ident = (f.fingerprint, f.line)
-        if ident in seen:
-            continue
-        seen.add(ident)
+        ident = (f.rule, f.path, f.key or f.message, f.line)
+        if ident not in seen:
+            seen.add(ident)
+            unique.append(f)
+    number_twins(unique)
+    baseline = getattr(ctx, "baseline", None) or set()
+    granted: Counter = Counter()
+    legacy_used: set = set()       # a 0.1 fingerprint allows one finding per file (the first), never its copies
+    out = []
+    for f in sorted(unique, key=lambda f: (f.path, f.line or 0)):
         if f.rule in FIXED_RULES:
             pass
         elif f.rule in overrides:
@@ -3637,11 +3868,19 @@ def apply_policy(findings, ctx, env) -> list:
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
         if f.sensitive and f.meta.escalate:
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
+        legacy_id = (f.rule, f.path, f.legacy_fingerprint)
         for a in allows:
             if fnmatch.fnmatchcase(f.rule, a["rule"]) and (not a["paths"] or path_matches(f.path, a["paths"])) \
-                    and (not a["fingerprint"] or a["fingerprint"] == f.fingerprint):
-                f.allowed = f"allow entry: {a['reason']}"
+                    and (not a["fingerprint"] or a["fingerprint"] == f.fingerprint
+                         or (a["fingerprint"] == f.legacy_fingerprint and legacy_id not in legacy_used)):
+                old = ""
+                if a["fingerprint"] and a["fingerprint"] != f.fingerprint:
+                    legacy_used.add(legacy_id)
+                    old = " (0.1 fingerprint: update it to " + f.fingerprint + ")"
+                f.allowed = f"allow entry{old}: {a['reason']}"
                 break
+        if not f.allowed and baseline and _baseline_accepts(ctx, f, baseline, granted):
+            f.allowed = "baseline"
         if not f.allowed and env_allow and not ctx.agent and f.action in ("warn", "fix") \
                 and any(fnmatch.fnmatchcase(f.rule, p) for p in env_allow):
             f.allowed = "AIGATE_ALLOW"
@@ -3664,10 +3903,13 @@ def risk_score(findings, agent: bool) -> float:
     return round(min(100.0, m * fix_sum + min(25.0, m * warn_sum)), 1)
 
 
-def decide(findings, risk):
+def decide(findings, risk, escalate=True):
+    """Verdict = the strongest action among findings that are not allowed. A Fix verdict becomes Block when the
+    risk score reaches BLOCK_AT, except with escalate=False (`check --all`, an audit of the whole tree, where
+    the score would only measure the repository's size)."""
     top = max((ACTION_RANK[f.action] for f in findings if not f.allowed), default=1)
     verdict = {1: "pass", 2: "warn", 3: "fix", 4: "block"}[top]
-    if verdict == "fix" and risk >= BLOCK_AT:
+    if escalate and verdict == "fix" and risk >= BLOCK_AT:
         return "block", True
     return verdict, False
 
@@ -3678,45 +3920,204 @@ STYLE = {"block": "\033[1;31m", "fix": "\033[1;33m", "warn": "\033[36m", "pass":
          "reset": "\033[0m"}
 
 
-def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str) -> None:
+SYMBOLS_UTF = {"ok": "✔", "warn": "!", "fail": "✖", "arrow": "→", "dot": "·", "minus": "−", "ellipsis": "…",
+               "dash": "—", "pass": "✔ PASS", "warnmark": "▲ WARN", "fixmark": "✖ FIX", "blockmark": "✖ BLOCK"}
+SYMBOLS_ASCII = {"ok": "OK", "warn": "!", "fail": "X", "arrow": "->", "dot": "-", "minus": "-", "ellipsis": "...",
+                 "dash": "-", "pass": "OK PASS", "warnmark": "! WARN", "fixmark": "X FIX", "blockmark": "X BLOCK"}
+HOOK_CAP = 25
+
+
+def symbols(stream) -> dict:
+    """Unicode symbols when the stream can encode them, else ASCII (a cp1252 pipe on Windows printed `?`)."""
+    try:
+        "✔✖·→…−≈▲—".encode(getattr(stream, "encoding", None) or "ascii")
+        return SYMBOLS_UTF
+    except (UnicodeEncodeError, LookupError):
+        return SYMBOLS_ASCII
+
+
+def use_color(choice: str, stream, env) -> bool:
+    """--color always/never wins; auto = colour on a TTY, NO_COLOR turns it off, FORCE_COLOR on."""
+    if choice != "auto":
+        return choice == "always"
+    if env.get("NO_COLOR"):
+        return False
+    return bool(env.get("FORCE_COLOR")) or stream.isatty()
+
+
+def _summary(res: Result, active, allowed, baselined, stage, sym, s) -> str:
+    dot = sym["dot"]
+    counts = Counter(f.action for f in active)
+    tally = f" {dot} ".join(f"{counts[a]} {a}" for a in ("block", "fix", "warn") if counts[a])
+    if allowed:
+        tally += f"{f' {dot} ' if tally else ''}{len(allowed)} allowed"
+    mark = sym[{"pass": "pass", "warn": "warnmark", "fix": "fixmark", "block": "blockmark"}[res.verdict]]
+    tail = " (risk score escalated it)" if res.escalated else ""
+    stopped = f" {sym['dash']} {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
+    return (f"{s(res.verdict)}{mark}{s('reset')}{tail} {dot} risk {res.risk:g}/100{f' {dot} ' + tally if tally else ''}"
+            f" {dot} {res.stats['seconds']:.1f}s{stopped}")
+
+
+def _next_line(res: Result, active, baselined, stage) -> str | None:
+    hidden = f" ({len(baselined)} baseline finding{'' if len(baselined) == 1 else 's'} hidden)" if baselined else ""
+    act = "push" if stage == "push" else "commit"
+    blocks = [f for f in active if f.action == "block"]
+    fixes = [f for f in active if f.action == "fix"]
+    if res.verdict == "block" and blocks:
+        n = len(blocks)
+        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+    if res.verdict in ("block", "fix"):
+        n, rules = len(fixes), sorted({f.rule for f in fixes})
+        if stage == "scan":
+            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or accept today's findings: " \
+                   f"aigate-lite baseline{hidden}"
+        if len(rules) == 1 and res.provenance[0] != "agent" and not res.escalated:
+            return f"next: fix it, or for this {act} only (humans): AIGATE_ALLOW={rules[0]} git {act} ...{hidden}"
+        return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above (a false positive? aigate-lite explain " \
+               f"<rule>){hidden}"
+    if res.verdict == "warn":
+        return f"next: {act if stage != 'scan' else 'nothing'} {'allowed' if stage != 'scan' else 'blocks'}; " \
+               f"the warnings are worth a look{hidden}"
+    return f"next: nothing to do{hidden}" if baselined else None
+
+
+def _fit(text: str, width, sym) -> str:
+    if width and len(text) > width:
+        return text[:max(0, width - len(sym["ellipsis"]))] + sym["ellipsis"]
+    return text
+
+
+def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="commit", mode="staged",
+                hook=False, width=None, sym=None) -> str:
+    """The text report. Default: compact, grouped by file. -v: the detailed view. -q: only what stops the commit.
+    `width` truncates lines (only passed when stdout is a terminal, so CI logs stay complete)."""
+    sym = sym or SYMBOLS_UTF
     s = (lambda k: STYLE[k]) if color else (lambda k: "")
     active = [f for f in res.findings if not f.allowed]
-    allowed = [f for f in res.findings if f.allowed]
+    allowed = [f for f in res.findings if f.allowed and f.allowed != "baseline"]
+    baselined = [f for f in res.findings if f.allowed == "baseline"]
     if quiet and res.verdict == "pass":
-        return
-    prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
+        return ""
+    out = []
     st = res.stats
-    print(f"{s('dim')}aigate-lite {__version__} · {res.label} · {st['files']} file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']})"
-          f" · {prov} · config: {res.config}{s('reset')}")
-    for note in res.notes:
-        print(f"{s('dim')}  note: {note}{s('reset')}")
-    for f in active:
-        if quiet and f.action == "warn":
-            continue
-        loc = f.path + (f":{f.line}" if f.line else "")
-        print(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {loc}")
-        print(f"        {f.message}")
-        hint = f.hint if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
-        if hint:
-            for i, ln in enumerate(hint.splitlines()):
-                print(f"        {s('dim')}{'→ ' if i == 0 else '  '}{ln}{s('reset')}")
+    if verbose or quiet:
+        prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
+        out.append(f"{s('dim')}aigate-lite {__version__} {sym['dot']} {res.label} {sym['dot']} {st['files']} "
+                   f"file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']}) {sym['dot']} {prov} "
+                   f"{sym['dot']} config: {res.config}{s('reset')}")
+        out += [f"{s('dim')}  note: {note}{s('reset')}" for note in res.notes]
+        for f in active:
+            if quiet and f.action == "warn":
+                continue
+            out.append(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {f.path}"
+                       f"{f':{f.line}' if f.line else ''}")
+            out.append(f"        {f.message}")
+            hint = f.hint if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
+            for i, ln in enumerate((hint or "").splitlines()):
+                out.append(f"        {s('dim')}{sym['arrow'] + ' ' if i == 0 else '  '}{ln}{s('reset')}")
+            if verbose:
+                out.append(f"        {s('dim')}fingerprint {f.fingerprint}{s('reset')}")
         if verbose:
-            print(f"        {s('dim')}fingerprint {f.fingerprint}{s('reset')}")
-    if allowed and verbose:
-        for f in allowed:
-            print(f"  {s('dim')}ALLOW {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} ({f.allowed}){s('reset')}")
-    counts = Counter(f.action for f in active)
-    tally = " · ".join(f"{counts[a]} {a}" for a in ("block", "fix", "warn") if counts[a])
-    if allowed:
-        tally += f"{' · ' if tally else ''}{len(allowed)} allowed"
-    mark = {"pass": "✔ PASS", "warn": "▲ WARN", "fix": "✖ FIX", "block": "✖ BLOCK"}[res.verdict]
-    tail = " (risk score escalated it)" if res.escalated else ""
-    stopped = f" — {stage} stopped" if res.verdict in ("fix", "block") and stage != "scan" else ""
-    print(f"{s(res.verdict)}{mark}{s('reset')}{tail} · risk {res.risk:g}/100{' · ' + tally if tally else ''}"
-          f" · {st['seconds']:.1f}s{stopped}")
-    if res.verdict in ("fix", "block") and stage != "scan":
-        print(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows how to allow it."
-              f" Bypass once (not recommended): git {'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
+            for f in allowed + baselined:
+                tag = "BASELINE" if f.allowed == "baseline" else "ALLOW"
+                out.append(f"  {s('dim')}{tag} {f.rule:<28} {f.path}{':' + str(f.line) if f.line else ''} "
+                           f"({f.allowed}) fingerprint {f.fingerprint}{s('reset')}")
+        summary = _summary(res, active, allowed, baselined, stage, sym, s)
+        if baselined:
+            summary += f" {sym['dot']} {len(baselined)} in baseline (hidden; -v shows them)" if not verbose \
+                else f" {sym['dot']} {len(baselined)} in baseline"
+        out.append(summary)
+        if quiet:
+            if res.verdict in ("fix", "block") and stage != "scan":
+                out.append(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows "
+                           f"how to allow it. Bypass once (not recommended): git "
+                           f"{'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
+        else:
+            nxt = _next_line(res, active, baselined, stage)
+            if nxt:
+                out.append(nxt)
+        return "\n".join(out) + "\n"
+
+    who = "human" if res.provenance[0] != "agent" else f"AI agent ({res.provenance[1].lstrip('$')})"
+    head = (f"aigate-lite {__version__} {sym['dot']} {mode} {sym['dot']} {st['files']} file"
+            f"{'' if st['files'] == 1 else 's'} +{st['added']} {sym['minus']}{st['removed']} {sym['dot']} {who}")
+    out.append(f"{s('dim')}{_fit(head, width, sym)}{s('reset')}")
+    out += [f"{s('dim')}{_fit('  note: ' + note, width, sym)}{s('reset')}" for note in res.notes]
+    rank = {"block": 0, "fix": 1, "warn": 2}
+    by_file: dict = defaultdict(list)
+    for f in active:
+        by_file[f.path].append(f)
+    files = sorted(by_file, key=lambda p: (min(rank[f.action] for f in by_file[p]), p))
+    lw = max((len(str(f.line or "-")) for f in active), default=1)
+    rw = max((len(f.rule) for f in active), default=0)
+    cap = HOOK_CAP if hook else None
+    shown, hinted = 0, set()
+    for path in files:
+        if cap is not None and shown >= cap:
+            break
+        out.append(f"{s('dim')}{_fit(path, width, sym)}{s('reset')}")
+        for f in sorted(by_file[path], key=lambda f: (f.line or 0, rank[f.action], f.rule)):
+            if cap is not None and shown >= cap:
+                break
+            prefix = f"  {str(f.line or '-'):>{lw}}  "
+            plain = f"{prefix}{f.action.upper():<5}  {f.rule:<{rw}}  {f.message}"
+            plain = _fit(plain, width, sym)
+            out.append(plain[:len(prefix)] + s(f.action) + plain[len(prefix):len(prefix) + 5] + s("reset")
+                       + plain[len(prefix) + 5:])
+            shown += 1
+            hint = (f.hint or f.meta.hint or "").splitlines()
+            if f.action in ("block", "fix") and hint and f.rule not in hinted:
+                hinted.add(f.rule)
+                out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
+                           f"{s('reset')}")
+    if cap is not None and len(active) > shown:
+        out.append(f"  +{len(active) - shown} more {sym['dash']} run: aigate-lite check")
+    out.append(_summary(res, active, allowed, baselined, stage, sym, s))
+    nxt = _next_line(res, active, baselined, stage)
+    if nxt:
+        out.append(_fit(nxt, width, sym))
+    return "\n".join(out) + "\n"
+
+
+def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str, mode="staged",
+                hook=False) -> None:
+    import shutil
+    width = shutil.get_terminal_size().columns if sys.stdout.isatty() else None
+    sys.stdout.write(render_text(res, color=color, verbose=verbose, quiet=quiet, stage=stage, mode=mode, hook=hook,
+                                 width=width, sym=symbols(sys.stdout)))
+
+
+ASCII_MAP = {"→": "->", "…": "...", "·": "-", "−": "-", "—": "-", "–": "-", "✔": "OK", "✖": "X", "▲": "!", "≈": "~",
+             "‘": "'", "’": "'", "“": '"', "”": '"'}
+AGENT_CAPS = (50, 20)              # block/fix lines, then warn lines
+
+
+def to_ascii(text: str) -> str:
+    return "".join(ASCII_MAP.get(c, c) for c in text).encode("ascii", "replace").decode("ascii")
+
+
+def render_agent(res: Result) -> str:
+    """`--format agent`: ASCII, deterministic, one finding per line, for coding agents to act on.
+
+        AIGATE verdict=<v> risk=<r> exit=<code>
+        <ACTION> <rule> <path>:<line> <message> | fix: <hint>
+        MORE <n>          (only when capped: 50 block/fix lines, then 20 warn lines)
+        END
+    """
+    rank = {"block": 0, "fix": 1, "warn": 2}
+    active = sorted((f for f in res.findings if not f.allowed),
+                    key=lambda f: (rank[f.action], f.path, f.line or 0, f.rule, f.message))
+    loud = [f for f in active if f.action in ("block", "fix")][:AGENT_CAPS[0]]
+    quiet = [f for f in active if f.action == "warn"][:AGENT_CAPS[1]]
+    out = [f"AIGATE verdict={res.verdict} risk={res.risk:g} exit={1 if res.verdict in ('fix', 'block') else 0}"]
+    for f in loud + quiet:
+        hint = (f.hint or f.meta.hint or "").splitlines()
+        line = f"{f.action.upper()} {f.rule} {f.path}{f':{f.line}' if f.line else ''} {f.message}"
+        out.append(to_ascii(" ".join((line + (f" | fix: {hint[0]}" if hint else "")).split())))
+    if len(active) > len(loud) + len(quiet):
+        out.append(f"MORE {len(active) - len(loud) - len(quiet)}")
+    out.append("END")
+    return "\n".join(out) + "\n"
 
 
 def report_json(res: Result) -> None:
@@ -3727,7 +4128,8 @@ def report_json(res: Result) -> None:
         "exit_code": 1 if res.verdict in ("fix", "block") else 0, "stats": res.stats, "notes": res.notes,
         "findings": [{"rule": f.rule, "action": f.action, "severity": f.meta.severity, "confidence": f.meta.confidence,
                       "path": f.path, "line": f.line, "message": f.message, "hint": f.hint or f.meta.hint,
-                      "fingerprint": f.fingerprint, "sensitive_path": f.sensitive, "allowed": f.allowed}
+                      "fingerprint": f.fingerprint, "legacy_fingerprint": f.legacy_fingerprint,
+                      "sensitive_path": f.sensitive, "allowed": f.allowed}
                      for f in res.findings],
     }, indent=2))
 
@@ -3753,7 +4155,8 @@ def report_sarif(res: Result) -> None:
     results = []
     for f in res.findings:
         r = {"ruleId": f.rule, "ruleIndex": used.index(f.rule), "level": level.get(f.action, "note"),
-             "message": {"text": f.message}, "partialFingerprints": {"aigateFingerprint/v1": f.fingerprint},
+             "message": {"text": f.message}, "partialFingerprints": {"aigateFingerprint/v1": f.legacy_fingerprint,
+                                                                 "aigateFingerprint/v2": f.fingerprint},
              "properties": {"action": f.action, "sensitivePath": f.sensitive}}
         # code scanning needs a location; repo-wide findings ("(gate)", "(commit)") point at the config
         path = CONFIG_PATH if f.path.startswith("(") else f.path
@@ -3828,19 +4231,35 @@ def _commit_info(repo, shas) -> tuple:
     return messages, authors, parents
 
 
+def range_error(repo, spec, missing) -> GitError:
+    """Why `--range` cannot be resolved, with the fix: no commits, a shallow CI clone, or an unknown ref."""
+    if not repo.commit("HEAD"):
+        return GitError("this repository has no commits yet", "make a first commit, then check a range")
+    if run_git(repo.root, "rev-parse", "--is-shallow-repository", check=False).strip() == "true":
+        return GitError(f"cannot resolve range {spec!r}: {missing!r} is unknown here (a typo, or missing because "
+                        "this clone is shallow)", "check the name; in CI fetch the full history: fetch-depth: 0 "
+                        "(GitHub Actions) / GIT_DEPTH: 0 (GitLab CI), or run: git fetch --unshallow")
+    remotes = run_git(repo.root, "remote", check=False).split()
+    remote, _, branch = missing.partition("/")
+    fix = f"check the name, or run: git fetch {remote} {branch}:refs/remotes/{remote}/{branch}" \
+        if branch and remote in remotes else "check the name (a branch, tag or commit that exists here)"
+    return GitError(f"cannot resolve range {spec!r}: {missing!r} is not a commit or branch here", fix)
+
+
 def plan_runs(repo, args, env) -> list:
     """Each run: (label, base, head, commits)."""
     if getattr(args, "all", False):
         head = repo.commit("HEAD")
         if not head:
-            raise GitError("check --all needs at least one commit")
+            raise GitError("check --all needs at least one commit", "make a first commit")
         return [("full tree", repo.empty_tree(), head, [])]
     if args.range:
         spec = args.range
-        a, b = re.split(r"\.\.\.?", spec, 1) if ".." in spec else (spec, "HEAD")
-        head, start = repo.commit(b or "HEAD"), repo.commit(a)
+        a, b = re.split(r"\.\.\.?", spec, maxsplit=1) if ".." in spec else (spec, "HEAD")
+        a, b = a or "HEAD", b or "HEAD"                 # git reads an empty side as HEAD
+        head, start = repo.commit(b), repo.commit(a)
         if not head or not start:
-            raise GitError(f"cannot resolve range {spec!r}")
+            raise range_error(repo, spec, a if not start else b)
         base = run_git(repo.root, "merge-base", start, head, check=False).strip() or start
         commits = repo.git("rev-list", "--reverse", "--no-merges", f"{start}..{head}").split()
         return [(f"range {spec}", base, head, commits)]
@@ -3877,7 +4296,8 @@ def plan_runs(repo, args, env) -> list:
     return [("staged changes", head or repo.empty_tree(), None, [])]
 
 
-def run_check(args, env) -> int:
+def run_check(args, env, collect=False):
+    """Run the gate and print the report; with collect=True return the Result instead (int when nothing ran)."""
     started = time.monotonic()
     repo = Repo.discover()
     full = bool(getattr(args, "all", False))
@@ -3891,6 +4311,8 @@ def run_check(args, env) -> int:
     if not runs:
         if args.format == "text" and not args.quiet:
             print("aigate-lite: nothing to check")
+        elif args.format == "agent":
+            print("AIGATE verdict=pass risk=0 exit=0\nEND")
         return 0
 
     registry = Registry(offline=args.offline or env.get("AIGATE_OFFLINE") == "1",
@@ -3905,25 +4327,36 @@ def run_check(args, env) -> int:
         provenance = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"],
                                        messages, authors)
         if args.config:
-            cfg = pre
+            cfg, bl_source = pre, "worktree"
         elif provenance[0] == "agent":                # an agent cannot loosen the gate for its own change
-            source = (repo.commit("HEAD") or "") if head is None else base
-            cfg = load_config(repo, source) if source and source != repo.empty_tree() else load_config(repo, "__none__")
+            # its change's base; for `check --all` (an audit of HEAD, not a change) HEAD itself
+            source = (repo.commit("HEAD") or "") if head is None else head if full else base
+            committed = bool(source) and source != repo.empty_tree()
+            cfg = load_config(repo, source) if committed else load_config(repo, "__none__")
+            bl_source = source if committed else None
         elif head is None:
-            cfg = pre
+            cfg, bl_source = pre, ""                  # the baseline as staged, not whatever is on disk
         else:
-            cfg = load_config(repo, head)
+            cfg, bl_source = load_config(repo, head), head
         changes = collect_changes(repo, base, head)
         if full:
             changes = [fc for fc in changes if not path_matches(fc.path, cfg["paths"]["ignore"])]
         if head is None and not changes:
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
+            elif args.format == "agent":
+                print("AIGATE verdict=pass risk=0 exit=0\nEND")
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
                       provenance=provenance, registry=registry, merge=merge, label=run_label, results=results,
                       full=full)
+        if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+            bl_source = None                          # no git reads for repositories without a baseline
+        ctx.baseline, bl_problems = load_baseline(repo, bl_source)
+        if bl_source == "" and repo.read(":" + BASELINE_PATH) != repo.read("HEAD:" + BASELINE_PATH):
+            bl_problems.append(f"using the staged {BASELINE_PATH}, which differs from HEAD")
+        notes += [p for p in bl_problems if p not in notes]
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
         stats["files"] += len(counted)
         stats["added"] += sum(len(fc.added) for fc in counted)
@@ -3962,25 +4395,31 @@ def run_check(args, env) -> int:
     registry.save()
     results.save()
     if registry.failures:
-        notes.append(f"{registry.failures} registry lookup(s) failed (offline or blocked); results may be incomplete")
+        notes.append(f"{registry.failures} registry lookup(s) failed ({registry.failure_reason or 'offline or blocked'}); "
+                     "dependency checks are incomplete (--offline skips them)")
 
     final_ctx = ctx
     findings = apply_policy(findings, final_ctx, env)
     risk = risk_score(findings, provenance[0] == "agent")
-    verdict, escalated = decide(findings, risk)
+    verdict, escalated = decide(findings, risk, escalate=not full)
     stats["seconds"] = round(time.monotonic() - started, 2)
     res = Result(findings, verdict, escalated, risk, provenance, label,
                  {"files": stats["files"], "added": stats["added"], "removed": stats["removed"],
                   "seconds": stats["seconds"]}, cfg.origin, notes)
+    if collect:
+        return res
     if args.format == "json":
         report_json(res)
     elif args.format == "github":
         report_github(res)
     elif args.format == "sarif":
         report_sarif(res)
+    elif args.format == "agent":
+        sys.stdout.write(render_agent(res))
     else:
-        color = args.color == "always" or (args.color == "auto" and sys.stdout.isatty() and not env.get("NO_COLOR"))
-        report_text(res, color=color, verbose=args.verbose, quiet=args.quiet, stage=stage)
+        mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
+        report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
+                    stage=stage, mode=mode, hook=bool(args.staged or args.push))
     return 1 if verdict in ("fix", "block") else 0
 
 
@@ -3988,29 +4427,48 @@ def run_check(args, env) -> int:
 
 HOOK_MARK = "# aigate-lite managed hook"
 
-# POSIX hooks start the gate through this loader (`python -P -c HOOK_LOADER script args...`) so its bytecode
-# is reused instead of recompiling ~200 KB on every run. It keeps one .pyc per script path for the gate itself
-# (stdlib imports are untouched) in <cache dir>/pycache. That directory is opened once without following
-# symlinks and must be owned by this user; if it was not 0700 it is tightened and nothing in it is trusted on
-# that run. A .pyc is used only when it is a regular file owned by this user, not group/other-writable, not
-# hard-linked, opened relative to that directory, and its header carries this interpreter's magic number and
-# the hash of the current source (any edit is noticed, whatever its size or mtime). In every other case
-# (relative or unusable cache dir, any error) and on Windows (where ownership and ACLs cannot be checked
-# without extra code) the source is compiled and run as before. The import system is never used for the
-# gate, so a __pycache__ next to a vendored script is never read. -P keeps the repository root off sys.path;
-# the script's real directory goes first, as with `python script.py`.
+# Hooks start the gate through this loader (`python -P -c HOOK_LOADER script args...`) so its bytecode is
+# reused instead of recompiling ~280 KB on every run. It keeps one .pyc per script path for the gate itself
+# (stdlib imports are untouched) in <cache dir>/pycache, where the cache dir is $AIGATE_CACHE_DIR, else
+# %LOCALAPPDATA%\aigate-lite on Windows, else $XDG_CACHE_HOME/aigate-lite or ~/.cache/aigate-lite.
+# It is never used (nothing is read or written) when an AI agent is running the commit, when the cache dir is
+# not absolute, or when it lies inside the working directory or next to the script, i.e. inside the repository.
+# POSIX: the directory is opened once without following symlinks and must be owned by this user; if it was not
+# 0700 it is tightened and nothing in it is trusted on that run. A .pyc is used only when it is a regular file
+# owned by this user, not group/other-writable, not hard-linked, opened relative to that directory.
+# Windows: the standard library cannot check ACLs, so the directory is only required to exist, to be a real
+# directory (not a symlink or junction) and the .pyc to be a regular file; write access to the user's profile
+# already allows editing .git/hooks, so this does not widen what such an attacker can do.
+# On both, the header must carry this interpreter's magic number and the hash of the current source (any edit
+# is noticed, whatever its size or mtime). In every other case the source is compiled and run as before.
+# The import system is never used for the gate, so a __pycache__ next to a vendored script is never read, and
+# sys.path is not changed: -P keeps the repository root off it and nothing is imported from the script's
+# directory. AGENT_ENV below must equal BUILTIN_AGENT_ENV (a test checks it).
 HOOK_LOADER = """\
-import importlib.util, marshal, os, stat, sys
+import importlib.machinery, importlib.util, marshal, os, stat, sys
+AGENT_ENV = ("CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "AIGATE_AGENT")
 script = os.path.abspath(sys.argv[1])
 sys.argv = [script] + sys.argv[2:]
-sys.path.insert(0, os.path.dirname(os.path.realpath(script)))
 CODE = type(compile("", "", "exec"))
 MAX_AGE = 30 * 86400
+NT = os.name == "nt"
+
+
+def inside(path, parent):
+    try:
+        return os.path.commonpath([os.path.realpath(path), os.path.realpath(parent)]) == os.path.realpath(parent)
+    except ValueError:
+        return False
 
 
 def pinned_dir(path):
     try:
         os.makedirs(path, mode=0o700, exist_ok=True)
+        if NT:
+            st = os.lstat(path)
+            if not stat.S_ISDIR(st.st_mode) or getattr(st, "st_file_attributes", 0) & 0x400:    # reparse point
+                return None, False
+            return path, True
         fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     except OSError:
         return None, False
@@ -4028,6 +4486,9 @@ def pinned_dir(path):
 
 
 def read_pyc(dfd, name):
+    if NT:
+        with open(os.path.join(dfd, name), "rb") as fh:
+            return fh.read() if stat.S_ISREG(os.fstat(fh.fileno()).st_mode) else b""
     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=dfd)
     with os.fdopen(fd, "rb") as fh:
         st = os.fstat(fd)
@@ -4038,24 +4499,32 @@ def read_pyc(dfd, name):
 
 def write_pyc(dfd, name, data):
     tmp = f"{name}.{os.getpid()}.tmp"
+    kw = {} if NT else {"dir_fd": dfd}
+    at = (lambda n: os.path.join(dfd, n)) if NT else (lambda n: n)
     try:
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
+        if NT:
+            fd = os.open(at(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        else:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=dfd)
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
-        os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
-        now = os.stat(name, dir_fd=dfd).st_mtime
+        if NT:
+            os.replace(at(tmp), at(name))
+        else:
+            os.replace(tmp, name, src_dir_fd=dfd, dst_dir_fd=dfd)
+        now = os.stat(at(name), **kw).st_mtime
         for entry in os.listdir(dfd):              # a new .pyc is rare: drop ones unused for MAX_AGE
             if entry != name and entry.startswith("aigate_lite.") and entry.endswith((".pyc", ".tmp")):
                 try:
-                    if now - os.stat(entry, dir_fd=dfd, follow_symlinks=False).st_mtime > MAX_AGE:
-                        os.unlink(entry, dir_fd=dfd)
+                    if now - os.stat(at(entry), follow_symlinks=False, **kw).st_mtime > MAX_AGE:
+                        os.unlink(at(entry), **kw)
                 except OSError:
                     pass
     except OSError:
         pass
     finally:
         try:
-            os.unlink(tmp, dir_fd=dfd)
+            os.unlink(at(tmp), **kw)
         except OSError:
             pass
 
@@ -4063,12 +4532,24 @@ def write_pyc(dfd, name, data):
 with open(script, "rb") as fh:
     source = fh.read()
 header = importlib.util.MAGIC_NUMBER + b"\\x03\\x00\\x00\\x00" + importlib.util.source_hash(source)
-xdg = os.environ.get("XDG_CACHE_HOME", "")
-base = xdg if os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".cache")
-cache = os.environ.get("AIGATE_CACHE_DIR") or os.path.join(base, "aigate-lite")
+env = os.environ
+xdg = env.get("XDG_CACHE_HOME", "")
+if NT:
+    base = env.get("LOCALAPPDATA", "")
+else:
+    base = xdg if os.path.isabs(xdg) else os.path.join(os.path.expanduser("~"), ".cache")
+cache = env.get("AIGATE_CACHE_DIR") or os.path.join(base, "aigate-lite")
 dfd, trusted, code = None, False, None
-if os.name != "nt" and os.path.isabs(cache) and os.listdir in os.supports_fd \\
-        and {os.open, os.rename, os.unlink, os.stat} <= os.supports_dir_fd:
+try:
+    here = os.getcwd()
+except OSError:                                    # the working directory was deleted: just do not cache
+    here = None
+usable = os.path.isabs(cache) and here is not None and not any(env.get(v) for v in AGENT_ENV) \\
+    and env.get("AIGATE_PROVENANCE", "").strip().lower() != "agent" \\
+    and not inside(cache, here) and not inside(cache, os.path.dirname(script))
+if usable and NT:
+    dfd, trusted = pinned_dir(os.path.join(cache, "pycache"))
+elif usable and os.listdir in os.supports_fd and {os.open, os.rename, os.unlink, os.stat} <= os.supports_dir_fd:
     dfd, trusted = pinned_dir(os.path.join(cache, "pycache"))
 name = "aigate_lite.{}.{}.opt{}.pyc".format(importlib.util.source_hash(script.encode("utf-8", "surrogateescape")).hex(),
                                             sys.implementation.cache_tag, sys.flags.optimize)
@@ -4085,14 +4566,48 @@ if code is None:
     code = compile(source, script, "exec")
     if dfd is not None:
         write_pyc(dfd, name, header + marshal.dumps(code))
-if dfd is not None:
+if dfd is not None and not NT:
     os.close(dfd)
-module = type(sys)("aigate_lite")
-module.__file__ = script
+spec = importlib.util.spec_from_file_location("aigate_lite", script, loader=importlib.machinery.SourceFileLoader("aigate_lite", script))
+module = importlib.util.module_from_spec(spec)
 sys.modules["aigate_lite"] = module
 exec(code, module.__dict__)
 sys.exit(module.main())
 """
+
+
+# Interpreter discovery shared by hooks (as sh) and `install`/`doctor` (as Python, see discover_python).
+# Order: $AIGATE_PYTHON, the interpreter pinned at install (used without probing; the pin lives in the hook under
+# .git/hooks, which is never committed, for vendored installs too), then python3, python, python3.14..python3.11,
+# py -3.14..py -3.11, py -3. A candidate qualifies when it runs PY_PROBE with exit 0 and prints a version, so
+# the Windows Store `python3`/`python` stubs (non-zero exit, no version) are skipped. AIGATE_PYTHON is ignored
+# while an AI agent runs the commit (like AIGATE_SKIP): it would let an agent swap the gate for any program.
+PY_PROBE = "import sys; print(sys.version.split()[0]); sys.exit(0 if sys.version_info >= (3, 11) else 1)"
+PY_VERSIONS = ("3.14", "3.13", "3.12", "3.11")
+PY_GENERIC = (("python3",), ("python",), *((f"python{v}",) for v in PY_VERSIONS),
+              *(("py", f"-{v}") for v in PY_VERSIONS), ("py", "-3"))
+AIGATE_PYTHON_IGNORED = "AIGATE_PYTHON is ignored while an AI agent runs the commit"
+HOOK_DISCOVERY = """\
+PROBE=%(probe)s
+TRIED=""
+try_py() {
+  v=$("$1" ${2:+"$2"} -c "$PROBE" </dev/null 2>/dev/null) && [ -n "$v" ] && { PY=$1; PYFLAG=$2; return 0; }
+  if [ -n "$v" ]; then v="$v, too old"; else v="not found or not a working Python"; fi
+  TRIED="$TRIED
+  $1${2:+ $2}: $v"
+  return 1
+}
+discover() {
+  for c in %(candidates)s; do try_py $c && return 0; done
+  return 1
+}
+PY=""
+PYFLAG=""
+if [ -n "$AIGATE_PYTHON" ]; then
+  if [ -n "%(agent_vars)s" ] || [ "$(printf %%s "$AIGATE_PROVENANCE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" = agent ]; then
+    echo "aigate-lite: %(ignored)s" >&2
+  else try_py "$AIGATE_PYTHON"; fi
+fi"""
 
 
 def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
@@ -4104,33 +4619,105 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
                   f'if [ -x {local} ]; then printf "%s\\n" "$REFS" | {local} "$@" || exit $?; fi']
     else:
         lines.append(f'if [ -x {local} ]; then {local} "$@" || exit $?; fi')
+    lines.append(f"PY={_sh_quote(py.replace(chr(92), '/'))}")
+    if not vendored:
+        lines.append(f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}")
+    lines.append('PINNED=$PY')
+    # Resets PY and tries AIGATE_PYTHON. PY is always one word (quoted when used) and PYFLAG carries `py`'s
+    # version flag, so paths with spaces work.
+    candidates = " ".join(_sh_quote(" ".join(c)) if len(c) > 1 else c[0] for c in PY_GENERIC)
+    lines += (HOOK_DISCOVERY % {"probe": _sh_quote(PY_PROBE), "ignored": AIGATE_PYTHON_IGNORED,
+                                "agent_vars": "".join("$" + v for v in BUILTIN_AGENT_ENV),
+                                "candidates": candidates}).splitlines()
+    lines += ['if [ -z "$PY" ] && [ -x "$PINNED" ]; then PY=$PINNED',                  # fast path: no probe
+              'elif [ -z "$PY" ]; then',
+              '  TRIED="$TRIED',
+              '  $PINNED: missing (pinned at install)"',
+              '  discover && echo "aigate-lite: $PINNED (pinned at install) is missing; using $PY${PYFLAG:+ $PYFLAG}.'
+              ' To pin it, re-run aigate-lite install." >&2',
+              'fi']
     if vendored:
-        # The first interpreter that really runs 3.11+: on Windows `python3` is often the Microsoft Store
-        # stub, which exists on PATH but only prints an install hint. PY stays unquoted below so that
-        # "py -3" splits into the launcher and its flag; every candidate is a fixed word list.
         lines += ['ROOT="$(git rev-parse --show-toplevel)" || exit 1',
-                  'PY=""',
-                  "for c in python3 python 'py -3'; do",
-                  "  if $c -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)' </dev/null >/dev/null 2>&1; then"
-                  ' PY="$c"; break; fi',
-                  "done",
-                  '[ -n "$PY" ] || { echo "aigate-lite: no Python 3.11+ found (tried python3, python, py -3);'
-                  ' stopping (bypass once with --no-verify)" >&2; exit 1; }',
                   'SCRIPT="$ROOT/.aigate/aigate_lite.py"']
-        run = '$PY "$SCRIPT"'
-    else:
-        lines += [f"PY={_sh_quote(py.replace(chr(92), '/'))}", f"SCRIPT={_sh_quote(script.replace(chr(92), '/'))}"]
-        run = '"$PY" "$SCRIPT"'
-    if os.name != "nt":                                # see HOOK_LOADER; Windows hooks run the script directly
-        lines.append(f"LOADER={_sh_quote(HOOK_LOADER)}")
-        run = run.replace('"$SCRIPT"', '-P -c "$LOADER" "$SCRIPT"')
-    lines.append('[ -f "$SCRIPT" ] || { echo "aigate-lite: $SCRIPT is missing; reinstall the hook'
-                 ' (or bypass once with --no-verify)" >&2; exit 1; }')
+    what = "push" if kind == "pre-push" else "commit"
+    lines.append(f'[ -n "$PY" ] || {{ printf "aigate-lite: no Python 3.11+ found, so the {what} is blocked. Tried:%s\\n'
+                 f'  fix: install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3 '
+                 f'(bypass once with git {what} --no-verify)\\n" "$TRIED" >&2; exit 1; }}')
+    lines.append(f"LOADER={_sh_quote(HOOK_LOADER)}")     # see HOOK_LOADER
+    run = '"$PY" $PYFLAG -P -c "$LOADER" "$SCRIPT"'
+    restore = ("restore it (git checkout -- .aigate/aigate_lite.py) or run: aigate-lite install --vendor"
+               if vendored else "run: aigate-lite install")
+    lines.append(f'[ -f "$SCRIPT" ] || {{ printf "aigate-lite: %s is missing\\n  fix: {restore} '
+                 f'(or bypass once with --no-verify)\\n" "$SCRIPT" >&2; exit 1; }}')
     if kind == "pre-push":
         lines.append(f'printf "%s\\n" "$REFS" | {run} check --push --remote "$1"')
     else:
         lines.append(f'exec {run} check --staged')
     return "\n".join(lines) + "\n"
+
+
+@dataclasses.dataclass
+class PythonChoice:
+    command: list            # e.g. ["/usr/bin/python3"] or ["py", "-3.12"]; empty when nothing qualifies
+    reason: str
+    tried: list              # (candidate, result) in the order tried
+    pinned_missing: bool = False
+
+
+def _probe_python(cmd) -> tuple:
+    """(qualifies, version text) for one candidate, like the hook's try_py."""
+    import shutil
+    if not (os.path.isabs(cmd[0]) and os.path.exists(cmd[0])) and not shutil.which(cmd[0]):
+        return False, ""
+    try:
+        proc = subprocess.run([*cmd, "-c", PY_PROBE], capture_output=True, text=True, timeout=15,
+                              stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return False, ""
+    return proc.returncode == 0, (proc.stdout.strip().splitlines() or [""])[0]
+
+
+def hook_python_line(vendored: bool) -> str:
+    """One line for `install`: which interpreter the hooks will run and why (a dry run of the hook's search)."""
+    choice = discover_python(os.environ, pinned=sys.executable, exists=lambda p: os.access(p, os.X_OK))
+    if choice.command:
+        return f"hook Python: {choice.reason}"
+    tried = "; ".join(f"{c}: {r}" for c, r in choice.tried)
+    return (f"hook Python: no Python 3.11+ found ({tried}), so the hooks will block commits\n"
+            "  fix: install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3")
+
+
+def discover_python(env, pinned=None, probe=None, exists=os.path.exists) -> PythonChoice:
+    """The interpreter a hook would use, found in the same order as the hook script (dry run)."""
+    probe = probe or _probe_python
+    tried = []
+
+    def attempt(cmd, why):
+        ok, version = probe(list(cmd))
+        ok = ok and bool(version)                     # like the hook: a program that prints nothing is not Python
+        label = " ".join(cmd)
+        tried.append((label, version + ("" if ok else ", too old") if version else "not found or not a working Python"))
+        return PythonChoice(list(cmd), f"{label} ({version}): {why}", tried) if ok else None
+
+    if env.get("AIGATE_PYTHON"):
+        if any(env.get(v) for v in BUILTIN_AGENT_ENV) or env.get("AIGATE_PROVENANCE") == "agent":
+            tried.append(("AIGATE_PYTHON", "ignored: " + AIGATE_PYTHON_IGNORED))
+        else:
+            found = attempt([env["AIGATE_PYTHON"]], "set by AIGATE_PYTHON")
+            if found:
+                return found
+    if pinned:
+        if exists(pinned):
+            tried.append((pinned, "pinned at install"))
+            version = f" ({sys.version.split()[0]})" if pinned == sys.executable else ""
+            return PythonChoice([pinned], f"{pinned}{version}: pinned at install (used without probing)", tried)
+        tried.append((pinned, "missing (pinned at install)"))
+    for cmd in PY_GENERIC:
+        found = attempt(cmd, "first working Python 3.11+ on PATH")
+        if found:
+            found.pinned_missing = bool(pinned)
+            return found
+    return PythonChoice([], "no Python 3.11+ found", tried, bool(pinned))
 
 
 def _sh_quote(value: str) -> str:
@@ -4203,6 +4790,7 @@ def cmd_install(args) -> int:
             fh.write(hook_script(kind, args.vendor, sys.executable, script))
         os.chmod(path, 0o755)
         print(f"installed {kind} hook -> {path}")
+    print(hook_python_line(args.vendor))
     if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
         print("optional: `aigate-lite init` writes .aigate/lite.toml to tune rules and add your test command")
     return 0
@@ -4224,72 +4812,479 @@ def cmd_uninstall(_args) -> int:
     return 0
 
 
-CONFIG_TEMPLATE = """# aigate-lite configuration. Every key is optional; delete what you don't change.
-# Rule ids: `aigate-lite explain`. Actions: block | fix | warn | off  (block and fix stop the commit).
-version = 1
+LANG_EXT = {".py": "Python", ".js": "JavaScript", ".mjs": "JavaScript", ".cjs": "JavaScript", ".jsx": "JavaScript",
+            ".ts": "TypeScript", ".tsx": "TypeScript", ".go": "Go", ".rs": "Rust", ".java": "Java", ".kt": "Kotlin",
+            ".rb": "Ruby", ".php": "PHP", ".cs": "C#", ".fs": "F#", ".swift": "Swift", ".dart": "Dart"}
+NPM_PLACEHOLDER = re.compile(r'echo "?Error: no test specified"?')
+DEFAULT_REGISTRIES = ("https://pypi.org/", "https://pypi.python.org/", "https://registry.npmjs.org/")
 
-[gate]
-fail_closed = true        # if a check crashes, stop the commit instead of passing it
-offline = "warn"          # registry unreachable: warn | block | skip
-max_seconds = 20          # time budget for registry lookups
-cache = false             # remember files the per-file checks found clean (same as --cache)
 
-[rules]
-# "suppress.type" = "warn"
-# "perf.*" = "off"
+@dataclasses.dataclass
+class ProjectInfo:
+    languages: list
+    ecosystems: list
+    test_commands: list
+    private: list
+    trusted_sources: list
 
-[paths]
-# sensitive = ["**/auth/**", "**/payments/**"]        # security rules and suppressions are one step stricter here
-# forbidden = ["infra/prod/**"]                       # nobody may change these
-# forbidden_for_agents = [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**"]
-# ignore = ["**/node_modules/**", "dist/**"]
 
-[limits]
-# function_lines = 60
-# complexity = 10
-# loop_depth = 3
-# file_lines = 800
-# diff_added_lines = 400
-# diff_files = 25
+def _read_small(root, rel, limit=1_000_000) -> str:
+    try:
+        with open(os.path.join(root, rel), "rb") as fh:
+            return fh.read(limit).decode("utf-8", "replace")
+    except OSError:
+        return ""
 
-[deps]
-# new_package_days = 30
-# cooldown_days = 5
-# private = ["acme-*", "@acme/*"]                     # served by your private index: skip public lookups
-# trusted_sources = ["https://pypi.acme.internal/simple"]
-# import_map = { mylib = "my-lib-dist" }              # import name -> package name when they differ
 
-[provenance]
-# agent_env = ["MY_AGENT_ENV_VAR"]   # extra env vars that mean "an AI agent is committing"
-# default = "agent"                  # treat every commit as AI-written (stricter)
+def _public_url(url: str):
+    """A registry URL without credentials, query or fragment; None for the public default registries."""
+    import urllib.parse
+    try:
+        parts = urllib.parse.urlsplit(url.strip())
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    host = parts.hostname + (f":{parts.port}" if parts.port else "")
+    clean = urllib.parse.urlunsplit((parts.scheme, host, parts.path, "", ""))
+    return None if clean.startswith(DEFAULT_REGISTRIES) else clean
 
-# Run your own checks too. stage: commit | push | both. {files} = changed files.
-# [[commands]]
-# name = "tests"
-# run = "python -m pytest -q"
-# stage = "push"
-# action = "fix"
 
-# Allow a known false positive. Blocking rules need a path or a fingerprint (shown with -v).
-# [[allow]]
-# rule = "secrets.generic"
-# path = "tests/fixtures/**"
-# reason = "fake credentials used by tests"
-# expires = 2027-06-30
-"""
+def _registry_hints(root, files) -> tuple:
+    private, trusted = [], []
+    for rel in files:
+        name = rel.rsplit("/", 1)[-1]
+        if name == ".npmrc":
+            for line in _read_small(root, rel).splitlines():
+                m = re.match(r"\s*(@[\w.-]+):registry\s*=\s*(\S+)", line)
+                if m:
+                    private.append(f"{m.group(1)}/*")
+                    trusted.append(_public_url(m.group(2)))
+                else:
+                    m = re.match(r"\s*registry\s*=\s*(\S+)", line)
+                    trusted.append(_public_url(m.group(1)) if m else None)
+        elif re.fullmatch(r"requirements[\w.-]*\.txt|constraints[\w.-]*\.txt", name):
+            for line in _read_small(root, rel).splitlines():
+                m = re.match(r"\s*(?:--(?:extra-)?index-url|-i)[=\s]+(\S+)", line)
+                trusted.append(_public_url(m.group(1)) if m else None)
+        elif name == "pyproject.toml":
+            try:
+                tool = tomllib.loads(_read_small(root, rel)).get("tool", {})
+            except tomllib.TOMLDecodeError:
+                continue
+            uv = tool.get("uv", {}) if isinstance(tool.get("uv"), dict) else {}
+            sources = [*(tool.get("poetry", {}) or {}).get("source", []), *uv.get("index", []),
+                       *(tool.get("pdm", {}) or {}).get("source", [])]
+            urls = [s.get("url") for s in sources if isinstance(s, dict)]
+            urls += [uv.get("index-url"), *(uv.get("extra-index-url") or [])]
+            trusted += [_public_url(u) for u in urls if isinstance(u, str)]
+    return list(dict.fromkeys(p for p in private if p)), list(dict.fromkeys(t for t in trusted if t))
+
+
+def detect_project(root, files) -> ProjectInfo:
+    """Languages, package ecosystems, test commands and private-registry hints, from tracked files only."""
+    names = {f.rsplit("/", 1)[-1] for f in files}
+
+    def has(*wanted):
+        return any(n in names for n in wanted)
+    langs = list(dict.fromkeys(LANG_EXT[os.path.splitext(f)[1].lower()] for f in files
+                               if os.path.splitext(f)[1].lower() in LANG_EXT))
+    pyproject = _read_small(root, "pyproject.toml") if "pyproject.toml" in files else ""
+    eco = []
+    if has("poetry.lock") or "[tool.poetry" in pyproject:
+        eco.append("poetry")
+    if has("uv.lock"):
+        eco.append("uv")
+    if has("Pipfile", "Pipfile.lock"):
+        eco.append("pipenv")
+    if has("environment.yml", "environment.yaml"):
+        eco.append("conda")
+    if any(re.fullmatch(r"requirements[\w.-]*\.txt", n) for n in names) or has("setup.py", "setup.cfg") \
+            or (pyproject and not eco):
+        eco.append("pip")
+    js = [e for e, marker in (("deno", ("deno.json", "deno.jsonc")), ("bun", ("bun.lockb", "bun.lock")),
+                              ("pnpm", ("pnpm-lock.yaml",)), ("yarn", ("yarn.lock",)), ("npm", ("package-lock.json",)))
+          if has(*marker)]
+    if not js and has("package.json"):
+        js = ["npm"]
+    eco += js
+    for e, marker in (("go", ("go.mod",)), ("cargo", ("Cargo.toml",)), ("maven", ("pom.xml",)),
+                      ("gradle", ("build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts")),
+                      ("bundler", ("Gemfile",)), ("composer", ("composer.json",))):
+        if has(*marker):
+            eco.append(e)
+    if any(n.endswith((".csproj", ".fsproj", ".sln")) for n in names):
+        eco.append("dotnet")
+
+    tests = []
+    if has("pytest.ini", "conftest.py") or "[tool.pytest" in pyproject \
+            or "[tool:pytest]" in (_read_small(root, "setup.cfg") if "setup.cfg" in files else "") \
+            or "[pytest]" in (_read_small(root, "tox.ini") if "tox.ini" in files else ""):
+        tests.append("python -m pytest -q")
+    if "package.json" in files:
+        try:
+            pkg = json.loads(_read_small(root, "package.json") or "{}")
+        except ValueError:
+            pkg = {}
+        script = ((pkg.get("scripts") or {}) if isinstance(pkg, dict) else {}).get("test")
+        deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg, dict) else {}
+        if isinstance(script, str) and script.strip() and not NPM_PLACEHOLDER.search(script):
+            runner = next((e for e in js if e in ("npm", "yarn", "pnpm", "bun")), "npm")
+            tests.append({"npm": "npm test", "yarn": "yarn test", "pnpm": "pnpm test", "bun": "bun run test"}[runner])
+        elif "vitest" in deps:
+            tests.append("npx vitest run")
+        elif "jest" in deps:
+            tests.append("npx jest")
+    if "deno" in eco:
+        tests.append("deno test")
+    for e, cmd in (("go", "go test ./..."), ("cargo", "cargo test"), ("maven", "mvn -q test"),
+                   ("gradle", "./gradlew test" if "gradlew" in files else "gradle test"), ("dotnet", "dotnet test")):
+        if e in eco:
+            tests.append(cmd)
+    if "bundler" in eco and (any(f.endswith("_spec.rb") for f in files) or "rspec" in _read_small(root, "Gemfile")):
+        tests.append("bundle exec rspec")
+    if "composer" in eco and has("phpunit.xml", "phpunit.xml.dist"):
+        tests.append("vendor/bin/phpunit")
+    private, trusted = _registry_hints(root, files)
+    return ProjectInfo(langs, eco, list(dict.fromkeys(tests)), private, trusted)
+
+
+def init_text(preset: str, info: ProjectInfo) -> str:
+    """The .aigate/lite.toml `init` writes: the preset, detected non-default keys, commented test commands."""
+    lines = ["# aigate-lite configuration (written by `aigate-lite init`). Every key is optional; see",
+             "# examples/lite.toml for all of them. Rule ids: `aigate-lite explain`.",
+             "version = 1",
+             f'preset = "{preset}"            # relaxed | balanced | strict']
+    if info.private or info.trusted_sources:
+        lines += ["", "[deps]"]
+        if info.private:
+            lines.append("private = [" + ", ".join(json.dumps(p) for p in info.private) + "]   # internal packages")
+        if info.trusted_sources:
+            lines.append("trusted_sources = [" + ", ".join(json.dumps(u) for u in info.trusted_sources) + "]")
+    if info.test_commands:
+        lines += ["", "# Detected test command(s). Uncomment to run them before every push. Commands in a repository's",
+                  "# config run only after you approve them: aigate-lite trust"]
+        for i, cmd in enumerate(info.test_commands):
+            lines += ["# [[commands]]", f'# name = "{"tests" if i == 0 else f"tests-{i + 1}"}"',
+                      f"# run = {json.dumps(cmd)}", '# stage = "push"']
+    return "\n".join(lines) + "\n"
 
 
 def cmd_init(args) -> int:
     repo = Repo.discover()
     path = os.path.join(repo.root, CONFIG_PATH)
+    files = [f for f in run_git(repo.root, "ls-files", "-z").split("\0") if f]
+    info = detect_project(repo.root, files)
+    what = []
+    if info.languages:
+        what.append(", ".join(info.languages))
+    if info.ecosystems:
+        what.append("packages: " + ", ".join(info.ecosystems))
+    if info.test_commands:
+        what.append("tests: " + "; ".join(info.test_commands))
+    print("Detected: " + ("; ".join(what) if what else "nothing (no tracked project files)"))
+    print(f"Preset: {args.preset}")
+    text = init_text(args.preset, info)
+    if args.print:
+        print(text, end="")
+        return 0
     if os.path.exists(path) and not args.force:
-        print(f"{CONFIG_PATH} already exists (use --force to overwrite)")
+        print(f"{CONFIG_PATH} already exists; to replace it run: aigate-lite init --force (keeps a .bak copy)")
         return 1
     os.makedirs(os.path.dirname(path), exist_ok=True)
+    backup = ""
+    if os.path.exists(path):
+        os.replace(path, path + ".bak")
+        backup = f" (previous file kept as {CONFIG_PATH}.bak)"
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
-        fh.write(CONFIG_TEMPLATE)
-    print(f"wrote {CONFIG_PATH}")
+        fh.write(text)
+    print(f"Wrote {CONFIG_PATH}{backup}")
+    print("next: aigate-lite doctor")
     return 0
+
+
+def cmd_baseline(args) -> int:
+    """Write .aigate/baseline.json: the findings a full offline scan reports today, so an existing project can
+    adopt the gate and only new findings stop commits. Never run for an AI agent."""
+    env = dict(os.environ)
+    repo = Repo.discover()
+    cfg = load_config(repo, "worktree")
+    kind, why = detect_provenance(env, cfg["provenance"]["agent_env"], cfg["provenance"]["default"])
+    if kind == "agent":
+        print(f"aigate-lite: baseline refuses to run for an AI agent ({why.lstrip('$')}): accepting existing findings "
+              "is a person's decision", file=sys.stderr)
+        return 1
+    ns = build_parser().parse_args(["check", "--all", "--offline", "--no-commands", "--format", "json"])
+    res = run_check(ns, env, collect=True)
+    found = [] if isinstance(res, int) else [f for f in res.findings if f.allowed in (None, "baseline")
+                                              and not f.rule.startswith(BASELINE_NEVER)]
+    secrets = [f for f in found if f.rule.startswith("secrets.")]
+    current = {(f.rule, f.path, f.fingerprint) for f in found
+               if args.include_secrets or not f.rule.startswith("secrets.")}
+    old, _problems = load_baseline(repo, "worktree")
+    entries = current if args.prune else old | current
+    rows = [{"rule": r, "path": p, "fingerprint": fp} for r, p, fp in sorted(entries, key=lambda e: (e[1], e[0], e[2]))]
+    path = os.path.join(repo.root, BASELINE_PATH)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write(json.dumps({"version": 1, "tool": __version__, "entries": rows}, indent=2) + "\n")
+    removed = f", {len(old - entries)} removed" if args.prune else ""
+    print(f"Wrote {BASELINE_PATH}: {len(rows)} entries ({len(current - old)} new{removed})")
+    left = 0 if args.include_secrets else len(secrets)
+    print(f"{left} secret finding{'' if left == 1 else 's'} not baselined; rotate {'it' if left == 1 else 'them'}"
+          if left else "0 secret findings not baselined")
+    print(f"next: review and commit {BASELINE_PATH}")
+    return 0
+
+
+FIXABLE = ("secrets.env_file", "code.debug_leftover", "tests.focused")
+DEBUG_MODULES = ("pdb", "ipdb", "pudb")
+JS_DEBUGGER_LINE = re.compile(r"^\s*debugger\s*;?\s*$")
+FOCUS_FIXES = ((re.compile(r"^(\s*)f(it|describe|test)\("), r"\1\2("),
+               (re.compile(r"^(\s*)(it|describe|test)\.only\("), r"\1\2("))
+
+
+@dataclasses.dataclass
+class FixPlan:
+    edits: dict          # path -> (old bytes, new bytes)
+    untrack: list        # paths to `git rm --cached`
+    gitignore: tuple     # (old bytes, new bytes) or None
+    skipped: list        # (path, line, why)
+    notes: list = dataclasses.field(default_factory=list)
+
+
+def _unchanged_since_staged(repo, path) -> bool:
+    """True when the work tree file matches the index (git's own comparison: autocrlf and filters included)."""
+    return subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", "--", f":(literal){path}"],
+                          cwd=repo.root, capture_output=True).returncode == 0
+
+
+def _python_debug_lines(text) -> set:
+    """1-based lines whose statements are all one-line debugger calls or debugger imports (so deleting the line
+    removes exactly those statements and nothing else)."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return set()
+    by_line: dict = defaultdict(list)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.stmt):
+            by_line[node.lineno].append(node)
+
+    def debug_stmt(n) -> bool:
+        if n.lineno != n.end_lineno:
+            return False
+        if isinstance(n, ast.Import):
+            return all(a.name in DEBUG_MODULES and not a.asname for a in n.names)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and not n.value.args and not n.value.keywords:
+            name = dotted_name(n.value.func) or ""
+            return name == "breakpoint" or name in {f"{m}.set_trace" for m in DEBUG_MODULES}
+        return False
+    return {line for line, stmts in by_line.items() if all(debug_stmt(n) for n in stmts)}
+
+
+def _plan_file(repo, path, findings, plan) -> None:
+    full = os.path.join(repo.root, path)
+    root = os.path.realpath(repo.root)
+    if os.path.islink(full) or not os.path.realpath(full).startswith(root + os.sep):
+        plan.skipped.append((path, None, "a symlink or outside the repository"))
+        return
+    if not _unchanged_since_staged(repo, path):
+        plan.skipped.append((path, None, "has unstaged changes; stage or stash them first"))
+        return
+    try:
+        with open(full, "rb") as fh:
+            data = fh.read()
+        text = data.decode("utf-8")
+    except OSError as e:
+        plan.skipped.append((path, None, f"cannot read it ({e.strerror})"))
+        return
+    except UnicodeDecodeError:
+        plan.skipped.append((path, None, "not UTF-8"))
+        return
+    lines = text.split("\n")                       # like git's line numbers: only \n ends a line
+    is_py = path.endswith((".py", ".pyw"))
+    debug_ok = _python_debug_lines(text) if is_py else set()
+    drop, changed = set(), {}
+    for f in findings:
+        i = (f.line or 0) - 1
+        if not 0 <= i < len(lines):
+            continue
+        body = lines[i].rstrip("\r")
+        if f.rule == "tests.focused":
+            for rx, repl in FOCUS_FIXES:
+                new = rx.sub(repl, body, count=1)
+                if new != body:
+                    changed[i] = new + lines[i][len(body):]
+                    break
+            else:
+                plan.skipped.append((path, f.line, "the focused call is not at the start of the line; fix it by hand"))
+        elif is_py and (i + 1) in debug_ok:
+            drop.add(i)
+        elif not is_py and JS_DEBUGGER_LINE.match(body) and "\n".join(lines[:i]).count("`") % 2 == 0:
+            drop.add(i)                             # (an odd number of backticks before it: inside a template)
+        else:
+            plan.skipped.append((path, f.line, "other code on the line or a multi-line statement; fix it by hand"))
+    for i in [i for i in drop if is_py and lines[i].strip().startswith("import ")]:
+        module = lines[i].split()[1].rstrip(";")      # keep `import pdb` while something else still uses pdb
+        rest = "\n".join(changed.get(j, ln) for j, ln in enumerate(lines) if j not in drop)
+        if re.search(rf"\b{re.escape(module)}\b", rest):
+            drop.discard(i)
+    new_text = "\n".join(changed.get(i, ln) for i, ln in enumerate(lines) if i not in drop)
+    if is_py:
+        try:
+            ast.parse(new_text)
+        except SyntaxError:
+            plan.skipped.append((path, None, "removing the line would leave an empty block; fix it by hand"))
+            return
+    if new_text != text:
+        plan.edits[path] = (data, new_text.encode("utf-8"))
+
+
+def _gitignore_line(path: str) -> str:
+    """An anchored .gitignore pattern that matches exactly `path` (special characters escaped)."""
+    escaped = re.sub(r"([\\[\]*?!#])", r"\\\1", path)
+    stripped = escaped.rstrip(" ")
+    return "/" + stripped + "\\ " * (len(escaped) - len(stripped))
+
+
+def _covers(repo, line: str, path: str) -> bool:
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="aigate-ignore-")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(line + "\n")
+        return subprocess.run(["git", "-c", f"core.excludesFile={tmp}", "check-ignore", "-q", "--no-index", "--",
+                               path], cwd=repo.root, capture_output=True).returncode == 0
+    finally:
+        os.remove(tmp)
+
+
+def _plan_gitignore(repo, paths, plan) -> None:
+    def ignored(p) -> bool:                    # --no-index: would .gitignore cover it once it is untracked?
+        return subprocess.run(["git", "check-ignore", "-q", "--no-index", "--", p], cwd=repo.root,
+                              capture_output=True).returncode == 0
+    add = [p for p in paths if not ignored(p)]
+    if not add:
+        return
+    gi = os.path.join(repo.root, ".gitignore")
+    if os.path.islink(gi):
+        plan.skipped.append((".gitignore", None, "is a symlink; add the lines by hand"))
+        return
+    if os.path.exists(gi) and not _unchanged_since_staged(repo, ".gitignore"):
+        plan.skipped.append((".gitignore", None, "has unstaged changes; stage or stash them first"))
+        return
+    try:
+        with open(gi, "rb") as fh:
+            old = fh.read()
+    except OSError:
+        old = b""
+    eol = b"\r\n" if b"\r\n" in old else b"\n"
+    present = {ln.strip() for ln in old.splitlines()}
+    lines = []
+    for p in add:
+        line = _gitignore_line(p)
+        if line.encode() in present:
+            continue
+        if _covers(repo, line, p):
+            lines.append(line.encode())
+        else:
+            plan.skipped.append((p, None, "cannot be written as a .gitignore line; add it to .gitignore by hand"))
+    if lines:
+        plan.gitignore = (old, old + (eol if old and not old.endswith(b"\n") else b"") + eol.join(lines) + eol)
+
+
+def plan_fixes(repo, findings, only) -> FixPlan:
+    """What `fix` would change, from the staged check's findings. Nothing is written here."""
+    wanted = set(only or FIXABLE) & set(FIXABLE)
+    plan = FixPlan({}, [], None, [])
+    by_path: dict = defaultdict(list)
+    for f in findings:
+        if f.rule in wanted and not f.allowed and f.action in ("block", "fix"):
+            if f.rule == "secrets.env_file":
+                plan.untrack.append(f.path)
+            else:
+                by_path[f.path].append(f)
+    for path, fs in sorted(by_path.items()):
+        _plan_file(repo, path, fs, plan)
+    plan.untrack = list(dict.fromkeys(plan.untrack))
+    _plan_gitignore(repo, plan.untrack, plan)
+    for p in plan.untrack:
+        if repo.read("HEAD:" + p) is not None:
+            plan.notes.append(f"{p} is already in HEAD: this commit will delete it from the repository (the file stays "
+                              "on disk); it stays in history, so rotate what it contains")
+    return plan
+
+
+def _diff(path, old: bytes, new: bytes) -> str:
+    import difflib
+    a, b = old.decode("utf-8", "replace").splitlines(True), new.decode("utf-8", "replace").splitlines(True)
+    return "".join(ln if ln.endswith("\n") else ln + "\n"
+                   for ln in difflib.unified_diff(a, b, fromfile=f"a/{path}", tofile=f"b/{path}"))
+
+
+def _apply_fixes(repo, plan) -> None:
+    """Write every planned edit, or none: all files are opened (and re-checked against the plan) first."""
+    writes = [(path, old, new) for path, (old, new) in plan.edits.items()]
+    if plan.gitignore:
+        writes.append((".gitignore", *plan.gitignore))
+    handles, done = [], []
+    try:
+        for path, old, new in writes:
+            full = os.path.join(repo.root, path)
+            fh = open(full, "r+b") if os.path.exists(full) else open(full, "w+b")
+            handles.append((path, fh, new))
+            if fh.read() != old:
+                raise UserError(f"{path} changed while fix was running", "run: aigate-lite fix --yes again")
+        for path, fh, new in handles:
+            fh.seek(0)
+            fh.write(new)                          # in place: keeps the file mode
+            fh.truncate()
+            done.append(path)
+    except OSError as e:
+        raise UserError(f"cannot write {e.filename or 'a file'} ({e.strerror})",
+                        "make it writable and run: aigate-lite fix --yes again") from None
+    finally:
+        for _path, fh, _new in handles:
+            fh.close()
+        if done:
+            run_git(repo.root, "add", "--", *(f":(literal){p}" for p in done))
+    for path in plan.untrack:
+        run_git(repo.root, "rm", "--cached", "-q", "--", f":(literal){path}")
+
+
+def cmd_fix(args) -> int:
+    """Mechanical fixes for staged findings. Shows the diff and changes nothing unless --yes; never run by hooks."""
+    repo = Repo.discover()
+    env = dict(os.environ)
+    ns = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--format", "json"])
+    res = run_check(ns, env, collect=True)
+    findings = [] if isinstance(res, int) else res.findings
+    only = [r.strip() for r in (args.only or "").split(",") if r.strip()]
+    plan = plan_fixes(repo, findings, only)
+    for path, line, why in plan.skipped:
+        print(f"skipped {path}{f':{line}' if line else ''}: {why}")
+    if not (plan.edits or plan.untrack or plan.gitignore):
+        print("nothing to fix" + (" automatically" if plan.skipped else ""))
+        return 0
+    if not args.yes:
+        for path in plan.untrack:
+            print(f"would run: git rm --cached -- {path}   (the file stays on disk)")
+        for note in plan.notes:
+            print(f"note: {note}")
+        if plan.gitignore:
+            sys.stdout.write(_diff(".gitignore", *plan.gitignore))
+        for path, (old, new) in plan.edits.items():
+            sys.stdout.write(_diff(path, old, new))
+        print("next: aigate-lite fix --yes")
+        return 1
+    _apply_fixes(repo, plan)
+    for note in plan.notes:
+        print(f"note: {note}")
+    print(f"fixed: {len(plan.edits)} file(s) edited, {len(plan.untrack)} unstaged"
+          + (", .gitignore updated" if plan.gitignore else "") + "; checking again:")
+    recheck = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--color", "never"])
+    return run_check(recheck, env)
 
 
 def cmd_scope(args) -> int:
@@ -4382,11 +5377,324 @@ def cmd_explain(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------- doctor
+
+# `git rev-parse --absolute-git-dir` (Repo.discover) is the newest git feature the tool relies on: added by
+# git commit a2f5a8762693, first released in v2.13.0. Every other command and flag it runs is older.
+GIT_MIN = (2, 13, 0)
+DOCTOR_URLS = (("PyPI", "https://pypi.org/pypi/pip/json"),
+               ("npm", "https://registry.npmjs.org/-/package/react/dist-tags"),
+               ("OSV", "https://api.osv.dev/v1/query"),
+               ("npm downloads", "https://api.npmjs.org/downloads/point/last-week/react"),
+               ("pypistats", "https://pypistats.org/api/packages/pip/recent"))
+DOCTOR_SNIPPETS = {
+    "husky": "add this line to .husky/pre-commit: python3 .aigate/aigate_lite.py check --staged",
+    "lefthook": "add to lefthook.yml: pre-commit: { commands: { aigate-lite: { run: python3 .aigate/aigate_lite.py "
+                "check --staged } } }",
+}
+
+
+def parse_git_version(text: str):
+    m = re.search(r"(\d+)\.(\d+)(?:\.(\d+))?", text or "")
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0)) if m else None
+
+
+def _check(cid, status, detail, fix=""):
+    return {"id": cid, "status": status, "detail": detail, "fix": fix}
+
+
+def _git_text(cwd, *args):
+    try:
+        proc = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def _doctor_python(env, hooks_dir):
+    out = [_check("python", "ok", f"running Python {sys.version.split()[0]} at {sys.executable}")]
+    pinned = vendored = None
+    try:
+        with open(os.path.join(hooks_dir, "pre-commit"), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if HOOK_MARK in text:
+            m = re.search(r"^PY='((?:[^']|'\\'')*)'$", text, re.M)
+            pinned = m.group(1).replace("'\\''", "'") if m else None
+            vendored = m is None
+    except OSError:
+        pass
+    choice = discover_python(env, pinned=pinned, exists=lambda p: os.access(p, os.X_OK))
+    label = "vendored hook" if vendored else "hook" if pinned else "a hook installed now"
+    if not choice.command:
+        tried = "; ".join(f"{c}: {r}" for c, r in choice.tried)
+        out.append(_check("python.hook", "fail", f"{label} would find no Python 3.11+ ({tried})",
+                          "install Python 3.11+ or set AIGATE_PYTHON=/path/to/python3"))
+    elif choice.pinned_missing:
+        out.append(_check("python.hook", "warn", f"pinned interpreter {pinned} is missing; {label} falls back to "
+                          f"{choice.reason}", "run: aigate-lite install (pins the current Python)"))
+    else:
+        out.append(_check("python.hook", "ok", f"{label} uses {choice.reason}"))
+    return out
+
+
+def _doctor_git(cwd):
+    text = _git_text(cwd, "--version")
+    if text is None:
+        return _check("git", "fail", "git not found on PATH", "install git and make sure `git --version` works")
+    version = parse_git_version(text)
+    if version is None or version < GIT_MIN:
+        need = ".".join(map(str, GIT_MIN[:2]))
+        return _check("git", "warn", f"{text}: older than {need} (needed for `git rev-parse --absolute-git-dir`)",
+                      f"upgrade git to {need} or newer")
+    return _check("git", "ok", text)
+
+
+def _doctor_hooks(repo, hooks_dir):
+    out = []
+    for kind, missing in (("pre-commit", "fail"), ("pre-push", "warn")):
+        path = os.path.join(hooks_dir, kind)
+        if not os.path.exists(path):
+            out.append((missing, f"{kind} hook not installed", "run: aigate-lite install"))
+            continue
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if HOOK_MARK not in text:
+            out.append((missing, f"{kind} hook is not aigate-lite's",
+                        f"run: aigate-lite install --force (keeps the current one as {kind}.local)"))
+            continue
+        if os.name != "nt" and not os.access(path, os.X_OK):
+            out.append(("fail", f"{kind} hook is not executable", f"run: chmod +x {path}"))
+            continue
+        m = re.search(r"^SCRIPT='((?:[^']|'\\'')*)'$", text, re.M)
+        script = m.group(1).replace("'\\''", "'") if m else os.path.join(repo.root, ".aigate", "aigate_lite.py")
+        if not os.path.isfile(script):
+            out.append(("fail", f"{kind} hook runs {script}, which is missing", "run: aigate-lite install"))
+            continue
+        chained = " (runs your old hook first: " + kind + ".local)" if os.path.exists(path + ".local") else ""
+        out.append(("ok", f"{kind}{chained}", ""))
+    worst = next((s for s in ("fail", "warn") if any(o[0] == s for o in out)), "ok")
+    bad = [o for o in out if o[0] != "ok"]
+    detail = "; ".join(o[1] for o in bad) if bad else "pre-commit and pre-push installed: " + ", ".join(o[1] for o in out)
+    fix = next((o[2] for o in bad if o[2]), "")
+    return _check("hooks", worst, detail, fix)
+
+
+def _doctor_hook_manager(repo):
+    hooks_path = _git_text(repo.root, "config", "--get", "core.hooksPath")
+    root = repo.root
+    if os.path.exists(os.path.join(root, ".pre-commit-config.yaml")):
+        return _check("hooks.manager", "warn", "the pre-commit framework manages hooks (.pre-commit-config.yaml)",
+                      "add under `repos:` in .pre-commit-config.yaml:\n" + PRE_COMMIT_SNIPPET)
+    if hooks_path or os.path.isdir(os.path.join(root, ".husky")):
+        which = "husky" if ".husky" in (hooks_path or ".husky") else None
+        return _check("hooks.manager", "warn", f"core.hooksPath is {hooks_path or 'unset'}"
+                      f"{' (husky)' if which else ''}: git runs hooks from there, not .git/hooks",
+                      DOCTOR_SNIPPETS["husky"] if which else
+                      f"add `python3 .aigate/aigate_lite.py check --staged` to {hooks_path}/pre-commit")
+    if any(os.path.exists(os.path.join(root, n)) for n in ("lefthook.yml", "lefthook.yaml", ".lefthook.yml")):
+        return _check("hooks.manager", "warn", "lefthook manages hooks", DOCTOR_SNIPPETS["lefthook"])
+    return _check("hooks.manager", "ok", "no other hook manager found")
+
+
+def _doctor_version(repo):
+    path = os.path.join(repo.root, ".aigate", "aigate_lite.py")
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+    except OSError:
+        return _check("version", "ok", f"aigate-lite {__version__} (not vendored)")
+    vendored = m.group(1) if m else "unknown"
+    if vendored != __version__:
+        return _check("version", "warn", f"vendored .aigate/aigate_lite.py is {vendored}, this is {__version__}",
+                      "run: aigate-lite install --vendor (then commit .aigate/aigate_lite.py)")
+    return _check("version", "ok", f"aigate-lite {__version__}, vendored copy matches")
+
+
+def _doctor_config(cfg):
+    if any("not valid TOML" in p or p.startswith("cannot read") for p in cfg.problems):
+        return _check("config", "fail", "; ".join(cfg.problems), f"fix {CONFIG_PATH} (the gate uses built-in defaults)")
+    if cfg.problems:
+        return _check("config", "warn", "; ".join(cfg.problems), f"fix the entries named above in {CONFIG_PATH}")
+    legacy = [a for a in cfg["allow"] if re.fullmatch(r"[0-9a-f]{12}", a.get("fingerprint") or "")]
+    if legacy:
+        return _check("config", "warn", f"{len(legacy)} [[allow]] entr{'y uses' if len(legacy) == 1 else 'ies use'} 0.1 "
+                      "fingerprints (12 characters); they still match during 0.2.x",
+                      "run: aigate-lite check --all -v, and copy each finding's new fingerprint into its entry")
+    return _check("config", "ok", f"{cfg.origin}: no problems")
+
+
+def _doctor_baseline(repo):
+    if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+        return _check("baseline", "ok", "no baseline (every finding counts)")
+    entries, problems = load_baseline(repo, "worktree")
+    if problems:
+        return _check("baseline", "warn", "; ".join(problems), "run: aigate-lite baseline --prune")
+    legacy = sum(1 for e in entries if re.fullmatch(r"[0-9a-f]{12}", e[2]))
+    if legacy:
+        return _check("baseline", "warn", f"{len(entries)} entries, {legacy} with 0.1 fingerprints",
+                      "run: aigate-lite baseline --prune (rewrites them in the 0.2 format)")
+    return _check("baseline", "ok", f"{len(entries)} accepted findings in {BASELINE_PATH}")
+
+
+def _doctor_commands(repo, cfg):
+    cmds = cfg["commands"]
+    if not cmds:
+        return _check("commands", "ok", "no [[commands]] configured")
+    if commands_hash(cmds) in trusted_hashes(repo):
+        return _check("commands", "ok", f"{len(cmds)} configured command(s), approved")
+    names = ", ".join(c["name"] for c in cmds)
+    return _check("commands", "warn", f"[[commands]] not approved yet, so they do not run: {names}",
+                  "review them, then run: aigate-lite trust")
+
+
+def _doctor_cache(cfg):
+    path = default_cache_dir()
+    state = "result cache on" if cfg["gate"].get("cache") is True else "result cache off (enable: --cache)"
+    try:
+        os.makedirs(path, exist_ok=True)
+        probe = os.path.join(path, f".doctor-{os.getpid()}")
+        with open(probe, "w") as fh:
+            fh.write("")
+        os.remove(probe)
+    except OSError as e:
+        return _check("cache", "warn", f"{state}; cache dir {path} is not writable ({e.strerror})",
+                      "set AIGATE_CACHE_DIR to a writable directory")
+    size, loose = 0, []
+    for name in os.listdir(path):
+        full = os.path.join(path, name)
+        if os.path.isfile(full):
+            size += os.path.getsize(full)
+            if os.name != "nt" and name.endswith((".json", ".key")) and os.stat(full).st_mode & 0o077:
+                loose.append(name)
+    detail = f"{state}; {path} ({size // 1024} KB)"
+    if loose:
+        return _check("cache", "warn", f"{detail}; readable by others: {', '.join(loose)}",
+                      f"run: chmod 600 {path}/*.json {path}/*.key")
+    return _check("cache", "ok", detail)
+
+
+def _redact_proxy(value: str) -> str:
+    return re.sub(r"//[^/@]*@", "//", value)
+
+
+def _default_fetch(url, timeout):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": f"aigate-lite/{__version__} doctor"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+def _doctor_network(env, cfg, fetch):
+    import ssl
+    import urllib.error
+    from concurrent.futures import ThreadPoolExecutor
+    proxy = next((env[k] for k in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy") if env.get(k)), None)
+    via = f" via proxy {_redact_proxy(proxy)}" if proxy else ""
+
+    def one(item):
+        name, url = item
+        try:
+            fetch(url, 3)
+            return name, None
+        except urllib.error.URLError as e:
+            return name, "tls" if isinstance(e.reason, ssl.SSLError) else str(e.reason)
+        except ssl.SSLError:
+            return name, "tls"
+        except (OSError, ValueError) as e:
+            return name, str(e) or type(e).__name__
+    with ThreadPoolExecutor(max_workers=len(DOCTOR_URLS)) as pool:
+        results = list(pool.map(one, DOCTOR_URLS))
+    failed = [(n, why) for n, why in results if why]
+    if not failed:
+        return _check("network", "ok", f"PyPI, npm, OSV, npm downloads and pypistats reachable{via}")
+    status = "fail" if cfg["gate"].get("offline") == "block" else "warn"
+    names = ", ".join(n for n, _ in failed)
+    if any(why == "tls" for _, why in failed):
+        return _check("network", status, f"TLS certificate verification failed for {names}{via}",
+                      "behind a corporate proxy? point SSL_CERT_FILE at your company's CA bundle "
+                      "(SSL_CERT_FILE=/path/to/ca.pem)")
+    return _check("network", status, f"not reachable: {names}{via} ({failed[0][1]}); dependency checks will be "
+                  "incomplete", "check your connection or proxy settings (HTTPS_PROXY), or use --offline")
+
+
+def _doctor_agent(env, cfg):
+    kind, why = detect_provenance(env, cfg["provenance"]["agent_env"], cfg["provenance"]["default"])
+    if kind == "agent":
+        return _check("agent", "ok", f"AI agent detected via {why.lstrip('$')}: commits from this shell count as "
+                      "AI-agent commits")
+    return _check("agent", "ok", "no AI agent detected in this shell: commits count as human commits")
+
+
+def doctor_report(env, offline=False, fetch=None) -> list:
+    """Every doctor check as {id, status: ok|warn|fail, detail, fix}, sorted fail -> warn -> ok."""
+    cwd = os.getcwd()
+    checks = [_doctor_git(cwd)]
+    try:
+        repo = Repo.discover(cwd)
+    except GitError as e:
+        repo = None
+        checks.append(_check("repo", "fail", f"not inside a git work tree ({e})",
+                             "run doctor inside your project (or run: git init)"))
+    if repo is not None:
+        hooks_dir = repo.git_path("hooks")
+        checks += _doctor_python(env, hooks_dir)
+        shallow = _git_text(repo.root, "rev-parse", "--is-shallow-repository") == "true"
+        has_commits = repo.commit("HEAD") is not None
+        if shallow:
+            checks.append(_check("repo", "warn", f"{repo.root}: shallow clone; --range and --push checks may miss "
+                                 "their base", "run: git fetch --unshallow (CI: fetch-depth: 0)"))
+        elif not has_commits:
+            checks.append(_check("repo", "warn", f"{repo.root}: no commits yet", "make a first commit"))
+        else:
+            checks.append(_check("repo", "ok", repo.root))
+        cfg = load_config(repo, "worktree")
+        checks += [_doctor_hooks(repo, hooks_dir), _doctor_hook_manager(repo), _doctor_version(repo),
+                   _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg), _doctor_baseline(repo)]
+        scope = load_scope(repo)
+        checks.append(_check("scope", "ok", "task scope: " + ", ".join(scope) if scope else
+                             "no task scope set (every path is in scope)"))
+    else:
+        checks += _doctor_python(env, os.path.join(cwd, ".git", "hooks"))
+        cfg = merge_config({}, [])
+    checks.append(_check("network", "ok", "skipped (--offline)") if offline
+                  else _doctor_network(env, cfg, fetch or _default_fetch))
+    checks.append(_doctor_agent(env, cfg))
+    return sorted(checks, key=lambda c: ("fail", "warn", "ok").index(c["status"]))
+
+
+def cmd_doctor(args) -> int:
+    checks = doctor_report(dict(os.environ), offline=args.offline)
+    if args.format == "json":
+        print(json.dumps(checks, indent=2))
+    else:
+        sym = symbols(sys.stdout)
+        width = max(len(c["id"]) for c in checks)
+        pad = " " * (width + 5)
+        for c in checks:
+            print(f"{sym[c['status']]:<2} {c['id']:<{width}}  {c['detail']}")
+            if c["status"] != "ok" and c["fix"]:
+                print(pad + sym["arrow"] + " " + c["fix"].replace("\n", "\n" + pad + "  "))
+        first = next((c for c in checks if c["status"] != "ok" and c["fix"]), None)
+        hint = first["fix"].splitlines()[0].removeprefix("run: ") if first else "all good; commit as usual"
+        print(f"next: {hint}")
+    return 1 if any(c["status"] == "fail" for c in checks) else 0
+
+
 def build_parser():
     import argparse
-    p = argparse.ArgumentParser(prog="aigate-lite", description="Commit-time gate for AI-written code.")
+
+    class Parser(argparse.ArgumentParser):
+        def error(self, message):
+            self.print_usage(sys.stderr)
+            self.exit(2, f"aigate-lite: {message}\n  see: aigate-lite --help\n")
+    p = Parser(prog="aigate-lite", description="Commit-time gate for AI-written code. "
+                                               "--debug (or AIGATE_DEBUG=1) shows tracebacks.")
     p.add_argument("--version", action="version", version=f"aigate-lite {__version__}")
-    sub = p.add_subparsers(dest="command")
+    sub = p.add_subparsers(dest="command", parser_class=Parser)
     c = sub.add_parser("check", help="check staged changes, a range, or a push")
     target = c.add_mutually_exclusive_group()
     target.add_argument("--staged", action="store_true", help="check what `git commit` would record (default)")
@@ -4395,7 +5703,8 @@ def build_parser():
     target.add_argument("--all", action="store_true",
                         help="scan every tracked file in HEAD as if newly added (an audit; not for hooks)")
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
-    c.add_argument("--format", choices=("text", "json", "github", "sarif"), default="text")
+    c.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text",
+                   help="agent: ASCII lines for AI coding agents (AIGATE ... / <ACTION> <rule> <path>:<line> ... / END)")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
     c.add_argument("--offline", action="store_true", help="skip registry lookups")
     c.add_argument("--cache", action="store_true",
@@ -4411,13 +5720,24 @@ def build_parser():
     i.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ and point the hooks there")
     i.add_argument("--no-pre-push", action="store_true", help="install only the pre-commit hook")
     sub.add_parser("uninstall", help="remove the hooks this tool installed")
-    n = sub.add_parser("init", help="write a starter .aigate/lite.toml")
-    n.add_argument("--force", action="store_true")
+    n = sub.add_parser("init", help="detect the project and write .aigate/lite.toml")
+    n.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
+    n.add_argument("--print", action="store_true", help="show the file instead of writing it")
+    n.add_argument("--force", action="store_true", help="replace an existing file (kept as lite.toml.bak)")
     s = sub.add_parser("scope", help="declare which paths the current task may touch")
     s.add_argument("action", choices=("set", "add", "show", "clear"))
     s.add_argument("globs", nargs="*")
     t = sub.add_parser("trust", help="approve the [[commands]] in .aigate/lite.toml so they may run")
     t.add_argument("--rev", help="approve the config as committed in this revision (e.g. a branch you push)")
+    x = sub.add_parser("fix", help="fix debugger lines, focused tests and staged env files (shows a diff; --yes applies)")
+    x.add_argument("--yes", action="store_true", help="apply the changes and stage them")
+    x.add_argument("--only", metavar="RULE[,RULE]", help=f"only these rules ({', '.join(FIXABLE)})")
+    b = sub.add_parser("baseline", help="accept today's findings so only new ones stop commits (.aigate/baseline.json)")
+    b.add_argument("--include-secrets", action="store_true", help="also accept secrets (rotate them instead)")
+    b.add_argument("--prune", action="store_true", help="drop entries that no longer occur")
+    d = sub.add_parser("doctor", help="check this setup: Python, git, hooks, config, cache, network")
+    d.add_argument("--offline", action="store_true", help="skip the network checks")
+    d.add_argument("--format", choices=("text", "json"), default="text")
     e = sub.add_parser("explain", help="list rules, or explain one")
     e.add_argument("rule", nargs="?")
     return p
@@ -4431,19 +5751,43 @@ def main(argv=None) -> int:
                 and hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     argv = list(sys.argv[1:] if argv is None else argv)
+    debug = "--debug" in argv or os.environ.get("AIGATE_DEBUG") == "1"
+    argv = [a for a in argv if a != "--debug"]
     if not argv or argv[0].startswith("-") and argv[0] not in ("-h", "--help", "--version"):
         argv = ["check", *argv]
+    command = None
     try:
         args = build_parser().parse_args(argv)
+        command = args.command
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
-                "explain": cmd_explain, "trust": cmd_trust}[args.command](args)
-    except GitError as e:
-        print(f"aigate-lite: {e}", file=sys.stderr)
-        return 2
+                "explain": cmd_explain, "trust": cmd_trust,
+                "doctor": cmd_doctor, "baseline": cmd_baseline,
+                "fix": cmd_fix}[args.command](args)
+    except UserError as e:
+        if debug:
+            raise
+        print(f"aigate-lite: {e.cause}" + (f"\n  fix: {e.fix}" if e.fix else ""), file=sys.stderr)
+        return e.exit_code
     except KeyboardInterrupt:
         return 130
+    except BrokenPipeError:                   # the reader went away (e.g. `| head`): nothing to report
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass
+        return 2
+    except Exception as e:                    # fail closed: exit 2 stops the hook, without a traceback
+        if debug:
+            raise
+        bypass = ""
+        if command == "check" and detect_provenance(dict(os.environ))[0] != "agent":
+            bypass = f"; to {'push' if '--push' in argv else 'commit'} anyway once (humans): git " \
+                     f"{'push' if '--push' in argv else 'commit'} --no-verify"
+        print(f"aigate-lite: internal error ({type(e).__name__}: {str(e)[:200]})\n"
+              "  fix: run it again with --debug (or AIGATE_DEBUG=1) and report the traceback" + bypass, file=sys.stderr)
+        return 2
     finally:
         if os.environ.get("AIGATE_PROFILE") == "1":
             sys.stderr.write("aigate-profile: " + json.dumps(dict(sorted(PROFILE.items()))) + "\n")

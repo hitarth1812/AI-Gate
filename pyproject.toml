@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aigate-lite"
-version = "0.1.0"
+version = "0.2.1"
 description = "Free, local commit-time gate that checks AI-written code before it is committed or pushed"
 readme = "README.md"
 requires-python = ">=3.11"

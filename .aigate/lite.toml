@@ -1,0 +1,72 @@
+# aigate-lite's own configuration (used by `check --all` on this repository).
+# Every [[allow]] names one rule, one file and one fingerprint (see `check --all -v`) for an intentional
+# finding; nothing is allowed by rule or directory alone. Fingerprints (0.2 format, 16 characters) do not
+# depend on line numbers: they come from the finding's own text (for suppress.* rules the whole line), so a new
+# finding of the same rule in the same file is still reported.
+version = 1
+
+# ---- aigate_lite.py: the detector's own text and deliberate design choices
+
+[[allow]]
+rule = "code.placeholder"
+path = "aigate_lite.py"
+fingerprint = "60718a4d845d0c9e"
+reason = "module docstring lists the rule family by name ('placeholder code, swallowed errors, ...'); not a stub"
+
+[[allow]]
+rule = "secrets.generic"
+path = "aigate_lite.py"
+fingerprint = "c659f3fbc75d4adc"
+reason = "SECRET_WORDS is a regex of credential words used by the checks, not a credential"
+
+[[allow]]
+rule = "security.shell"
+path = "aigate_lite.py"
+fingerprint = "5eec511b1e0905d9"
+reason = "user [[commands]] are shell command lines by design; they run only after `aigate-lite trust`, {files} quoted per OS"
+
+# ---- project config
+
+[[allow]]
+rule = "tests.config_changed"
+path = "pyproject.toml"
+fingerprint = "6b3ebb1e1375f269"
+reason = "testpaths = [\"tests\"] is the project's own pytest config; check --all reads every line as newly added"
+
+# ---- tests/: fixture text written into temporary repositories to exercise the rules
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_cache.py"
+fingerprint = "e9f0e6c98bec24ab"
+reason = "fixture line for the result-cache tests (written into a temp repo)"
+
+[[allow]]
+rule = "code.placeholder"
+path = "tests/test_code_tests.py"
+fingerprint = "18972cd02bd021e9"
+reason = "fixture for the code.placeholder rule"
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_code_tests.py"
+fingerprint = "4a9d5d938171f872"
+reason = "fixture for the suppression rules (first `x = 1` line)"
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_code_tests.py"
+fingerprint = "16c1ab3119901fd1"
+reason = "fixture for the suppression rules (edited `x = 2` line)"
+
+[[allow]]
+rule = "suppress.security"
+path = "tests/test_code_tests.py"
+fingerprint = "9daa471fe4333c05"
+reason = "fixture for the suppress.security rule"
+
+[[allow]]
+rule = "suppress.type"
+path = "tests/test_gate.py"
+fingerprint = "bf6291d50780e4ff"
+reason = "fixture line for the end-to-end gate tests"

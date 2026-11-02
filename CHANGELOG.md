@@ -1,5 +1,129 @@
 # Changelog
 
+## 0.2.1 — fix-up before merge
+
+### Changed
+- Hooks find Python in this order: `$AIGATE_PYTHON` (ignored for AI agents), the interpreter pinned at install, `python3`,
+  `python`, `python3.14`..`python3.11`, `py -3.14`..`py -3.11`, `py -3`. The Windows Store alias stubs are still skipped.
+- Vendored installs (`install --vendor`) now pin the interpreter too. The pin lives in the hook under `.git/hooks`, which is
+  never committed; if the pinned interpreter is gone the hook rediscovers one and prints how to re-pin.
+- Windows hooks now reuse the gate's bytecode like POSIX hooks do (one loader for every OS). The cache is
+  `%LOCALAPPDATA%igate-lite\pycache`; there is no ACL check on Windows (write access to your profile already allows editing
+  `.git/hooks`). It is never used when an AI agent runs the commit, never inside the repository or next to the script, and
+  `sys.path` is no longer changed by the loader. `sys.pycache_prefix` is deliberately not set (see PROGRESS.md).
+- `bench/bench.py --against <ref>` compares interleaved runs against a git ref (temporary worktree, at least 40 pairs).
+- `docs/PERF.md` is now the interleaved comparison against `main`.
+
+### Fixed
+- `test_configured_command_runs` no longer fails when the Python path contains a space (the test now quotes the path).
+- `re.split` with a positional `maxsplit` (DeprecationWarning on Python 3.13+) in range parsing.
+- `AIGATE_PROVENANCE` spellings such as `Agent` are treated like `agent` by the hook's `AIGATE_PYTHON` check and the loader.
+- Tests and snapshots no longer hardcode the version; `docs/RULES.md` no longer prints it.
+
+### Not run / known limits
+- macOS and the GitHub Actions workflow have never run. Tested by hand: Windows 11 and Ubuntu (WSL2) on Python 3.11-3.14.
+- Windows direct runs (`python aigate_lite.py ...`, not via a hook) are about 11-13% slower to start than 0.1.x; hooks are faster.
+
+## 0.2.0 — Phase 2: usability
+
+### Behaviour changes
+- Errors are one cause line plus a `fix:` line, without tracebacks (`--debug` or `AIGATE_DEBUG=1` shows them):
+  not a repository, git missing, unresolvable ranges (empty repo, shallow CI clone, unknown ref), invalid TOML
+  (with a Windows-path hint), unreachable registries (the specific reason), bad flags (`see: aigate-lite --help`),
+  the interpreter guard and a missing vendored script. Any unexpected error exits 2 (the hook blocks) with a short
+  "internal error" message. An empty side of `--range` (e.g. `HEAD~1..`) now means HEAD.
+- **Text output is compact by default** (JSON, SARIF and github formats unchanged): a one-line header, findings
+  grouped by file (most severe file first) with aligned `line  ACTION  rule  message` columns, each rule's fix
+  hint once, at most 25 findings in hooks (`+N more — run: aigate-lite check`), the summary line as before and
+  one final `next:` line. `-v` keeps the previous detailed view (now with the `next:` line instead of the
+  "Fix the findings…" sentence); `-q` is unchanged. Symbols fall back to ASCII (`X FIX`, `->`, `-`) when the
+  output cannot encode them, instead of printing `?`. Colour: `--color`, `NO_COLOR`, `FORCE_COLOR`, otherwise only
+  on a terminal; long lines are cut to the terminal width only on a terminal. Before / after:
+
+      aigate-lite 0.1.0 · staged changes · 1 file (+1 -0) · human · config: built-in defaults
+        FIX   security.eval                a.py:1
+              eval() runs code built at runtime
+              → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+      ✖ FIX · risk 30/100 · 1 fix · 0.1s — commit stopped
+        Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows how to allow it. Bypass…
+
+      aigate-lite 0.2.0 · staged · 1 file +1 −0 · human
+      a.py
+        1  FIX    security.eval  eval() runs code built at runtime
+                  → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+      ✖ FIX · risk 30/100 · 1 fix · 0.1s — commit stopped
+      next: fix it, or for this commit only (humans): AIGATE_ALLOW=security.eval git commit ...
+- **Fingerprints** are 16 hex characters and no longer depend on line numbers (they use the enclosing function
+  and the code, or the whole line for suppressions); identical findings in one file are numbered. `[[allow]]`
+  entries with 0.1 fingerprints (12 characters) keep matching during 0.2.x, each for the first matching
+  finding in its file; `check -v` and `doctor` show the new value. SARIF `aigateFingerprint/v1` now carries the
+  0.1 value. Renaming a function or file changes the fingerprints of its findings.
+- `aigate-lite init [--preset NAME] [--print] [--force]` detects languages, package managers, the test command
+  and private registries from tracked files, and writes only `preset`, detected `[deps]` keys and a commented
+  `[[commands]]` block (before: a fixed template with every key). `--force` keeps the old file as
+  `.aigate/lite.toml.bak`.
+- Hooks: a hook (vendored ones too, since 0.2.1) uses the interpreter pinned at install without probing, but if that
+  path is gone it looks for python3 / python / python3.14..3.11 / `py -3.14`..`py -3.11` / `py -3` and prints one hint to re-run `install` (before: the
+  hook failed). A candidate must run Python 3.11+ and print its version. When nothing qualifies the message
+  lists every candidate with its version or error, the fix, and that the commit/push is blocked (it used to
+  list only the names). Re-run `aigate-lite install` to get the new hooks.
+- `check --all` reports the risk score but no longer escalates a Fix verdict to Block (the verdict is the
+  strongest finding's action; JSON `escalated` is always false there). Staged, range and push checks still
+  escalate at risk 60.
+- `check --all` run by an AI agent uses the configuration committed in HEAD (before: built-in defaults,
+  because the "base" of a full scan is the empty tree). Uncommitted config edits still never apply to agents.
+- `security.shell` findings in Python files are fingerprinted by the call text instead of its line number,
+  so the fingerprint survives edits above it. `[[allow]]` entries that used an old `security.shell`
+  fingerprint no longer match until legacy fingerprints are supported (Phase 2 item 4).
+- Installed-package metadata is read one distribution at a time: a broken distribution is skipped
+  (before, it silently dropped every distribution after it); an unexpected error is no longer swallowed and
+  reports `gate.error` (fail closed).
+
+### Added
+- CI: `.github/workflows/ci.yml` runs pyflakes, pytest and the self-scan on {ubuntu, macos, windows} × Python
+  {3.11, 3.12, 3.13, 3.14}, with a non-blocking benchmark smoke on 3.12. Actions are pinned by commit SHA, the token is
+  read-only, and dev tools are pinned in `requirements-dev.txt`.
+- `check --format agent`: a short ASCII-only report for AI coding agents (`AIGATE verdict=… risk=… exit=…`, one
+  `<ACTION> <rule> <path>:<line> <message> | fix: <hint>` line per finding, `MORE <n>` when capped at 50 block/fix
+  and 20 warn lines, `END`). README: "Using with AI coding agents".
+- `aigate-lite fix [--yes] [--only rule,...]`: removes staged debugger lines (`breakpoint()`, `pdb.set_trace()`,
+  `debugger;` and a debugger import that is no longer used), un-focuses tests (`it.only(` → `it(`, `fit(` → `it(`)
+  and unstages env/key files (`git rm --cached`, file kept on disk, anchored `.gitignore` line). Without `--yes` it
+  only prints the diff. Refuses files with unstaged changes, symlinks and anything it cannot do exactly. Never run
+  by hooks.
+- `aigate-lite baseline [--include-secrets] [--prune]` writes `.aigate/baseline.json` (rule, path and
+  fingerprint of each finding a full offline scan reports today; no code, messages or timestamps). Matching
+  findings are hidden (`-v` shows them) and do not count. Secrets are never baselined unless
+  `--include-secrets`. Outside `check --all` a baseline only covers findings on edited lines that existed
+  before; new copies are reported. Refused for AI agents; agents read the baseline from the committed version.
+- JSON: optional `legacy_fingerprint` per finding. SARIF: `partialFingerprints` gains `aigateFingerprint/v2`.
+- Presets: `preset = "relaxed" | "balanced" | "strict"` (default balanced; new config key). Effective config
+  = built-in defaults, then the preset, then your own settings. Table in docs/RULES.md (generated by
+  `scripts/gen_docs.py`, which also lists every rule).
+- `aigate-lite doctor [--offline] [--format text|json]`: checks git (2.13+), the repository, the Python the
+  hooks will use, the hooks (and other hook managers, with the line to add), vendored-copy drift, config,
+  unapproved commands, the cache, registry reachability (proxy, TLS/SSL_CERT_FILE advice) and AI-agent
+  detection; exit 1 when something would make the hook fail.
+- Hooks honour `AIGATE_PYTHON` (path to the interpreter to use; ignored with a note while an AI agent runs the
+  commit, like `AIGATE_SKIP`). `install` prints `hook Python: <interpreter> (<version>): <why>`.
+- `.aigate/lite.toml` for this repository: one `[[allow]]` per intentional finding in the tool's own source
+  and test fixtures (exact rule, file and fingerprint each), so `check --all` on this repo has no fix/block.
+
+### Fixed
+- tests: `test_configured_command_runs` wrote a Windows interpreter path into a TOML basic string (`\U` is an
+  invalid escape, so the config was rejected); it now uses a TOML literal string. It still fails on Windows
+  when the interpreter path contains a space (see PROGRESS.md, BLOCKED).
+
+### Not run / known limits
+- CI matrix cells other than Windows/3.12 and Linux/3.12 (macOS, Python 3.11, 3.13, 3.14) were never executed; the
+  workflow has not run on GitHub.
+- `tests/test_gate.py::test_configured_command_runs` fails on Windows when the interpreter path contains a space
+  (needs path quoting, which decision D5 does not allow); it passes on Linux.
+- Hook start-up on Windows is about 13-15% slower than at phase start (a larger script is recompiled on every run);
+  Windows bytecode reuse is not implemented.
+- (0.2.0 only) Item 1 was partial; versioned candidates and vendored pinning arrive in 0.2.1.
+- The version literal in existing tests (`test_bytecode_cache`, `test_cache`, `test_perf`) was bumped to 0.2.0.
+
 ## Unreleased (Phase 1 → 1.0)
 
 ### Behaviour changes

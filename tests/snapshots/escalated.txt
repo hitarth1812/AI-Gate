@@ -1,0 +1,12 @@
+aigate-lite <VERSION> · staged · 2 files +12 −3 · human
+app/m0.py
+  5  FIX    security.shell  subprocess.run(...) runs through a shell
+            → Pass an argument list without a shell.
+app/m1.py
+  5  FIX    security.shell  subprocess.run(...) runs through a shell
+app/m2.py
+  5  FIX    security.shell  subprocess.run(...) runs through a shell
+app/m3.py
+  5  FIX    security.shell  subprocess.run(...) runs through a shell
+✖ BLOCK (risk score escalated it) · risk 64/100 · 4 fix · 0.1s — commit stopped
+next: fix the 4 FIX lines above (a false positive? aigate-lite explain <rule>)

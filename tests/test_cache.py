@@ -3,7 +3,7 @@ import os
 import shutil
 import sys
 
-from conftest import SCRIPT, find
+from conftest import SCRIPT, aigate, find
 
 AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
 CLEAN = "import json\n\n\ndef dump(x):\n    return json.dumps(x)\n"
@@ -67,7 +67,7 @@ def test_tool_version_or_source_change_invalidates(repo, tmp_path):
         fh.write("# a different build\n")
     res, prof = profiled(repo, script=copy)
     assert prof.get("cache_hits", 0) == 0 and find(res, "secrets.hardcoded")
-    text = copy.read_text(encoding="utf-8").replace('__version__ = "0.1.0"', '__version__ = "0.1.1"')
+    text = copy.read_text(encoding="utf-8").replace(f'__version__ = "{aigate.__version__}"', '__version__ = "9.9.9"')
     copy.write_text(text, encoding="utf-8")
     assert profiled(repo, script=copy)[1].get("cache_hits", 0) == 0
 

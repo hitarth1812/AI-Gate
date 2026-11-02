@@ -1,0 +1,11 @@
+aigate-lite <VERSION> · staged · 2 files +12 −3 · human
+app/a.py
+   7  FIX    security.eval   eval() runs code built at runtime
+             → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+  30  FIX    security.eval   eval() runs code built at runtime
+app/b.py
+   2  WARN   code.todo       # TODO later
+  12  FIX    security.shell  os.system(...) runs through a shell
+             → Pass an argument list without a shell.
+✖ FIX · risk 50/100 · 3 fix · 1 warn · 0.1s — commit stopped
+next: fix the 3 FIX lines above (a false positive? aigate-lite explain <rule>)

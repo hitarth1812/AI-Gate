@@ -1,0 +1,6 @@
+aigate-lite <VERSION> · staged · 2 files +12 −3 · AI agent (CLAUDECODE)
+app/a.py
+  7  FIX    security.eval  eval() runs code built at runtime
+            → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+✖ FIX · risk 36/100 · 1 fix · 0.1s — commit stopped
+next: fix the 1 FIX line above (a false positive? aigate-lite explain <rule>)
