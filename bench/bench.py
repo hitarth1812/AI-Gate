@@ -377,7 +377,7 @@ def markdown(res, base, cmd) -> str:
 
 # ---------------------------------------------------------------------------- interleaved comparison
 
-AGAINST_MEASURES = ("startup", *SCENARIOS)
+AGAINST_MEASURES = ("startup", "startup-direct", *SCENARIOS)
 
 
 def worktree_script(ref):
@@ -397,23 +397,36 @@ def drop_worktree(tmp):
     subprocess.run(["git", "-C", ROOT, "worktree", "prune"], capture_output=True, text=True)
 
 
+def hook_style(script):
+    """The loader this script's hooks start it with on this OS, or None (they then run the script directly)."""
+    loader = hook_loader(script)
+    return loader if loader and (os.name != "nt" or "NT = os.name" in loader) else None
+
+
 def command_for(measure, py, script):
-    if measure == "startup":
-        return [py, script, "--version"]
-    if measure == "startup-hook":
-        return [py, "-P", "-c", hook_loader(script), script, "--version"]
-    return [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json"]
+    """Commands run the way an installed hook runs them (through the bytecode loader where the build has one);
+    `startup-direct` is `python script --version`, the way a person types it."""
+    args = ["--version"] if measure.startswith("startup") else         ["check", "--staged", "--offline", "--no-commands", "--format", "json"]
+    loader = None if measure == "startup-direct" else hook_style(script)
+    return [py, "-P", "-c", loader, script, *args] if loader else [py, script, *args]
 
 
 def measure_against(old, new, pairs, py) -> dict:
     """Alternate old and new runs of each measure (old first on even pairs, new first on odd ones)."""
+    import tempfile
     repos = build_fixtures()
     env = base_env()
     out = {}
-    names = list(AGAINST_MEASURES)
-    if os.name != "nt" and hook_loader(old) and hook_loader(new):
-        names.insert(1, "startup-hook")
-    for name in names:
+    # the loader refuses a cache dir inside the repository (bench/.work is), so use one outside it
+    env["AIGATE_CACHE_DIR"] = tempfile.mkdtemp(prefix="aigate-bench-cache-")
+    try:
+        return _measure_against(old, new, pairs, py, repos, env, out)
+    finally:
+        remove_tree(env["AIGATE_CACHE_DIR"])
+
+
+def _measure_against(old, new, pairs, py, repos, env, out) -> dict:
+    for name in AGAINST_MEASURES:
         cwd = repos.get(name, ROOT)
         cmds = {"old": command_for(name, py, old), "new": command_for(name, py, new)}
         for c in cmds.values():
@@ -436,6 +449,8 @@ def against_gates(res) -> list:
     for name, row in res.items():
         o, n = row["old"], row["new"]
         med, p95 = n["median_ms"] / o["median_ms"] - 1, n["p95_ms"] / o["p95_ms"] - 1
+        if name == "startup-direct":
+            continue                                   # informational: not how hooks start the gate
         if name in ("startup", "A"):
             if med > 0.05:
                 fails.append(f"{name}: median {o['median_ms']} -> {n['median_ms']} ms ({med * 100:+.1f}%, limit +5%)")
@@ -444,6 +459,8 @@ def against_gates(res) -> list:
                 fails.append(f"{name}: median {med * 100:+.1f}% / p95 {p95 * 100:+.1f}% (limit +15% for both)")
         for counter in ("git_calls", "blobs_read"):
             a, b = (o.get("counters") or {}).get(counter), (n.get("counters") or {}).get(counter)
+            if name == "E" and counter == "blobs_read":
+                continue               # E has a baseline file that older builds ignore: not like-for-like
             if a is not None and b is not None and b > a:
                 fails.append(f"{name}: {counter} rose from {a} to {b} (hard gate)")
     return fails
@@ -472,7 +489,9 @@ def markdown_against(ref, attempts, cmd) -> str:
            f"Each row alternates runs of `{ref}` (checked out into a temporary worktree) and the working tree, so slow drift "
            "on the machine hits both sides equally. Scenarios: A = 1 file / 20 lines; B = 20 files / 400 lines (Python + JS); "
            "C = 300-file change; D = the A change in a 50,000-file repo; E = A with a 1,000-entry baseline present. "
-           "`startup-hook` (POSIX only) is `--version` started the way a hook starts the gate.", "",
+           "Rows run the way an installed hook starts the gate (through the bytecode loader when the build has one for this OS); "
+           "`startup-direct` is `python aigate_lite.py --version` as typed by a person and is not gated. "
+           "E blob counts are not gated: only E has a baseline file, which older builds do not read.", "",
            "Gates: startup and A median <= +5%; B-E median and p95 <= +15%; git calls and blobs read never rise."]
     for i, a in enumerate(attempts, 1):
         out += ["", f"## Attempt {i} ({a['pairs']} pairs per row): {'PASS' if not a['failures'] else 'FAIL'}", "",

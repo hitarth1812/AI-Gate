@@ -266,3 +266,17 @@ def test_discovery_mirror_walks_the_same_candidates_in_the_same_order():
                       "py -3.14", "py -3.13", "py -3.12", "py -3.11", "py -3"]
     text = aigate.hook_script("pre-commit", True, "/x/python", "/x/a.py")
     assert " ".join(f"'{label}'" if " " in label else label for label in labels) in text
+
+
+@needs_sh
+def test_aigate_python_is_ignored_for_any_spelling_of_the_agent_provenance(repo, tmp_path):
+    install_vendored(repo)
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    custom = tmp_path / "custom"
+    custom.write_bytes(("#!/bin/sh\n" + logged(log, "custom") + "\n").encode())
+    custom.chmod(0o755)
+    bin_dir = fake_bin(tmp_path, {"python3": logged(log, "python3")})
+    proc = run_hook(repo, "pre-commit", bin_dir, env={"AIGATE_PYTHON": custom.as_posix(), "AIGATE_PROVENANCE": " Agent "})
+    assert "AIGATE_PYTHON is ignored" in proc.stderr
+    assert "custom" not in {c.split()[0] for c in calls(log)}

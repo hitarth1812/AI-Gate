@@ -1372,3 +1372,43 @@ Store alias stubs are skipped by the existing probe (must print a version and ex
 No old assertion was removed or loosened. New tests (test_python_discovery.py): python3=3.10 → python3.12; newest versioned wins; `py -3.N` asked newest-first and stops at the first working; vendored install pins and uses the pin without probing; removed vendored pin rediscovers with a hint; Python mirror order equals the hook's.
 Verified the new tests fail against the previous aigate_lite.py (20 failed there). Suites: Windows 3.12 hooks+discovery 29 passed; Linux 3.12 (uv) full 325 passed.
 Docs fixed after review: README line on hooks, CHANGELOG stale lines.
+
+## P2.1 Item 6 ⚠ — one bytecode loader for every OS (F4)
+Design: the Phase 1 POSIX loader is unified with a Windows branch (`NT = os.name == "nt"`): same hash-checked marshal cache (header = magic + source hash),
+cache at `%LOCALAPPDATA%\aigate-lite\pycache` on Windows (still `$AIGATE_CACHE_DIR`, then XDG/`~/.cache` on POSIX); POSIX keeps fd-pinned dir, uid/mode/nlink checks.
+Windows requires only a real directory (no symlink/junction leaf) and a regular file; no ACL check (F4).
+New: the module is made with `spec_from_file_location` + `module_from_spec` (proper `__spec__`/`__file__`); `sys.path` is no longer changed; skipped entirely
+(no read, no write) when an agent variable or `AIGATE_PROVENANCE=agent` (any case/whitespace) is set; refused when the cache dir is not absolute, inside the cwd, or inside the script's directory.
+**Deliberate deviation from the F4 wording:** `sys.pycache_prefix` is NOT set. It would redirect every stdlib `.pyc` into the user cache (more trust, slower first run) and is
+validated by mtime; the loader's own cache is hash-validated and covers the one module that matters. The planted-`.pyc` and shadowing requirements are met without it.
+Hooks now use the loader on Windows too (`-P -c "$LOADER"`), so the Windows hook no longer recompiles the script every run.
+Independent review: POSIX loader unchanged in behaviour; two low defects fixed (deleted cwd crashed the loader; `AIGATE_PROVENANCE` compared exactly in the loader and in the sh hook).
+`tests/test_bytecode_cache.py` changes, old → new (nothing weakened, per review):
+- `(1 if POSIX else 0)` → `1` (2 places) and the relative-cache test now also sets `LOCALAPPDATA` and looks in the platform's default dir.
+- `test_hook_uses_the_loader_only_on_posix` → `test_hook_uses_the_loader_on_every_os` (asserts `-P -c` and `LOADER=` instead of their absence on Windows).
+- `test_symlinked_script_puts_its_real_directory_on_sys_path` → `..._never_imports_from_the_link_directory` (same body; sys.path insertion was removed by F4, the shadowing property is what it always checked).
+- `@posix_only` removed from 4 tests that do not depend on POSIX permissions (hash check, unchecked-pyc replaced, non-code payload, pruning); the 0700 assertion became POSIX-only inside its test; `posix_sh` → `needs_sh`.
+New tests: agent variables == `BUILTIN_AGENT_ENV`; every agent variable skips cache read and write (a planted .pyc in the cache is neither loaded nor replaced; a fresh cache dir is never created);
+provenance spellings; cache dir in the repo / beside the script refused and not created; sys.path unchanged and module has a spec; Windows default dir; deleted cwd.
+Mutation checks: removing the agent condition fails 5 tests; removing the inside-repo condition fails 2 tests.
+Suites: Windows 3.12 329 passed, 11 skipped; Linux 3.12 (uv) 339 passed, 1 skipped. Self-scan flagged my first `skipif` on Linux (`tests.skip_added`); replaced by a module-level marker like the existing ones.
+
+Bench (interleaved, after fixing the harness: `--against` uses a cache dir outside the repo because the loader now, correctly, refuses one inside it; the first run with
+`bench/.work/cache` showed +30-60% because the cache was refused — kept here as a record):
+Real output of `py -3.12 bench/bench.py --against main` (40 pairs):
+```
+python 3.12.10 on Windows-11-10.0.26300-SP0; main (39fb504) vs aigate_lite.py; 40 interleaved pairs per row
+
+attempt 1 (40 pairs):
+measure         main med   new med   change    main p95  new p95   change    git o/n  blobs o/n
+startup            167.0     119.6   -28.4%       175.5    128.2   -27.0%                      
+startup-direct      165.6     186.5   +12.6%       174.1    192.5   +10.6%                      
+A                  324.7     275.9   -15.0%       345.1    289.2   -16.2%        6/6        1/1
+B                  391.1     347.1   -11.3%       417.5    365.1   -12.6%        7/7      21/21
+C                  724.5     674.7    -6.9%       808.4    703.0   -13.0%        7/7    301/301
+D                  351.8     304.2   -13.5%       365.7    333.7    -8.8%        6/6        1/1
+E                  332.2     283.2   -14.8%       344.1    306.6   -10.9%        6/6        1/3
+Gates: PASS
+```
+`startup` and A–E run the way a hook starts the gate (main on Windows: the script directly; new: through the loader). `startup-direct` (`python aigate_lite.py --version`, as typed by a person) is
+not gated and is +12.6% / +10.6%: the script is ~30% larger and a directly-run script is compiled every time. E blobs 1 -> 3 is not gated: only E has a baseline file, which main does not read.

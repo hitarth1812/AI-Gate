@@ -17,9 +17,10 @@ VERSION = aigate.__version__
 
 POSIX = os.name != "nt"
 LOADER = aigate.HOOK_LOADER
-posix_only = pytest.mark.skipif(not POSIX, reason="bytecode reuse is POSIX-only (Windows ACLs not verifiable)")
+posix_only = pytest.mark.skipif(not POSIX, reason="needs POSIX ownership and mode bits")
 not_root = pytest.mark.skipif(POSIX and os.geteuid() == 0, reason="root ignores directory permissions")
-posix_sh = pytest.mark.skipif(not POSIX or shutil.which("sh") is None, reason="POSIX hooks only")
+windows_only = pytest.mark.skipif(POSIX, reason="the Windows default cache location")
+needs_sh = pytest.mark.skipif(shutil.which("sh") is None, reason="no POSIX sh on this machine")
 
 
 def copy_script(tmp_path, folder="gate"):
@@ -80,17 +81,17 @@ def test_loader_output_matches_a_direct_run(repo, tmp_path):
         want = normal(direct(script, env, *args, cwd=repo.path))
         assert normal(via_loader(script, env, *args, cwd=repo.path)) == want            # cold bytecode cache
         assert normal(via_loader(script, env, *args, cwd=repo.path)) == want            # warm
-    assert len(pycs(cache)) == (1 if POSIX else 0)
+    assert len(pycs(cache)) == 1
 
 
-@posix_only
 def test_bytecode_is_checked_hash_in_a_private_dir_and_reused(repo, tmp_path):
     script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
     env = env_for(repo, cache)
     via_loader(script, env, "--version")
     [pyc] = pycs(cache)
     assert pyc.read_bytes()[4:8] == b"\x03\x00\x00\x00"                     # hash-based, checked against source
-    assert stat.S_IMODE(os.stat(cache / "pycache").st_mode) == 0o700
+    if POSIX:
+        assert stat.S_IMODE(os.stat(cache / "pycache").st_mode) == 0o700
     before = os.stat(pyc).st_mtime_ns
     assert via_loader(script, env, "--version").stdout.strip() == f"aigate-lite {VERSION}"
     assert os.stat(pyc).st_mtime_ns == before                                # reused, not rewritten
@@ -135,7 +136,7 @@ def test_paths_with_spaces_and_unicode(repo, tmp_path):
     for _ in range(2):
         proc = via_loader(script, env, "--version")
         assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, f"aigate-lite {VERSION}", "")
-    assert len(pycs(cache)) == (1 if POSIX else 0)
+    assert len(pycs(cache)) == 1
 
 
 def test_bytecode_planted_next_to_the_script_is_never_run(repo, tmp_path):
@@ -147,7 +148,6 @@ def test_bytecode_planted_next_to_the_script_is_never_run(repo, tmp_path):
         assert "PWNED" not in proc.stdout and proc.stdout.strip() == f"aigate-lite {VERSION}"
 
 
-@posix_only
 def test_unchecked_bytecode_in_the_cache_is_replaced_not_run(repo, tmp_path):
     script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
     env = env_for(repo, cache)
@@ -217,7 +217,6 @@ def test_writable_or_hard_linked_pyc_is_not_trusted(repo, tmp_path):
     assert clean_version(via_loader(script, env, "--version"))
 
 
-@posix_only
 def test_a_payload_that_is_not_code_falls_back_silently(repo, tmp_path):
     script, cache, env, pyc = warmed(repo, tmp_path)
     forge(script, pyc, 42)
@@ -240,14 +239,18 @@ def test_relative_cache_dirs_are_never_used(repo, tmp_path):
     script, home = copy_script(tmp_path), tmp_path / "home"
     base = {k: v for k, v in repo.env.items() if k != "AIGATE_CACHE_DIR"}
     for extra in ({"AIGATE_CACHE_DIR": "rel-cache"}, {"XDG_CACHE_HOME": "rel-xdg"}):
-        proc = via_loader(script, {**base, "HOME": str(home), **extra}, "--version", cwd=repo.path)
+        local = {"LOCALAPPDATA": str(home / "AppData" / "Local")}              # Windows' default cache base
+        proc = via_loader(script, {**base, "HOME": str(home), **local, **extra}, "--version", cwd=repo.path)
         assert clean_version(proc)
     assert repo.git("status", "--porcelain", "--ignored").stdout == ""
-    assert len(pycs(home / ".cache" / "aigate-lite")) == (1 if POSIX else 0)   # relative XDG is ignored
+    default = home / ".cache" / "aigate-lite" if POSIX else home / "AppData" / "Local" / "aigate-lite"
+    assert len(pycs(default)) == 1                                           # relative XDG is ignored
 
 
 @posix_only
-def test_symlinked_script_puts_its_real_directory_on_sys_path(repo, tmp_path):
+def test_symlinked_script_never_imports_from_the_link_directory(repo, tmp_path):
+    # was ..._puts_its_real_directory_on_sys_path: F4 removed the sys.path insertion; the property that matters
+    # (a shadowing module beside the symlink is never imported, directly or through the loader) is unchanged
     real = copy_script(tmp_path, "real")
     links = tmp_path / "bin"
     links.mkdir()
@@ -258,7 +261,6 @@ def test_symlinked_script_puts_its_real_directory_on_sys_path(repo, tmp_path):
         assert clean_version(run(links / "aigate_lite.py", env, "--version"))
 
 
-@posix_only
 def test_old_bytecode_is_pruned_when_a_new_file_is_written(repo, tmp_path):
     script, cache, env, pyc = warmed(repo, tmp_path)
     old, recent = pyc.with_name("aigate_lite.0.old.pyc"), pyc.with_name("aigate_lite.1.recent.pyc")
@@ -272,12 +274,11 @@ def test_old_bytecode_is_pruned_when_a_new_file_is_written(repo, tmp_path):
     assert not old.exists() and not stale_tmp.exists() and recent.exists() and pyc.exists()
 
 
-def test_hook_uses_the_loader_only_on_posix():
+def test_hook_uses_the_loader_on_every_os():
+    # was test_hook_uses_the_loader_only_on_posix (F4: Windows hooks reuse bytecode too)
     for vendored in (True, False):
         text = aigate.hook_script("pre-commit", vendored, sys.executable, str(SCRIPT))
-        assert ("-P -c" in text) == POSIX
-        if not POSIX:
-            assert "LOADER" not in text
+        assert "-P -c" in text and "LOADER=" in text
 
 
 SHADOW = 'print("PWNED")\n'
@@ -295,7 +296,7 @@ def test_modules_in_the_repo_root_cannot_shadow_the_stdlib(repo, tmp_path):
         assert "PWNED" not in via_loader(script, env, *args, cwd=repo.path).stdout
 
 
-@posix_sh
+@needs_sh
 def test_installed_hook_reuses_bytecode_and_ignores_the_repo_root(repo, tmp_path):
     from test_hooks import REAL, fake_bin, install_vendored, run_hook
     install_vendored(repo)
@@ -308,3 +309,80 @@ def test_installed_hook_reuses_bytecode_and_ignores_the_repo_root(repo, tmp_path
         assert proc.returncode == 0 and "PWNED" not in proc.stdout, proc.stdout + proc.stderr
     from pathlib import Path
     assert len(pycs(Path(repo.env["AIGATE_CACHE_DIR"]))) == 1
+
+
+# ---------------------------------------------------------------- F4: agents, repository paths, one loader for all OSes
+
+def test_loader_agent_variables_match_the_gates_list():
+    m = re.search(r"^AGENT_ENV = \((.*?)\)$", LOADER, re.M)
+    assert tuple(re.findall(r'"([A-Z_]+)"', m.group(1))) == aigate.BUILTIN_AGENT_ENV
+
+
+@pytest.mark.parametrize("var", [{"CLAUDECODE": "1"}, {"AI_AGENT": "x"}, {"GEMINI_CLI": "1"}, {"AIGATE_AGENT": "1"},
+                                 {"AIGATE_PROVENANCE": "agent"}])
+def test_agents_never_read_or_write_the_bytecode_cache(repo, tmp_path, var):
+    script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
+    env = {k: v for k, v in env_for(repo, cache).items() if k not in aigate.BUILTIN_AGENT_ENV}
+    via_loader(script, env, "--version")                                     # a human run fills the cache
+    [pyc] = pycs(cache)
+    plant(tmp_path, str(pyc))                                                # and someone then replaces it
+    before = pyc.read_bytes()
+    proc = via_loader(script, {**env, **var}, "--version")
+    assert "PWNED" not in proc.stdout and proc.stdout.strip() == f"aigate-lite {VERSION}"
+    assert pyc.read_bytes() == before                                        # not read (a human run would replace it)
+    assert pycs(cache) == [pyc]                                              # and nothing new written
+    fresh = tmp_path / "fresh-cache"
+    assert clean_version(via_loader(script, {**env, **var, "AIGATE_CACHE_DIR": str(fresh)}, "--version"))
+    assert not fresh.exists()
+
+
+def test_a_cache_dir_inside_the_repository_is_refused(repo, tmp_path):
+    script = copy_script(tmp_path)
+    for inside in (repo.path / ".cache", repo.path / "deep" / "er"):
+        proc = via_loader(script, env_for(repo, inside), "--version", cwd=repo.path)
+        assert clean_version(proc)
+        assert not inside.exists()                                           # not even created
+    assert repo.git("status", "--porcelain", "--ignored").stdout == ""
+
+
+def test_a_cache_dir_beside_the_script_is_refused(repo, tmp_path):
+    script = copy_script(tmp_path, "repo-like/.aigate")
+    cache = script.parent / "pyc"
+    assert clean_version(via_loader(script, env_for(repo, cache), "--version", cwd=tmp_path))
+    assert not cache.exists()
+
+
+def test_the_loader_does_not_change_sys_path_and_gives_the_module_a_spec(repo, tmp_path):
+    script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
+    code = LOADER.replace("sys.exit(module.main())",
+                          "print(sys.path[:1], module.__spec__.name, module.__spec__.origin == script)")
+    proc = subprocess.run([sys.executable, "-P", "-c", code, str(script), "--version"], env=env_for(repo, cache),
+                          text=True, capture_output=True)
+    assert proc.returncode == 0, proc.stderr
+    last = proc.stdout.strip().splitlines()[-1]
+    assert str(script.parent) not in last and last.endswith("aigate_lite True")
+
+
+@windows_only
+def test_windows_default_cache_dir_comes_from_localappdata(repo, tmp_path):
+    script, local = copy_script(tmp_path), tmp_path / "Local"
+    env = {k: v for k, v in repo.env.items() if k != "AIGATE_CACHE_DIR"}
+    assert clean_version(via_loader(script, {**env, "LOCALAPPDATA": str(local)}, "--version", cwd=repo.path))
+    assert len(pycs(local / "aigate-lite")) == 1
+
+
+@pytest.mark.parametrize("value", ["Agent", " AGENT ", "agent\t"])
+def test_provenance_spelling_variants_still_count_as_an_agent(repo, tmp_path, value):
+    script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
+    env = {k: v for k, v in env_for(repo, cache).items() if k not in aigate.BUILTIN_AGENT_ENV}
+    assert clean_version(via_loader(script, {**env, "AIGATE_PROVENANCE": value}, "--version"))
+    assert not cache.exists()
+
+
+@posix_only
+def test_a_deleted_working_directory_just_disables_the_cache(repo, tmp_path):
+    script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
+    driver = ("import os, sys; d = sys.argv.pop(1); os.mkdir(d); os.chdir(d); os.rmdir(d); exec(" + repr(LOADER) + ")")
+    proc = subprocess.run([sys.executable, "-P", "-c", driver, str(tmp_path / "gone"), str(script), "--version"],
+                          env=env_for(repo, cache), text=True, capture_output=True)
+    assert proc.stdout.strip() == f"aigate-lite {VERSION}" and "Traceback" not in proc.stderr, proc.stderr
