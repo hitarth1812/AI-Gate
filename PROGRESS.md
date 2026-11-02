@@ -1358,3 +1358,17 @@ Gates: FAIL
 Reading: direct-script start-up is +12% vs main (the script is ~30% larger and Windows recompiles it on each run) and A is +6-7%. These are real
 regressions to address in item 6 (hooks reuse bytecode). E rises 1 -> 3 blobs because E is the only scenario with a committed baseline: main has no
 baseline support, so there is no like-for-like count; E is therefore exempted from the blob gate (see item 6/8 for the final decision).
+
+## P2.1 Item 5 ⚠ — hook discovery (F2) and vendored pinning
+Order now: `$AIGATE_PYTHON` (humans only) → pinned (also vendored; lives in `.git/hooks`) → python3 → python → python3.14..3.11 → py -3.14..-3.11 → py -3.
+Store alias stubs are skipped by the existing probe (must print a version and exit 0).
+`tests/test_hooks.py` changes (F2), each old → new:
+1. `test_vendored_hook_tries_python3_python_then_py_launcher`: assertion `"for c in python3 python 'py -3'; do" in text` →
+   `"for c in python3 python python3.14 python3.13 python3.12 python3.11 'py -3.14' 'py -3.13' 'py -3.12' 'py -3.11' 'py -3'; do" in text`
+   (old three keep their relative order; the other assertions in that test are unchanged).
+2. `fake_bin`: now also writes "not installed" stubs for python3.11-3.14, so a real /usr/bin/python3.12 can never be picked up (same intent as the old "never fall through" comment).
+3. `install_vendored(repo, pinned=False)`: installs now pin, so by default the helper points the pin of both hooks at a missing path; every old scenario therefore still runs discovery over PATH. `unpin()` is new.
+   Independent review found it first only unpinned pre-commit (pre-push scenario then skipped discovery); fixed, both hooks are unpinned.
+No old assertion was removed or loosened. New tests (test_python_discovery.py): python3=3.10 → python3.12; newest versioned wins; `py -3.N` asked newest-first and stops at the first working; vendored install pins and uses the pin without probing; removed vendored pin rediscovers with a hint; Python mirror order equals the hook's.
+Verified the new tests fail against the previous aigate_lite.py (20 failed there). Suites: Windows 3.12 hooks+discovery 29 passed; Linux 3.12 (uv) full 325 passed.
+Docs fixed after review: README line on hooks, CHANGELOG stale lines.
