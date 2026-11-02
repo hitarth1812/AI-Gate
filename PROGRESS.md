@@ -1412,3 +1412,10 @@ Gates: PASS
 ```
 `startup` and A–E run the way a hook starts the gate (main on Windows: the script directly; new: through the loader). `startup-direct` (`python aigate_lite.py --version`, as typed by a person) is
 not gated and is +12.6% / +10.6%: the script is ~30% larger and a directly-run script is compiled every time. E blobs 1 -> 3 is not gated: only E has a baseline file, which main does not read.
+
+## P2.1 Item 7 — README truth pass
+- Added a "Tested on" line listing only what ran (Windows 11 and Ubuntu/WSL2, Python 3.11-3.14 each; macOS not run; CI workflow "CI pending", never run on GitHub).
+- "First success in under 2 minutes" reworded to "First success in a few commands": the number depended on reading and typing time, which I cannot measure.
+  What I did measure (Windows 11, Python 3.12, fresh `git init` repo, `install --vendor`, `doctor`, a staged fake AWS key, `git commit`), command time only:
+  `elapsed: 3.2115390300750732 s`; the commit was stopped with `secrets.hardcoded` (BLOCK, risk 45.6/100) and `doctor` printed `next: all good; commit as usual`.
+  (The shell was an AI-agent shell, `CLAUDECODE` set, so the report said "AI agent"; the wall-clock time excludes anyone reading the README.)
