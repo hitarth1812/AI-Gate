@@ -4255,7 +4255,7 @@ def plan_runs(repo, args, env) -> list:
         return [("full tree", repo.empty_tree(), head, [])]
     if args.range:
         spec = args.range
-        a, b = re.split(r"\.\.\.?", spec, 1) if ".." in spec else (spec, "HEAD")
+        a, b = re.split(r"\.\.\.?", spec, maxsplit=1) if ".." in spec else (spec, "HEAD")
         a, b = a or "HEAD", b or "HEAD"                 # git reads an empty side as HEAD
         head, start = repo.commit(b), repo.commit(a)
         if not head or not start:

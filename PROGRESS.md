@@ -1299,3 +1299,23 @@ for Windows hooks); decision needed from the human.
 - Final: Linux (WSL, 3.12) 319 passed; Windows 3.12 303 passed / 15 skipped with the known D5 test deselected;
   pyflakes clean; self-scan WARN, 0 block, 0 fix; perf gates PASS.
 - Removed `~/.aigate-cleanup-deps` and `~/aigate-cleanup-linux` in WSL.
+
+# Phase 2.1 (fix-up before merge)
+
+## P2.1 Items 1-2 — F3 version-agnostic tests, F1 quoted interpreter path
+- Tests read `aigate.__version__`; snapshots store `<VERSION>`; `scripts/gen_docs.py` no longer prints the version into `docs/RULES.md`.
+- `quoted_executable()` in `tests/test_gate.py` quotes `sys.executable` (list2cmdline on Windows, shlex.quote on POSIX).
+- Proof: with `__version__` scratch-bumped to 9.9.9 (not committed), Windows 3.12 (interpreter path `C:\Users\Hitarth Khatiwala\...`, contains a space):
+  `304 passed, 15 skipped in 267.50s` — 0 failures.
+
+## P2.1 Item 3 — Python matrix (uv)
+`uv python install 3.11 3.13 3.14` (Windows) and the same in WSL (uv 0.13.6 installed there). Command per cell:
+`uv run --no-project --python 3.X --with pytest --with pyflakes python -m pytest -q`.
+| OS | 3.11 | 3.12 | 3.13 | 3.14 |
+|---|---|---|---|---|
+| Windows 11 | 304 passed, 15 skipped | 304 passed, 15 skipped (py launcher, no uv) | 304 passed, 15 skipped | 304 passed, 15 skipped |
+| Linux (WSL2) | 319 passed | 319 passed | 319 passed | 319 passed |
+First run found one warning from our code on 3.13/3.14: `re.split(..., spec, 1)` positional `maxsplit` (aigate_lite.py:4258), fixed with `maxsplit=1`.
+Second run with `-W error::DeprecationWarning` (pytest and interpreter): Windows 3.11/3.13/3.14 and Linux 3.11-3.14 all green
+(304 / 319 passed). Windows 3.12 was not re-run with the flag. No third-party warnings were seen.
+macOS was not run (no machine).
