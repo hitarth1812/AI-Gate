@@ -22,8 +22,8 @@ git rm --cached -q leak.py && rm leak.py           # clean up
 python3 .aigate/aigate_lite.py check --all         # optional: audit everything already committed
 ```
 
-On Windows use `py -3` instead of `python3`; the installed hooks find `python3`, `python` or `py -3`
-themselves.
+On Windows use `py -3` instead of `python3`; the installed hooks use the interpreter that ran `install` (pinned in `.git/hooks`, never committed) and, if
+that is gone, look for `python3`, `python`, `python3.14`..`python3.11`, `py -3.14`..`py -3.11`, then `py -3`.
 
 ## Quick start
 

@@ -38,8 +38,8 @@
   and private registries from tracked files, and writes only `preset`, detected `[deps]` keys and a commented
   `[[commands]]` block (before: a fixed template with every key). `--force` keeps the old file as
   `.aigate/lite.toml.bak`.
-- Hooks: a non-vendored hook still uses the interpreter pinned at install without probing, but if that path
-  is gone it now looks for python3 / python / `py -3` and prints one hint to re-run `install` (before: the
+- Hooks: a hook (vendored ones too, since 0.2.1) uses the interpreter pinned at install without probing, but if that
+  path is gone it looks for python3 / python / python3.14..3.11 / `py -3.14`..`py -3.11` / `py -3` and prints one hint to re-run `install` (before: the
   hook failed). A candidate must run Python 3.11+ and print its version. When nothing qualifies the message
   lists every candidate with its version or error, the fix, and that the commit/push is blocked (it used to
   list only the names). Re-run `aigate-lite install` to get the new hooks.
@@ -97,7 +97,7 @@
   (needs path quoting, which decision D5 does not allow); it passes on Linux.
 - Hook start-up on Windows is about 13-15% slower than at phase start (a larger script is recompiled on every run);
   Windows bytecode reuse is not implemented.
-- Item 1 is partial: versioned `python3.N` candidates and pinning for vendored installs conflict with frozen tests.
+- (0.2.0 only) Item 1 was partial; versioned candidates and vendored pinning arrive in 0.2.1.
 - The version literal in existing tests (`test_bytecode_cache`, `test_cache`, `test_perf`) was bumped to 0.2.0.
 
 ## Unreleased (Phase 1 → 1.0)

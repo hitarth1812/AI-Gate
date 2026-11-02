@@ -196,3 +196,73 @@ def test_mirror_ignores_aigate_python_for_agents():
                                     probe=lambda c: (c == ["python3"], "3.12.0"))
     assert choice.command == ["python3"] and choice.tried[0][0] == "AIGATE_PYTHON"
     assert aigate.discover_python({"AIGATE_PYTHON": "/x/py"}, probe=lambda c: (True, "")).command == []
+
+
+# ---------------------------------------------------------------- F2: versioned names and vendored pinning
+
+@needs_sh
+def test_a_python3_that_is_too_old_gives_way_to_python3_12(repo, tmp_path):
+    install_vendored(repo)
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    stubs = {"python3": OLD, "python": OLD, "python3.12": logged(log, "python3.12")}
+    proc = run_hook(repo, "pre-commit", fake_bin(tmp_path, stubs))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert calls(log) and all(c.startswith("python3.12 ") for c in calls(log))
+
+
+@needs_sh
+def test_the_newest_versioned_python_wins(repo, tmp_path):
+    install_vendored(repo)
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    stubs = {"python3": OLD, "python3.11": logged(log, "python3.11"), "python3.13": logged(log, "python3.13")}
+    proc = run_hook(repo, "pre-commit", fake_bin(tmp_path, stubs))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert {c.split()[0] for c in calls(log)} == {"python3.13"}
+
+
+@needs_sh
+def test_py_launcher_is_asked_for_a_specific_version_before_plain_py_3(repo, tmp_path):
+    install_vendored(repo)
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    launcher = (f'echo "py $1" >> \'{log.as_posix()}\'\n'
+                'case "$1" in -3.12) shift; exec \'' + REAL_PY + '\' "$@";; *) echo "No suitable Python" >&2; exit 103;; esac')
+    proc = run_hook(repo, "pre-commit", fake_bin(tmp_path, {"python3": BROKEN, "python": BROKEN, "py": launcher}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    tried = [c for c in calls(log) if c.startswith("py ")]
+    assert tried[:3] == ["py -3.14", "py -3.13", "py -3.12"]          # newest first, stops at the first that works
+    assert "py -3.11" not in tried and "py -3" not in tried
+
+
+@needs_sh
+def test_vendored_install_pins_the_interpreter_and_uses_it_without_probing(repo, tmp_path):
+    install_vendored(repo, pinned=True)
+    hook = (repo.path / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")
+    assert f"PY='{sys.executable}'".replace("\\", "/") in hook and "PINNED=$PY" in hook
+    assert not (repo.path / ".aigate" / "pre-commit").exists()          # the pin lives only in .git/hooks
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    proc = run_hook(repo, "pre-commit", fake_bin(tmp_path, {"python3": logged(log, "python3")}))
+    assert proc.returncode == 0 and not calls(log), proc.stdout + proc.stderr
+
+
+@needs_sh
+def test_vendored_pin_removed_rediscovers_with_a_hint(repo, tmp_path):
+    install_vendored(repo)                                              # unpinned: the pin points nowhere
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    proc = run_hook(repo, "pre-commit", fake_bin(tmp_path, {"python3": logged(log, "python3")}))
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert "/nonexistent/pinned/python" in proc.stderr and "re-run aigate-lite install" in proc.stderr
+    assert calls(log)
+
+
+def test_discovery_mirror_walks_the_same_candidates_in_the_same_order():
+    choice = aigate.discover_python({}, probe=lambda c: (False, ""))
+    labels = [t[0] for t in choice.tried]
+    assert labels == ["python3", "python", "python3.14", "python3.13", "python3.12", "python3.11",
+                      "py -3.14", "py -3.13", "py -3.12", "py -3.11", "py -3"]
+    text = aigate.hook_script("pre-commit", True, "/x/python", "/x/a.py")
+    assert " ".join(f"'{label}'" if " " in label else label for label in labels) in text

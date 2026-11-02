@@ -17,7 +17,10 @@ needs_sh = pytest.mark.skipif(SH is None, reason="no POSIX sh on this machine")
 
 def test_vendored_hook_tries_python3_python_then_py_launcher():
     text = aigate.hook_script("pre-commit", True, sys.executable, str(SCRIPT))
-    assert "for c in python3 python 'py -3'; do" in text           # this order, first working one wins
+    # F2: was "for c in python3 python 'py -3'; do". The old three stay first and in this order; versioned
+    # names (newest first) and the py launcher's versions were added between them and the plain `py -3`.
+    assert ("for c in python3 python python3.14 python3.13 python3.12 python3.11 "
+            "'py -3.14' 'py -3.13' 'py -3.12' 'py -3.11' 'py -3'; do") in text   # first working one wins
     assert "sys.version_info >= (3, 11)" in text and "</dev/null" in text
     assert ".aigate/aigate_lite.py" in text and "\r" not in text
 
@@ -35,7 +38,8 @@ def fake_bin(tmp_path, stubs):
     d = tmp_path / "bin"
     d.mkdir()
     missing = 'echo "not installed" >&2; exit 127'
-    stubs = {"python3": missing, "python": missing, "py": missing, **stubs}   # never fall through to a real one
+    versioned = {f"python{v}": missing for v in aigate.PY_VERSIONS}
+    stubs = {"python3": missing, "python": missing, **versioned, "py": missing, **stubs}   # never fall through to a real one
     for name, body in stubs.items():
         p = d / name
         p.write_bytes(("#!/bin/sh\n" + body + "\n").encode())
@@ -54,8 +58,22 @@ REAL = "exec '" + sys.executable.replace("\\", "/").replace("'", "'\\''") + "' \
 BROKEN = 'echo "Python was not found; run without arguments to install from the Microsoft Store" >&2; exit 9009'
 
 
-def install_vendored(repo):
+def unpin(repo):
+    """Point every installed hook's pin at a path that does not exist, so the PATH search is what the test exercises."""
+    for kind in ("pre-commit", "pre-push"):
+        hook = repo.path / ".git" / "hooks" / kind
+        lines = hook.read_text(encoding="utf-8").split(chr(10))
+        i = next(n for n, line in enumerate(lines) if line.startswith("PY='"))
+        lines[i] = "PY='/nonexistent/pinned/python'"
+        hook.write_bytes(chr(10).join(lines).encode())
+
+
+def install_vendored(repo, pinned=False):
+    """Install the vendored hooks. Installs now pin the interpreter (F2); by default the pin is removed again so
+    that the scenarios below keep exercising discovery over PATH. `pinned=True` keeps it."""
     assert repo.run("install", "--vendor").returncode == 0
+    if not pinned:
+        unpin(repo)
 
 
 @needs_sh
