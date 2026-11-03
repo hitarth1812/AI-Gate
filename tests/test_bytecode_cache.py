@@ -14,6 +14,7 @@ import pytest
 from conftest import SCRIPT, aigate
 
 VERSION = aigate.__version__
+VERSION_LINE = aigate.VERSION_LINE          # what --version prints (it names the author since 0.2.2)
 
 POSIX = os.name != "nt"
 LOADER = aigate.HOOK_LOADER
@@ -93,19 +94,19 @@ def test_bytecode_is_checked_hash_in_a_private_dir_and_reused(repo, tmp_path):
     if POSIX:
         assert stat.S_IMODE(os.stat(cache / "pycache").st_mode) == 0o700
     before = os.stat(pyc).st_mtime_ns
-    assert via_loader(script, env, "--version").stdout.strip() == f"aigate-lite {VERSION}"
+    assert via_loader(script, env, "--version").stdout.strip() == VERSION_LINE
     assert os.stat(pyc).st_mtime_ns == before                                # reused, not rewritten
 
 
 def test_same_size_same_second_edit_is_recompiled(repo, tmp_path):
     script, cache = copy_script(tmp_path), tmp_path / "pyc-cache"
     env = env_for(repo, cache)
-    assert via_loader(script, env, "--version").stdout.strip() == f"aigate-lite {VERSION}"
+    assert via_loader(script, env, "--version").stdout.strip() == VERSION_LINE
     st = os.stat(script)
     script.write_bytes(script.read_bytes().replace(f'__version__ = "{VERSION}"'.encode(), b'__version__ = "9.9.9"'))
     os.utime(script, ns=(st.st_atime_ns, st.st_mtime_ns))                    # a timestamp pyc would not notice
     assert os.stat(script).st_size == st.st_size
-    assert via_loader(script, env, "--version").stdout.strip() == "aigate-lite 9.9.9"
+    assert via_loader(script, env, "--version").stdout.strip() == VERSION_LINE.replace(VERSION, "9.9.9", 1)
 
 
 def test_unusable_cache_dir_falls_back_silently(repo, tmp_path):
@@ -113,7 +114,7 @@ def test_unusable_cache_dir_falls_back_silently(repo, tmp_path):
     blocker = tmp_path / "not-a-dir"
     blocker.write_text("x")
     proc = via_loader(script, env_for(repo, blocker), "--version")
-    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, f"aigate-lite {VERSION}", "")
+    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, VERSION_LINE, "")
     assert not (script.parent / "__pycache__").exists()
 
 
@@ -126,7 +127,7 @@ def test_read_only_cache_dir_falls_back_silently(repo, tmp_path):
         proc = via_loader(script, env_for(repo, cache), "--version")
     finally:
         cache.chmod(0o700)
-    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, f"aigate-lite {VERSION}", "")
+    assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, VERSION_LINE, "")
     assert pycs(cache) == []
 
 
@@ -135,7 +136,7 @@ def test_paths_with_spaces_and_unicode(repo, tmp_path):
     env = env_for(repo, cache)
     for _ in range(2):
         proc = via_loader(script, env, "--version")
-        assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, f"aigate-lite {VERSION}", "")
+        assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, VERSION_LINE, "")
     assert len(pycs(cache)) == 1
 
 
@@ -145,7 +146,7 @@ def test_bytecode_planted_next_to_the_script_is_never_run(repo, tmp_path):
     plant(tmp_path, cache_path_for(script, None))
     for env in (env_for(repo, cache), env_for(repo, tmp_path / "missing" / "x")):
         proc = via_loader(script, env, "--version")
-        assert "PWNED" not in proc.stdout and proc.stdout.strip() == f"aigate-lite {VERSION}"
+        assert "PWNED" not in proc.stdout and proc.stdout.strip() == VERSION_LINE
 
 
 def test_unchecked_bytecode_in_the_cache_is_replaced_not_run(repo, tmp_path):
@@ -155,7 +156,7 @@ def test_unchecked_bytecode_in_the_cache_is_replaced_not_run(repo, tmp_path):
     [pyc] = pycs(cache)
     plant(tmp_path, str(pyc))
     proc = via_loader(script, env, "--version")
-    assert "PWNED" not in proc.stdout and proc.stdout.strip() == f"aigate-lite {VERSION}"
+    assert "PWNED" not in proc.stdout and proc.stdout.strip() == VERSION_LINE
     assert pyc.read_bytes()[4:8] == b"\x03\x00\x00\x00"
 
 
@@ -180,7 +181,7 @@ def warmed(repo, tmp_path):
 
 
 def clean_version(proc):
-    return (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, f"aigate-lite {VERSION}", "")
+    return (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, VERSION_LINE, "")
 
 
 @posix_only
@@ -328,7 +329,7 @@ def test_agents_never_read_or_write_the_bytecode_cache(repo, tmp_path, var):
     plant(tmp_path, str(pyc))                                                # and someone then replaces it
     before = pyc.read_bytes()
     proc = via_loader(script, {**env, **var}, "--version")
-    assert "PWNED" not in proc.stdout and proc.stdout.strip() == f"aigate-lite {VERSION}"
+    assert "PWNED" not in proc.stdout and proc.stdout.strip() == VERSION_LINE
     assert pyc.read_bytes() == before                                        # not read (a human run would replace it)
     assert pycs(cache) == [pyc]                                              # and nothing new written
     fresh = tmp_path / "fresh-cache"
@@ -385,4 +386,4 @@ def test_a_deleted_working_directory_just_disables_the_cache(repo, tmp_path):
     driver = ("import os, sys; d = sys.argv.pop(1); os.mkdir(d); os.chdir(d); os.rmdir(d); exec(" + repr(LOADER) + ")")
     proc = subprocess.run([sys.executable, "-P", "-c", driver, str(tmp_path / "gone"), str(script), "--version"],
                           env=env_for(repo, cache), text=True, capture_output=True)
-    assert proc.stdout.strip() == f"aigate-lite {VERSION}" and "Traceback" not in proc.stderr, proc.stderr
+    assert proc.stdout.strip() == VERSION_LINE and "Traceback" not in proc.stderr, proc.stderr

@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 Hitarth Khatiwala (https://github.com/hitarth1812)
+# aigate-lite — https://github.com/hitarth1812/AI-Gate
+# Licensed under the Apache License, Version 2.0. Redistributions and modified versions
+# must keep this notice and the NOTICE file (Apache-2.0, Section 4).
 """aigate-lite: a free, local commit-time gate for AI-written code.
 
 It runs as a git pre-commit / pre-push hook (or on demand) and checks only what
@@ -46,6 +51,12 @@ from collections import Counter, defaultdict
 # shutil, urllib.
 
 __version__ = "0.2.1"
+__author__ = "Hitarth Khatiwala"
+__license__ = "Apache-2.0"
+__url__ = "https://github.com/hitarth1812/AI-Gate"
+ATTRIBUTION = f"aigate-lite by {__author__} · {__license__} · {__url__}"
+VERSION_LINE = f"aigate-lite {__version__} · by {__author__} · {__license__} · {__url__}"
+ATTRIBUTION_NOTICE = ("SPDX-License-Identifier: Apache-2.0", "Copyright (c) 2026 Hitarth Khatiwala")
 
 MAX_BYTES = 1_000_000            # files larger than this skip content checks
 ACTION_RANK = {"off": 0, "pass": 1, "warn": 2, "fix": 3, "block": 4}
@@ -4123,6 +4134,8 @@ def render_agent(res: Result) -> str:
 def report_json(res: Result) -> None:
     print(json.dumps({
         "tool": "aigate-lite", "version": __version__, "schema": 1, "label": res.label,
+        "tool_info": {"name": "aigate-lite", "version": __version__, "author": __author__, "license": __license__,
+                      "url": __url__},
         "provenance": {"kind": res.provenance[0], "source": res.provenance[1]}, "config": res.config,
         "verdict": res.verdict, "escalated": res.escalated, "risk": res.risk,
         "exit_code": 1 if res.verdict in ("fix", "block") else 0, "stats": res.stats, "notes": res.notes,
@@ -4172,7 +4185,8 @@ def report_sarif(res: Result) -> None:
               "properties": {"severity": RULES[rid].severity, "confidence": RULES[rid].confidence}} for rid in used]
     print(json.dumps({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json", "version": "2.1.0",
-        "runs": [{"tool": {"driver": {"name": "aigate-lite", "version": __version__, "rules": rules}},
+        "runs": [{"tool": {"driver": {"name": "aigate-lite", "version": __version__, "informationUri": __url__,
+                                      "organization": __author__, "rules": rules}},
                   "results": results,
                   "properties": {"verdict": res.verdict, "risk": res.risk, "escalated": res.escalated}}],
     }, indent=2))
@@ -4766,6 +4780,11 @@ def cmd_install(args) -> int:
             import shutil
             shutil.copy2(script, dest)
         print("copied the gate to .aigate/aigate_lite.py (commit it so teammates get the same version)")
+        notice = os.path.join(os.path.dirname(script), "NOTICE")
+        if os.path.isfile(notice) and os.path.abspath(os.path.join(os.path.dirname(dest), "NOTICE")) != \
+                os.path.abspath(notice):
+            import shutil
+            shutil.copy2(notice, os.path.join(os.path.dirname(dest), "NOTICE"))
     kinds = ["pre-commit"] + ([] if args.no_pre_push else ["pre-push"])
     for kind in kinds:
         path = os.path.join(hooks_dir, kind)
@@ -5001,6 +5020,31 @@ def cmd_init(args) -> int:
     print(f"Wrote {CONFIG_PATH}{backup}")
     print("next: aigate-lite doctor")
     return 0
+
+
+def cmd_setup(args) -> int:
+    """install --vendor (hooks plus a copy of the gate in .aigate/), then a starter config if there is none."""
+    import argparse
+    rc = cmd_install(argparse.Namespace(force=args.force, vendor=True, no_pre_push=False))
+    if rc:
+        return rc
+    repo = Repo.discover()
+    if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
+        rc = cmd_init(argparse.Namespace(preset=args.preset, print=False, force=False))
+        if rc:
+            return rc
+    print("Setup done. Next steps:\n"
+          "  aigate-lite audit      # see what is already in the repo\n"
+          "  aigate-lite baseline   # accept today's findings so only new ones block\n"
+          "  git add .aigate && git commit -m 'add aigate-lite'\n"
+          + ATTRIBUTION)
+    return 0
+
+
+def cmd_audit(args) -> int:
+    """`check --all`: every tracked file in HEAD, as if newly added."""
+    args.all, args.staged, args.range, args.push = True, False, None, False
+    return run_check(args, dict(os.environ))
 
 
 def cmd_baseline(args) -> int:
@@ -5358,6 +5402,7 @@ def cmd_trust(args) -> int:
 
 def cmd_explain(args) -> int:
     if not args.rule:
+        print(ATTRIBUTION)
         print(f"{'rule':<30} {'default':<8} {'severity':<9} what it catches")
         for r in RULES.values():
             print(f"{r.id:<30} {r.action:<8} {r.severity:<9} {r.title}")
@@ -5629,6 +5674,19 @@ def _doctor_agent(env, cfg):
     return _check("agent", "ok", "no AI agent detected in this shell: commits count as human commits")
 
 
+def _doctor_attribution():
+    """Warn (never fail) when this file's copyright header or __author__ was removed or changed."""
+    try:
+        with open(__file__, encoding="utf-8", errors="replace") as fh:
+            head = fh.read(1000)
+    except OSError:
+        head = ""
+    if all(m in head for m in ATTRIBUTION_NOTICE) and __author__ == "Hitarth Khatiwala":
+        return _check("attribution", "ok", f"{__author__} · {__license__}")
+    return _check("attribution", "warn", "attribution notice missing or changed",
+                  "Apache-2.0 \u00a74 requires keeping the copyright and NOTICE.")
+
+
 def doctor_report(env, offline=False, fetch=None) -> list:
     """Every doctor check as {id, status: ok|warn|fail, detail, fix}, sorted fail -> warn -> ok."""
     cwd = os.getcwd()
@@ -5663,6 +5721,7 @@ def doctor_report(env, offline=False, fetch=None) -> list:
     checks.append(_check("network", "ok", "skipped (--offline)") if offline
                   else _doctor_network(env, cfg, fetch or _default_fetch))
     checks.append(_doctor_agent(env, cfg))
+    checks.append(_doctor_attribution())
     return sorted(checks, key=lambda c: ("fail", "warn", "ok").index(c["status"]))
 
 
@@ -5671,6 +5730,7 @@ def cmd_doctor(args) -> int:
     if args.format == "json":
         print(json.dumps(checks, indent=2))
     else:
+        print(ATTRIBUTION)
         sym = symbols(sys.stdout)
         width = max(len(c["id"]) for c in checks)
         pad = " " * (width + 5)
@@ -5692,8 +5752,14 @@ def build_parser():
             self.print_usage(sys.stderr)
             self.exit(2, f"aigate-lite: {message}\n  see: aigate-lite --help\n")
     p = Parser(prog="aigate-lite", description="Commit-time gate for AI-written code. "
-                                               "--debug (or AIGATE_DEBUG=1) shows tracebacks.")
-    p.add_argument("--version", action="version", version=f"aigate-lite {__version__}")
+                                               "--debug (or AIGATE_DEBUG=1) shows tracebacks.",
+               epilog=ATTRIBUTION, formatter_class=argparse.RawDescriptionHelpFormatter)
+
+    class ShowVersion(argparse.Action):        # argparse's own "version" action would re-wrap the line
+        def __call__(self, parser, namespace, values, option_string=None):
+            print(VERSION_LINE)
+            parser.exit()
+    p.add_argument("--version", action=ShowVersion, nargs=0, help="show the version and exit")
     sub = p.add_subparsers(dest="command", parser_class=Parser)
     c = sub.add_parser("check", help="check staged changes, a range, or a push")
     target = c.add_mutually_exclusive_group()
@@ -5715,6 +5781,19 @@ def build_parser():
     c.add_argument("-q", "--quiet", action="store_true", help="print only problems that stop the commit")
     c.add_argument("-v", "--verbose", action="store_true", help="show hints, fingerprints and allowed findings")
     c.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    a = sub.add_parser("audit", help="check every tracked file (same as `check --all`)")
+    a.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text")
+    a.add_argument("--offline", action="store_true", help="skip registry lookups")
+    a.add_argument("--no-cache", action="store_true", help="ignore the local lookup and result caches")
+    a.add_argument("--no-commands", action="store_true", help="skip [[commands]] from the config")
+    a.add_argument("--config", help="use this config file instead of .aigate/lite.toml")
+    a.add_argument("-q", "--quiet", action="store_true", help="print only problems that stop the commit")
+    a.add_argument("-v", "--verbose", action="store_true", help="show hints, fingerprints and allowed findings")
+    a.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    a.set_defaults(cache=False, remote=None)
+    u = sub.add_parser("setup", help="one step: install the hooks (vendored) and write a starter config")
+    u.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
+    u.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     i = sub.add_parser("install", help="install the pre-commit and pre-push git hooks")
     i.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     i.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ and point the hooks there")
@@ -5761,7 +5840,7 @@ def main(argv=None) -> int:
         command = args.command
         if args.command == "check":
             return run_check(args, dict(os.environ))
-        return {"install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
+        return {"setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
                 "doctor": cmd_doctor, "baseline": cmd_baseline,
                 "fix": cmd_fix}[args.command](args)

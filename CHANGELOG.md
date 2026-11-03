@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.2.2 — unreleased: easier commands and attribution
+
+### Added
+- `aigate-lite setup`: `install --vendor` plus a starter `.aigate/lite.toml` (never overwrites an existing one);
+  `--preset` and `--force`. Also copies `NOTICE` into `.aigate/`.
+- `aigate-lite audit`: shortcut for `check --all` (same options as `check` except the target selectors).
+- `aigate` console script (alias of `aigate-lite`) in `pyproject.toml`.
+- Attribution: SPDX/copyright header, `__author__`/`__license__`/`__url__`/`ATTRIBUTION`, a `NOTICE` file, Apache-2.0
+  metadata in `pyproject.toml` (`license-files`, authors, URLs; needs setuptools >= 77), a README "License & credit" section.
+- `doctor` gains an `attribution` check that only warns (never fails) when the copyright header or `__author__` of the
+  running file was changed. It does not run in `check` or in hooks.
+
+### Changed
+- `--version` prints `aigate-lite <version> · by Hitarth Khatiwala · Apache-2.0 · <url>` (one line); the first token pair
+  is unchanged. `--help` ends with the attribution line; `doctor` text, `explain` (rule list) and `setup` show it too.
+- SARIF: `tool.driver` has `informationUri` and `organization`. JSON: new top-level `tool_info` object (the existing
+  `tool` string is unchanged, so this is additive). The per-commit text report and `--format agent` are unchanged.
+- Tests that compared `--version` output exactly now compare against `aigate.VERSION_LINE`.
+
 ## 0.2.1 — fix-up before merge
 
 ### Changed

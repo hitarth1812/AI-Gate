@@ -19,12 +19,15 @@ actions and risk score.
 
 ```bash
 cd your-project                                    # any git repo; needs Python 3.11+ and git
-python3 /path/to/aigate_lite.py install --vendor   # copies the gate to .aigate/ and adds both hooks
+python3 /path/to/aigate_lite.py setup              # hooks + a copy of the gate in .aigate/ + a starter config
+python3 .aigate/aigate_lite.py audit               # see what is already in the repo
 python3 -c "print('KEY = \"AKIA' + 'QWERTYUIOPASDFGH\"')" > leak.py  # a fake key, to see a block
 git add leak.py && git commit -m "try it"          # stopped: secrets.hardcoded
 git rm --cached -q leak.py && rm leak.py           # clean up
-python3 .aigate/aigate_lite.py check --all         # optional: audit everything already committed
 ```
+
+`setup` is `install --vendor` plus `init`; it never overwrites an existing `.aigate/lite.toml`. `audit` is `check --all`.
+After `pip install .` the command is also available as `aigate` (same as `aigate-lite`).
 
 On Windows use `py -3` instead of `python3`; the installed hooks use the interpreter that ran `install` (pinned in `.git/hooks`, never committed) and, if
 that is gone, look for `python3`, `python`, `python3.14`..`python3.11`, `py -3.14`..`py -3.11`, then `py -3`.
@@ -33,9 +36,18 @@ that is gone, look for `python3`, `python`, `python3.14`..`python3.11`, `py -3.1
 
 ```bash
 # inside your project
+python3 /path/to/aigate_lite.py setup              # copies itself to .aigate/, adds both hooks, writes lite.toml
+python3 .aigate/aigate_lite.py audit               # see what is already in the repo
+python3 .aigate/aigate_lite.py baseline            # optional: accept today's findings so only new ones block
+git add .aigate && git commit -m "add aigate-lite"
+```
+
+**Manual setup** (what `setup` does, step by step):
+
+```bash
 python3 /path/to/aigate_lite.py install --vendor   # copies itself to .aigate/ and adds both hooks
-git add .aigate/aigate_lite.py && git commit -m "add aigate-lite"
 python3 .aigate/aigate_lite.py init                # optional: starter .aigate/lite.toml
+git add .aigate && git commit -m "add aigate-lite"
 ```
 
 From then on:
@@ -45,7 +57,7 @@ From then on:
 | `git commit` | `pre-commit` hook | The staged changes |
 | `git push` | `pre-push` hook | Every commit being pushed, one by one for secrets. This catches commits made with `--no-verify`. |
 | Any time | `aigate-lite check` | Staged changes, or `--range origin/main..HEAD` |
-| Audit | `aigate-lite check --all` | Every tracked file in HEAD, including the root commit (not used by hooks) |
+| Audit | `aigate-lite audit` (same as `check --all`) | Every tracked file in HEAD, including the root commit (not used by hooks) |
 
 `--vendor` makes the hooks portable: they run `.aigate/aigate_lite.py` with whatever `python3` is on
 the PATH, so teammates only need to run `python3 .aigate/aigate_lite.py install --vendor`.
@@ -239,6 +251,15 @@ the job on exit code 1. `--format json` (schema 1) and `--format sarif` (SARIF 2
   `.aigate/aigate_lite.py` as committed; review changes to that file like any other code you execute.
 - **Offline:** if PyPI/npm can't be reached, dependency findings become `deps.unverified` warnings.
   Set `[gate] offline = "block"` to stop instead.
+
+## License & credit
+
+aigate-lite is licensed under the [Apache License 2.0](LICENSE). You may use, modify and redistribute it, but you
+must keep the copyright header, the [NOTICE](NOTICE) file and credit to Hitarth Khatiwala (Apache-2.0, Section 4).
+Suggested credit line: "Uses aigate-lite by Hitarth Khatiwala" (https://github.com/hitarth1812/AI-Gate).
+
+`aigate-lite doctor` warns (it never fails) if the copyright header in the running file was removed or changed.
+Nothing in the gate depends on it: check results, exit codes and hooks behave the same either way.
 
 ## Development
 
