@@ -1656,26 +1656,46 @@ class LexError(Exception):
     pass
 
 
-@dataclasses.dataclass(frozen=True)
-class StrForm:
-    """One string-literal syntax. `open` is a regex matched at the current position; the groups inside it are
-    available to `close` as {g1} (Rust r#"..."#, C# \"\"\"...\"\"\", Ruby %q(...) delimiters, heredoc tags)."""
-    open: str
-    close: str = '"'            # literal terminator ({g1} = first group of `open`); a line regex for heredocs
-    kind: str = "quote"         # quote | regex | heredoc | pct
-    esc: str = "\\"             # escape character ("" = none)
-    double: bool = False        # a doubled terminator is an escaped one (C# verbatim strings)
-    nl: bool = True             # may span lines (False: an unterminated literal ends at the end of its line)
-    interp: str = ""            # opens code inside the string ("${", "#{", "{")
-    interp_double: bool = False  # "{{" is a literal brace (C# $"...")
-    expr: bool = False          # only where an expression may start (JS regex literals, Ruby %w[...])
+_REQUIRED = object()
 
 
-@dataclasses.dataclass(frozen=True)
-class LexConfig:
-    line_comments: tuple = ()        # ("//", "#")
-    block_comments: tuple = ()       # ((open regex, close literal, nested), ...)
-    strings: tuple = ()              # StrForm, in priority order (longest openers first)
+def _record(cls_name, /, **fields):
+    """A small keyword/positional record class with no per-class code generation. (@dataclass costs about 0.6 ms
+    each at import, and these records are only needed once a language file is checked.)"""
+    names = tuple(fields)
+
+    def __init__(self, *args, **kw):
+        if len(args) > len(names) or set(kw) - set(names) or any(n in kw for n in names[:len(args)]):
+            raise TypeError(f"{cls_name}: bad arguments")
+        given = dict(zip(names, args), **kw)
+        for n in names:
+            v = given.get(n, fields[n])
+            if v is _REQUIRED:
+                raise TypeError(f"{cls_name}: missing {n}")
+            setattr(self, n, v)
+
+    def __repr__(self):
+        return f"{cls_name}(" + ", ".join(f"{n}={getattr(self, n)!r}" for n in names) + ")"
+    return type(cls_name, (), {"__slots__": names, "__init__": __init__, "__repr__": __repr__, "__module__": __name__})
+
+
+# StrForm: one string-literal syntax. `open` is a regex matched at the current position; the groups inside it are
+# available to `close` as {g1} (Rust r#"..."#, C# triple-quoted raw strings, Ruby %q(...) delimiters, heredoc tags).
+StrForm = _record(
+    "StrForm", open=_REQUIRED,
+    close='"',              # literal terminator ({g1} = first group of `open`); a line regex for heredocs
+    kind="quote",           # quote | regex | heredoc | pct
+    esc="\\",              # escape character ("" = none)
+    double=False,           # a doubled terminator is an escaped one (C# verbatim strings)
+    nl=True,                # may span lines (False: an unterminated literal ends at the end of its line)
+    interp="",              # opens code inside the string ("${", "#{", "{")
+    interp_double=False,    # "{{" is a literal brace (C# $"...")
+    expr=False)             # only where an expression may start (JS regex literals, Ruby %w[...])
+LexConfig = _record(
+    "LexConfig",
+    line_comments=(),       # ("//", "#")
+    block_comments=(),      # ((open regex, close literal, nested), ...)
+    strings=())             # StrForm, in priority order (longest openers first)
 
 
 EXPR_KEYWORDS = frozenset("return typeof instanceof in of new delete void throw case do else yield await "
@@ -1949,17 +1969,35 @@ class Lexed:
         key = (n, hide)
         if key not in self._masked:
             base = self.starts[n - 1] if 0 < n <= len(self.lines) else 0
-            self._masked[key] = "".join(" " if self.kinds[base + i] in hide else ch
-                                        for i, ch in enumerate(self.line(n)))
+            line = self.line(n)
+            self._masked[key] = _blank(line, self.kinds[base:base + len(line)], hide)
         return self._masked[key]
 
     def code_text(self, hide=(STR, COM)):
         """The whole file with hidden regions blanked (newlines kept), for brace and keyword scans."""
         got = self._code.get(hide)
         if got is None:
-            got = self._code[hide] = "".join(" " if k in hide and ch != "\n" else ch
-                                              for ch, k in zip(self.text, self.kinds))
+            got = self._code[hide] = _blank(self.text, self.kinds, hide)
         return got
+
+
+def _blank(text, kinds, hide):
+    """`text` with the characters whose kind is in `hide` replaced by spaces (newlines kept), by runs."""
+    key = ("hide", hide)
+    rx = _LEX_RES.get(key)
+    if rx is None:
+        rx = _LEX_RES[key] = re.compile(b"[" + bytes(hide) + b"]+")
+    out, pos = [], 0
+    for m in rx.finditer(kinds):
+        a, b = m.span()
+        out.append(text[pos:a])
+        seg = text[a:b]
+        out.append(re.sub(r"[^\n]", " ", seg) if "\n" in seg else " " * (b - a))
+        pos = b
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
 
 
 def lex_text(text, cfg):
@@ -1978,36 +2016,25 @@ def lex_text(text, cfg):
 # (their regexes are compiled then), so a commit without Go files never pays for the Go tables. Adding a language
 # means adding one builder below, plus its fixtures.
 
-@dataclasses.dataclass(frozen=True)
-class LineRule:
-    """A rule applied to added lines. `rx` must start in region `where` (CODE, COM, STR); scope limits it to
-    source files ("src"), test files ("test") or both ("any"). `needs` is an optional regex that must match the
-    file's code (e.g. an import) for the rule to apply."""
-    rule: str
-    rx: object
-    what: str
-    where: int = CODE
-    scope: str = "any"
-    needs: object = None
-    also: object = None               # must also match the line with comments blanked (e.g. a secret-ish word)
-
-
-@dataclasses.dataclass(frozen=True)
-class LanguageSpec:
-    name: str
-    lex: LexConfig
-    eco: str = ""                      # registry ecosystem ("go"); "" = no dependency checks
-    rules: tuple = ()                  # LineRule, language specific (the shared ones live in the line checks)
-    func: tuple = ()                   # regexes with a (?P<name>) group: where a function starts
-    loop: object = None                # regex: loop keywords
-    loop_header: str = "paren"         # "paren": for (...) {   "eol": for ... {
-    branch: object = None              # regex: decision points (complexity = 1 + matches)
-    same_line_brace: bool = False      # a function body's { is on the line of its header (Go)
-    test_skip: object = None           # regex: a skipped test (added lines of test files)
-    test_assert: object = None         # regex: one assertion
-    test_case: object = None           # regex with a (?P<name>) group: one test function
-    swallow: object = None             # regex: a header whose block, closed on the next line, drops an error
-    tests: tuple = ()                  # extra test-file globs
+# LineRule: a rule applied to added lines. `rx` must start in region `where` (CODE, COM, STR); scope limits it to
+# source files ("src"), test files ("test") or both ("any"). `needs` is an optional regex that must match the
+# file's code (e.g. an import) for the rule to apply; `also` must match the line with comments blanked.
+LineRule = _record("LineRule", rule=_REQUIRED, rx=_REQUIRED, what=_REQUIRED, where=CODE, scope="any", needs=None,
+                   also=None)
+LanguageSpec = _record(
+    "LanguageSpec", name=_REQUIRED, lex=_REQUIRED,
+    eco="",                 # registry ecosystem ("go"); "" = no dependency checks
+    rules=(),               # LineRule, language specific (the shared ones live in the line checks)
+    func=(),                # regexes with a (?P<name>) group: where a function starts
+    loop=None,              # regex: loop keywords
+    loop_header="paren",    # "paren": for (...) {   "eol": for ... {
+    branch=None,            # regex: decision points (complexity = 1 + matches)
+    same_line_brace=False,  # a function body's { is on the line of its header (Go)
+    test_skip=None,         # regex: a skipped test (added lines of test files)
+    test_assert=None,       # regex: one assertion
+    test_case=None,         # regex with a (?P<name>) group: one test function
+    swallow=None,           # regex: a header whose block, closed on the next line, drops an error
+    tests=())               # extra test-file globs
 
 
 _SPEC_EXT = {".go": "go", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".ts": "js", ".tsx": "js",
@@ -2085,15 +2112,8 @@ def _spec_go() -> LanguageSpec:
 
 # --------------------------------------------------------------------------- languages: structure (braces)
 
-@dataclasses.dataclass
-class FuncInfo:
-    name: str
-    line: int
-    end: int
-    length: int
-    complexity: int
-    depth: int
-    deepest: int
+FuncInfo = _record("FuncInfo", name=_REQUIRED, line=_REQUIRED, end=_REQUIRED, length=_REQUIRED,
+                   complexity=_REQUIRED, depth=_REQUIRED, deepest=_REQUIRED)
 
 
 def _brace_pairs(ct: str) -> dict:
@@ -2206,9 +2226,10 @@ def analyze_functions(lx, spec) -> list:
 def hit(lx, rx, line, text, where=CODE):
     """First match of `rx` in `text` (an added line) that starts in region `where`. Without a lexer (unknown
     language, or the lexer gave up) it is a plain search: the old line-based behaviour."""
-    if lx is not None and lx.line(line).rstrip("\r") == text.rstrip("\r"):
-        return lx.search(rx, line, where, text)
-    return rx.search(text)
+    m = rx.search(text)                         # most lines match nothing: one C-level search settles them
+    if m is None or lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
+        return m
+    return lx.search(rx, line, where, text)
 
 
 def _count(lx, rx, rows) -> int:
@@ -2262,7 +2283,7 @@ def check_lang(ctx) -> list:
 
 
 def _lang_file(ctx, fc, spec) -> list:
-    out, test = [], ctx.is_test(fc.path)
+    out, test = [], bool(spec.rules) and ctx.is_test(fc.path)
     lx = ctx.lexed(fc)
     if lx is None and spec.rules:
         return out                                   # no lexer view: the shared line checks still ran
@@ -2294,6 +2315,12 @@ def _lang_file(ctx, fc, spec) -> list:
 
 def _structure_findings(ctx, fc, spec, lx) -> list:
     out, lim = [], ctx.cfg["limits"]
+    # cheap guard on the raw text (it over-counts, so it never skips a file that could trigger): a file with fewer
+    # lines, loop keywords and decision points than the limits cannot hold a function that exceeds them
+    if lx.text.count("\n") < lim["function_lines"] \
+            and (spec.loop is None or len(spec.loop.findall(lx.text)) < lim["loop_depth"]) \
+            and (spec.branch is None or len(spec.branch.findall(lx.text)) < lim["complexity"]):
+        return out
     old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
     old = {f.name: f for f in analyze_functions(old_lx, spec)} if old_lx is not None else {}
     for f in analyze_functions(lx, spec):
@@ -3426,7 +3453,6 @@ def js_imports(ctx):
 GO_PROXY = "https://proxy.golang.org"
 GO_KNOWN = frozenset(("module", "go", "toolchain", "godebug", "exclude", "retract", "tool", "ignore", "require",
                       "replace", "use"))
-GO_PSEUDO = re.compile(r"-\d{14}-[0-9a-f]{12}(?:\+incompatible)?$")
 
 
 def go_escape(text: str) -> str:
@@ -3574,12 +3600,7 @@ def go_evaluate(ctx, dep, old, path) -> list:
     return out
 
 
-@dataclasses.dataclass
-class GoImp:
-    path: str
-    line: int
-    spec: str                    # the import path
-    cands: list                  # module paths it may belong to, most likely first
+GoImp = _record("GoImp", path=_REQUIRED, line=_REQUIRED, spec=_REQUIRED, cands=_REQUIRED)   # cands: module paths, likeliest first
 
 
 GO_IMPORT = re.compile(r"(?m)^[ \t]*import\b")
@@ -4225,6 +4246,8 @@ def check_suppressions(ctx) -> list:
 def _suppression_hit(lx, rx, line, text):
     """A suppression marker counts only inside a comment (or, for an annotation such as @SuppressWarnings, in
     code). Without a lexer view it is a plain search."""
+    if rx.search(text) is None:
+        return None
     if lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
         return rx.search(text)
     for m in rx.finditer(text):
