@@ -118,11 +118,108 @@ def test_unchanged_requirements_are_not_rechecked(repo):
     assert not find(res, "deps.hallucinated")
 
 
-def test_indirect_requirements_only_get_the_vulnerability_check(repo):
+def test_indirect_requirements_must_exist_and_be_clean_but_get_no_age_rules(repo):
+    # changed from "only the vulnerability check": a direct, invented dependency must not pass by carrying a
+    # `// indirect` comment, so the version has to exist on the proxy. Age rules stay off (go mod tidy adds many).
     project(repo)
     res = change(repo, {"go.mod": BASE_MOD + "require github.com/indirect/dep v1.0.0 // indirect\n"
-                                             "require github.com/not/real v1.0.0 // indirect\n"})
-    assert [f["message"] for f in find(res, "deps.vulnerable")] and not find(res, "deps.hallucinated")
+                                             "require github.com/not/real v1.0.0 // indirect\n"
+                                             "require github.com/new/shiny v0.1.0 // indirect\n"})
+    assert [f["message"] for f in find(res, "deps.vulnerable")]
+    assert [f["message"] for f in find(res, "deps.hallucinated")] == [
+        "github.com/not/real has no version v1.0.0 on the Go module proxy (marked // indirect)"]
+    assert not find(res, "deps.new_package") and not find(res, "deps.version_cooldown")
+
+
+def test_a_comment_glued_to_the_version_is_still_a_comment():
+    deps, problems, _m = aigate.parse_go_mod("require github.com/a/b v1.0.0//indirect\n", "go.mod")
+    assert problems == [] and deps["github.com/a/b"].spec == "v1.0.0" and deps["github.com/a/b"].indirect
+
+
+def test_replace_lines_for_one_module_with_different_versions_are_all_kept():
+    deps, _p, _m = aigate.parse_go_mod("replace c.com/z v1.0.0 => ./l\nreplace c.com/z v2.0.0 => evil.com/z v1.0.0\n", "go.mod")
+    assert [(d.source, d.spec) for d in deps.values()] == [("path", "./l"), ("replace", "evil.com/z")]
+
+
+def test_a_required_module_that_is_replaced_locally_or_is_a_sibling_is_not_looked_up(repo):
+    project(repo)
+    res = change(repo, {"go.mod": BASE_MOD + "require example.com/mymod v0.0.0-00010101000000-000000000000\n"
+                                             "replace example.com/mymod => ../mymod\n"})
+    assert not find(res, "deps.hallucinated") and find(res, "deps.local_source")
+    repo.git("reset", "-q")
+    sibling = change(repo, {"mods/other/go.mod": "module example.com/other\n\ngo 1.21\n",
+                            "go.mod": BASE_MOD + "require example.com/other v0.0.0-00010101000000-000000000000\n"})
+    assert not find(sibling, "deps.hallucinated")
+
+
+def test_a_replaced_module_that_is_not_replaced_locally_is_still_reported(repo):
+    project(repo)
+    res = change(repo, {"go.mod": BASE_MOD + "require github.com/gin-gonic/gin v1.9.1\n"
+                                             "replace github.com/gin-gonic/gin => github.com/evil/gin v1.0.0\n"})
+    assert find(res, "deps.untrusted_source") and not find(res, "deps.hallucinated")
+
+
+def test_gopath_style_settings_are_read_from_the_go_env_file(repo, tmp_path):
+    project(repo)
+    envfile = tmp_path / "goenv"
+    envfile.write_text("GOPRIVATE=github.com/corp\n# comment\nGOFLAGS=-mod=mod\n")
+    mod = BASE_MOD + "require github.com/corp/internal v1.0.0\n"
+    assert find(change(repo, {"go.mod": mod}), "deps.hallucinated")
+    assert not find(change(repo, {"go.mod": mod}, env={"GOENV": str(envfile)}), "deps.hallucinated")
+    proxy = tmp_path / "goenv2"
+    proxy.write_text("GOPROXY=https://proxy.corp.example,https://proxy.golang.org\n")
+    res = change(repo, {"go.mod": BASE_MOD + "require github.com/not/real v1.0.0\n"}, env={"GOENV": str(proxy)})
+    assert not find(res, "deps.hallucinated")
+
+
+def test_goproxy_first_entry_decides(monkeypatch):
+    for value, want in (("", True), ("https://proxy.golang.org", True), ("https://proxy.golang.org,direct", True),
+                        ("direct", False), ("off", False), ("https://corp.example,https://proxy.golang.org", False)):
+        monkeypatch.setenv("GOPROXY", value)
+        assert aigate.go_registry_enabled() is want, value
+
+
+def test_candidates_cover_gopkg_in_gitlab_subgroups_and_unknown_hosts():
+    c = aigate.go_candidates
+    assert c("gopkg.in/natefinch/lumberjack.v2") == ["gopkg.in/natefinch/lumberjack.v2"]
+    assert c("gopkg.in/yaml.v3") == ["gopkg.in/yaml.v3"]
+    assert c("gitlab.com/a/b/c/d/e") == ["gitlab.com/a/b/c/d/e", "gitlab.com/a/b/c/d", "gitlab.com/a/b/c", "gitlab.com/a/b",
+                                         "gitlab.com/a"][:5]
+    assert c("git.corp.com/g/s/repo/pkg") == ["git.corp.com/g/s/repo/pkg", "git.corp.com/g/s/repo", "git.corp.com/g/s",
+                                              "git.corp.com/g"]
+    assert c("github.com/a") == []
+
+
+def test_an_unknown_layout_import_with_no_module_is_unverified_not_a_block(repo):
+    project(repo)
+    res = change(repo, {"main.go": 'package main\n\nimport "git.corp.com/g/s/repo/pkg"\n'})
+    assert find(res, "deps.unverified") and not find(res, "deps.hallucinated")
+    short = change(repo, {"main.go": 'package main\n\nimport "github.com/a"\n'})
+    assert not find(short, "deps.hallucinated")
+
+
+def test_testdata_imports_are_fixtures(repo):
+    project(repo)
+    res = change(repo, {"testdata/x/main.go": 'package main\n\nimport "github.com/not/real/pkg"\n'})
+    assert not find(res, "deps.hallucinated")
+
+
+def test_unexpected_response_shapes_are_unknown_answers_not_crashes(monkeypatch):
+    reg, _p = registry(monkeypatch, {f"{P}/github.com/a/b/@v/v1.0.0.info": (200, b"[]"),
+                                     f"{P}/github.com/a/b/@v/v2.0.0.info": (200, b'{"Time": 5}'),
+                                     f"{P}/github.com/a/b/@v/list": (200, b"v1.0.0\n"),
+                                     f"{P}/github.com/a/c/@v/list": (200, b"{}")})
+    assert reg.version_time("go", "github.com/a/b", "v1.0.0") is None and reg.failures == 1
+    assert reg.version_time("go", "github.com/a/b", "v2.0.0") is None
+    assert isinstance(reg.info("go", "github.com/a/b"), dict) or reg.info("go", "github.com/a/b") is None
+
+
+def test_osv_batch_tolerates_odd_result_shapes(monkeypatch):
+    answer = {"results": [{"vulns": "nope"}, None, {"vulns": [{"id": ["x"]}, {"id": "GO-7"}, 5]}]}
+    reg, _p = registry(monkeypatch, {"https://api.osv.dev/v1/querybatch": (200, json.dumps(answer).encode())})
+    keys = [("osv", "go", "a/b", "v1"), ("osv", "go", "c/d", "v1"), ("osv", "go", "e/f", "v1")]
+    reg.prefetch(keys)
+    assert [reg.vulns("go", k[2], "v1") for k in keys] == [[], [], ["GO-7"]]
 
 
 def test_an_unreachable_proxy_leaves_requirements_unverified_not_silently_fine(repo):
@@ -327,7 +424,9 @@ def test_candidates_for_import_paths():
     assert c("github.com/gin-gonic/gin/binding") == ["github.com/gin-gonic/gin"]
     assert c("github.com/go-chi/chi/v5/middleware") == ["github.com/go-chi/chi/v5", "github.com/go-chi/chi"]
     assert c("gopkg.in/yaml.v3") == ["gopkg.in/yaml.v3"]
-    assert c("go.uber.org/zap/zapcore") == ["go.uber.org/zap", "go.uber.org/zap/zapcore"]
+    # was ["go.uber.org/zap", "go.uber.org/zap/zapcore"]: unknown hosts now try every plausible root, longest first
+    # (the longest existing one is the module, a nested module wins over its parent)
+    assert c("go.uber.org/zap/zapcore") == ["go.uber.org/zap/zapcore", "go.uber.org/zap"]
     assert c("golang.org/x/net/http2") == ["golang.org/x/net"]
 
 

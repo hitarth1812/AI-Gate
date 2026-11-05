@@ -48,7 +48,7 @@ class GitRepo:
         self.path = path
         self.env = {k: v for k, v in os.environ.items() if k not in STRIP and not k.startswith("AIGATE_")}
         self.env.update({"AIGATE_REGISTRY_FIXTURE": str(FIXTURE), "AIGATE_NOW": NOW, "AIGATE_CACHE_DIR": str(cache),
-                         "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cache)})
+                         "GIT_CONFIG_NOSYSTEM": "1", "HOME": str(cache), "GOENV": "off"})
         self.git("init", "-q", "-b", "main")
         self.git("config", "user.email", "dev@example.com")
         self.git("config", "user.name", "Dev")

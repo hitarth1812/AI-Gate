@@ -1473,14 +1473,16 @@ class Registry:
                 results = json.loads(raw).get("results") if status == 200 else None
                 if not isinstance(results, list) or len(results) != len(chunk):
                     raise ValueError("unexpected OSV response")
-            except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+            except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
                 self.failures += 1
                 self.failure_reason = self.failure_reason or network_reason(e)
                 for k in chunk:
                     self.mem[k] = None
                 continue
             for k, res in zip(chunk, results):
-                ids = sorted({v["id"] for v in (res or {}).get("vulns", []) if isinstance(v, dict) and v.get("id")})
+                found = res.get("vulns") if isinstance(res, dict) else None
+                ids = sorted({v["id"] for v in found if isinstance(v, dict) and isinstance(v.get("id"), str)}) \
+                    if isinstance(found, list) else []
                 self.mem[k] = ids
                 self.cache["|".join(map(str, k))] = {"t": time.time(), "v": ids}
                 self.dirty = True
@@ -1553,7 +1555,10 @@ class Registry:
                 return self._fetch_info(eco, name)
             if kind == "vtime":
                 status, raw = self._http(f"{GO_PROXY}/{go_escape(name)}/@v/{go_escape(key[3])}.info")
-                return json.loads(raw).get("Time") or MISSING if status == 200 else MISSING
+                if status != 200:
+                    return MISSING
+                when = json.loads(raw).get("Time")
+                return when if isinstance(when, str) and when else None
             if kind == "downloads":
                 if eco == "npm":
                     status, raw = self._http("https://api.npmjs.org/downloads/point/last-week/"
@@ -1565,7 +1570,7 @@ class Registry:
                                "version": key[3]}).encode()
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
-        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             self.failures += 1
             self.failure_reason = self.failure_reason or network_reason(e)
             return None
@@ -1581,11 +1586,13 @@ class Registry:
             if status != 200:
                 return MISSING
             d = json.loads(raw)
-            return {"name": name, "created": d.get("Time"), "versions": {}, "latest": d.get("Version"), "yanked": [],
-                    "deprecated": None}
+            return {"name": name, "created": d.get("Time") if isinstance(d.get("Time"), str) else None,
+                    "versions": {}, "latest": d.get("Version") if isinstance(d.get("Version"), str) else None,
+                    "yanked": [], "deprecated": None}
         ordered = sorted(versions, key=lambda v: (release_tuple(v) or (0,), "-" not in v.split("+")[0], v))
         status, first = self._http(f"{base}/@v/{go_escape(ordered[0])}.info")
         created = json.loads(first).get("Time") if status == 200 else None
+        created = created if isinstance(created, str) else None
         stable = [v for v in ordered if "-" not in v]
         return {"name": name, "created": created, "versions": {v: None for v in ordered},
                 "latest": (stable or ordered)[-1], "yanked": [], "deprecated": None}
@@ -3462,7 +3469,7 @@ def go_escape(text: str) -> str:
 
 
 def _go_words(line: str) -> list:
-    line = re.sub(r"(?:^|\s)//.*$", "", line)
+    line = re.sub(r"//.*$", "", line)
     return [w[1:-1] if len(w) > 1 and w[0] in "\"`" and w[-1] == w[0] else w
             for w in re.findall(r'"[^"]*"|`[^`]*`|\S+', line)]
 
@@ -3504,7 +3511,8 @@ def parse_go_mod(text: str, path: str):
                 at = args.index("=>")
                 old, new = args[0], args[at + 1]
                 local = new.startswith(("./", "../", "/", ".\\", "..\\")) or re.match(r"^[A-Za-z]:[\\/]", new)
-                deps[f"replace {old}"] = Dep("go", old, new, "path" if local else "replace", n, path)
+                deps[f"replace {old} {args[1] if at == 2 else ''}"] = Dep(
+                    "go", old, new, "path" if local else "replace", n, path)
             else:
                 problems.append((n, raw.strip()[:80]))
         elif directive in ("module", "use") and not args:
@@ -3514,11 +3522,38 @@ def parse_go_mod(text: str, path: str):
     return deps, problems, module
 
 
+_GO_ENV_FILE: dict = {}
+
+
+def go_setting(name: str) -> str:
+    """A Go setting: the process environment first, then the file `go env -w` writes ($GOENV, else the user config
+    directory's go/env). GOENV=off disables the file."""
+    if name in os.environ:
+        return os.environ[name]
+    if "file" not in _GO_ENV_FILE:
+        values, where = {}, os.environ.get("GOENV", "")
+        if where != "off":
+            if not where:
+                base = (os.environ.get("APPDATA") if os.name == "nt" else
+                        os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"))
+                where = os.path.join(base or "", "go", "env")
+            try:
+                with open(where, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        key, eq, value = line.strip().partition("=")
+                        if eq and key and not key.startswith("#"):
+                            values[key] = value
+            except OSError:
+                pass
+        _GO_ENV_FILE["file"] = values
+    return _GO_ENV_FILE["file"].get(name, "")
+
+
 def go_private(module: str, extra=()) -> bool:
     """GOPRIVATE / GONOPROXY patterns (comma separated globs matching a prefix of the module path) and [deps] private."""
     import fnmatch
     parts = module.split("/")
-    pats = [p for var in ("GOPRIVATE", "GONOPROXY") for p in os.environ.get(var, "").split(",") if p.strip()]
+    pats = [p for var in ("GOPRIVATE", "GONOPROXY") for p in go_setting(var).split(",") if p.strip()]
     for pat in pats:
         prefix = "/".join(parts[:pat.strip().count("/") + 1])
         if fnmatch.fnmatchcase(prefix, pat.strip()):
@@ -3527,9 +3562,10 @@ def go_private(module: str, extra=()) -> bool:
 
 
 def go_registry_enabled() -> bool:
-    """False when GOPROXY points somewhere other than the public proxy (a private proxy knows other modules)."""
-    proxy = os.environ.get("GOPROXY", "")
-    return not proxy or "proxy.golang.org" in proxy
+    """False when GOPROXY does not start with the public proxy (a private proxy, `direct` or `off` knows other
+    modules, or none): only the first entry of the list decides, as it is asked first."""
+    proxy = go_setting("GOPROXY").strip()
+    return not proxy or "proxy.golang.org" in re.split(r"[,|]", proxy)[0]
 
 
 def go_manifest(ctx, fc, pending) -> list:
@@ -3545,10 +3581,14 @@ def go_manifest(ctx, fc, pending) -> list:
         if text not in seen and (n in fc.added or fc.status == "A"):
             out.append(make("deps.unverified", fc.path, n, f"{fc.name} line {n} could not be parsed: {text}",
                             key=text))
+    replaced = {d.name for k, d in new_deps.items() if k.startswith("replace ")}
+    siblings = set(go_project(ctx)[1])             # modules of this repository
     for key, dep in new_deps.items():
         old = old_deps.get(key)
         if old and (old.spec, old.source) == (dep.spec, dep.source):
             continue
+        if dep.source == "registry" and (dep.name in replaced or dep.name in siblings):
+            continue                               # satisfied locally or by the replacement (reported separately)
         if dep.source == "path":
             out.append(make("deps.local_source", fc.path, dep.line, f"{dep.name} is replaced by the local path "
                             f"{dep.spec}", key=key))
@@ -3564,7 +3604,10 @@ def go_manifest(ctx, fc, pending) -> list:
 def go_evaluate(ctx, dep, old, path) -> list:
     """Registry findings for one go.mod requirement. Versions in go.mod are exact (minimum version selection)."""
     out, reg, dcfg, name = [], ctx.registry, ctx.cfg["deps"], dep.name
-    if dep.indirect:                                      # added by `go mod tidy`: only the vulnerability check
+    if dep.indirect:           # added by `go mod tidy`: the version must exist and be clean; no age rules (and no noise)
+        if reg.version_time("go", name, dep.spec) == MISSING:
+            out.append(make("deps.hallucinated", path, dep.line, f"{name} has no version {dep.spec} on the Go module "
+                            "proxy (marked // indirect)", key=f"{name}@{dep.spec}"))
         vulns = reg.vulns("go", name, dep.spec)
         if vulns:
             out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
@@ -3632,11 +3675,18 @@ def go_candidates(spec: str) -> list:
     """Module paths an import path may live in: hosts with a known layout first, then a couple of prefixes."""
     parts = spec.split("/")
     host = parts[0]
-    base = 2 if host == "gopkg.in" else 3 if host in ("github.com", "gitlab.com", "bitbucket.org", "golang.org") else 2
-    lens = [base] if host in ("github.com", "gitlab.com", "bitbucket.org", "golang.org", "gopkg.in") else [2, 3]
-    if len(parts) > base and re.fullmatch(r"v\d+", parts[base]):
-        lens.insert(0, base + 1)
-    return ["/".join(parts[:n]) for n in dict.fromkeys(lens) if n <= len(parts)]
+    if host == "gopkg.in":                              # gopkg.in/pkg.v3 or gopkg.in/user/pkg.v3
+        n = 2 if len(parts) < 2 or re.search(r"\.v\d+$", parts[1]) else 3
+        return ["/".join(parts[:n])]
+    if host in ("github.com", "bitbucket.org", "golang.org"):    # fixed layout host/owner/repo[/vN]
+        lens = [4, 3] if len(parts) > 3 and re.fullmatch(r"v\d+", parts[3]) else [3]
+        return ["/".join(parts[:n]) for n in lens if n <= len(parts)]
+    return ["/".join(parts[:n]) for n in range(min(len(parts), 6), 1, -1)]     # anywhere else: every plausible root
+
+
+def go_layout_known(spec: str) -> bool:
+    """True when go_candidates is complete for this import path (so that no candidate existing means a fake)."""
+    return spec.split("/")[0] in ("github.com", "bitbucket.org", "golang.org", "gopkg.in")
 
 
 def go_project(ctx):
@@ -3682,11 +3732,15 @@ def go_imports(ctx):
         for line, spec in paths(fc, "new"):
             if line not in fc.added or spec in old or spec in seen or "." not in spec.split("/")[0] or spec == "C":
                 continue
+            if "/testdata/" in "/" + fc.path:
+                continue                           # the go tool ignores testdata: fake import paths are fixtures
             seen.add(spec)
             if any(spec == m or spec.startswith(m + "/") for m in declared | set(first)) \
                     or go_private(spec, private):
                 continue
-            out.append(GoImp(fc.path, line, spec, go_candidates(spec)))
+            cands = go_candidates(spec)
+            if cands:
+                out.append(GoImp(fc.path, line, spec, cands))
     return out
 
 
@@ -3848,7 +3902,7 @@ def check_deps(ctx) -> list:
               for p in [typosquat_of(dep.eco, dep.alias or dep.name)] if p]
 
     reg.prefetch([("info", d.eco, d.alias or d.name) for d, _, _ in pending if not d.indirect]
-                 + [("vtime", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go" and not d.indirect]
+                 + [("vtime", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go"]
                  + [("exists", i.eco, i.lookup) for i in imports]
                  + [("exists", "go", c) for g in go_cand for c in g.cands]
                  + [("downloads", d.eco, d.alias or d.name) for d, _, _ in squats])
@@ -3899,10 +3953,14 @@ def check_deps(ctx) -> list:
             mod = g.cands[found.index(True)]
             out.append(make("deps.undeclared", g.path, g.line,
                             f"'{g.spec}': module {mod} is not required by go.mod (run go get or go mod tidy)", key=mod))
-        elif all(f is False for f in found):
+        elif all(f is False for f in found) and go_layout_known(g.spec):
             out.append(make("deps.hallucinated", g.path, g.line,
                             f"'{g.spec}': no such module on the Go module proxy, and it is not in go.mod "
                             "(if it is private, set GOPRIVATE or [deps] private)", key=g.cands[0]))
+        elif all(f is False for f in found):
+            out += [make("deps.unverified", g.path, g.line,
+                         f"'{g.spec}': no module found for this import path on the Go module proxy and it is not "
+                         "in go.mod (if it is private, set GOPRIVATE or [deps] private)", key=g.cands[0])]
         else:
             out += unverified(ctx, g.path, g.line, f"'{g.spec}': could not reach the Go module proxy", g.cands[0])
     return out

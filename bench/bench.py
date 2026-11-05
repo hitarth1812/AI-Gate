@@ -48,7 +48,7 @@ STRIP = ("CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "AIGATE_AGENT", "GIT_AUTHOR_NAM
 
 def base_env() -> dict:
     env = {k: v for k, v in os.environ.items() if k not in STRIP and not k.startswith("AIGATE_")}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "HOME": os.path.join(WORK, "home"),
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GOENV": "off", "HOME": os.path.join(WORK, "home"),
                 "AIGATE_CACHE_DIR": os.path.join(WORK, "cache"), "AIGATE_NOW": "2026-10-31T00:00:00+00:00",
                 "GIT_AUTHOR_DATE": "2026-10-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-10-01T00:00:00Z"})
     return env
