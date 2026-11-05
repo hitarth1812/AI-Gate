@@ -161,10 +161,10 @@ def test_todo_comments_only_count_in_comments(repo):
 def test_nolint_and_lint_ignore_are_suppressions_gosec_is_a_security_one(repo):
     res = stage(repo, {}, {"a.go": go(
         "func f() {\n\tx := 1 //nolint\n\ty := 2 // nolint:errcheck\n\t//lint:ignore SA1000 reason\n"
-        "\tz := 3 //nolint:gosec\n\t_, _, _ = x, y, z\n}\n")})
+        "\tz := 3 //nol" "int:gosec\n\t_, _, _ = x, y, z\n}\n")})            # split: the repo scans itself
     assert hits(res, "suppress.lint") == [4, 5, 6]
     assert hits(res, "suppress.security") == [7]
-    ok = stage(repo, {}, {"a.go": go("var s = \"//nolint\"\nvar r = `//nolint:gosec`\n")})
+    ok = stage(repo, {}, {"a.go": go("var s = \"//nolint\"\nvar r = `//nol" "int:gosec`\n")})
     assert not find(ok, "suppress.lint") and not find(ok, "suppress.security")
 
 
@@ -251,3 +251,43 @@ def test_go_files_under_paths_with_spaces_and_unicode(repo):
 def test_ignored_paths_are_not_checked(repo, name):
     res = stage(repo, {}, {name: go("func TestA(t *testing.T) {\n\tt.Skip(\"x\")\n\tpanic(\"TODO\")\n}\n")})
     assert not find(res, "tests.skip_added") and not find(res, "code.placeholder")
+
+
+# ---------------------------------------------------------------- review fixes
+
+def test_math_rand_only_counts_when_the_file_does_not_also_use_crypto_rand(repo):
+    mixed = go('import (\n\tcrand "crypto/rand"\n\tmrand "math/rand"\n)\n\nfunc f() {\n\ttoken := make([]byte, 8)\n\tcrand.Read(token)\n}\n')
+    assert not find(stage(repo, {}, {"a.go": mixed}), "security.weak_crypto")
+
+
+def test_sql_concatenation_needs_a_variable_operand(repo):
+    ok = go('func f(db *sql.DB) {\n\tdb.Query("select a " + "from b")\n}\n')
+    assert not find(stage(repo, {}, {"a.go": ok}), "security.sql_injection")
+    bad = go('func f(db *sql.DB, id string) {\n\tdb.Query("select \\"x\\" from t where id = " + id)\n}\n')
+    assert find(stage(repo, {}, {"a.go": bad}), "security.sql_injection")
+
+
+def test_assert_new_is_not_an_assertion_and_test_main_is_not_a_test(repo):
+    before = go("func TestMain(m *testing.M) {\n\tos.Exit(m.Run())\n}\nfunc TestHelperThing(t *testing.T) {\n\ta := assert.New(t)\n\t_ = a\n}\n")
+    res = stage(repo, {"a_test.go": before}, {"a_test.go": go("func TestHelperThing(t *testing.T) {\n}\n")})
+    assert not find(res, "tests.deleted") and not find(res, "tests.assertions_removed")
+
+
+def test_a_same_named_test_in_another_package_does_not_hide_a_deletion(repo):
+    base = go("func TestA(t *testing.T) { t.Fatal(1) }\nfunc TestB(t *testing.T) { t.Fatal(2) }\n")
+    res = stage(repo, {"p1/a_test.go": base}, {"p1/a_test.go": go("func TestA(t *testing.T) { t.Fatal(1) }\n"),
+                                              "p2/other_test.go": go("func TestB(t *testing.T) { t.Fatal(2) }\n")})
+    assert find(res, "tests.deleted")
+
+
+def test_testify_suite_methods_are_tests(repo):
+    base = go("func (s *Suite) TestA() { s.Equal(1, 1) }\nfunc (s *Suite) TestB() { s.Equal(2, 2) }\n")
+    res = stage(repo, {"a_test.go": base}, {"a_test.go": go("func (s *Suite) TestA() { s.Equal(1, 1) }\n")})
+    assert find(res, "tests.deleted") and "TestB" in find(res, "tests.deleted")[0]["message"]
+
+
+def test_structure_analysis_is_skipped_with_a_note_for_huge_files(repo):
+    text = go(long_func(70)) + "// " + "x" * 520_000 + "\n"
+    res = repo_check_verbose(repo, {"a.go": text})
+    assert not find(res, "size.function_length")
+    assert any("a.go" in n and "size and loop checks skipped" in n for n in res["notes"])

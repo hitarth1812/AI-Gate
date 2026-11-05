@@ -744,10 +744,10 @@ DEFAULT_CONFIG = {
         "tests": ["**/tests/**", "**/test/**", "**/__tests__/**", "**/spec/**", "test_*.py", "*_test.py",
                   "conftest.py", "*.test.*", "*.spec.*", "*_test.go", "*Test.java", "*Tests.java"],
         "sensitive": ["**/auth/**", "**/security/**", "**/payments/**", "**/billing/**", "**/crypto/**",
-                      "**/migrations/**"],
+                      "**/migrations/**", "go.mod", "go.sum", "go.work", "go.work.sum"],
         "forbidden": [],
         "forbidden_for_agents": [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**",
-                                 "lefthook.yml"],
+                                 "lefthook.yml", "go.work", "go.work.sum"],
     },
     "limits": {"function_lines": 60, "complexity": 10, "loop_depth": 3, "file_lines": 800,
                "diff_added_lines": 400, "diff_files": 25, "duplicate_lines": 6},
@@ -1387,7 +1387,9 @@ def npm_quote(name: str) -> str:
 class Registry:
     """PyPI / npm / OSV lookups with a local cache. Every getter returns None when the answer is unknown."""
 
-    TTL = {"exists": (86400, 3600), "info": (86400, 3600), "downloads": (7 * 86400, 3600), "osv": (86400, 3600)}
+    TTL = {"exists": (86400, 3600), "info": (86400, 3600), "downloads": (7 * 86400, 3600), "osv": (86400, 3600),
+           "vtime": (7 * 86400, 3600)}
+    OSV_ECOSYSTEM = {"pypi": "PyPI", "npm": "npm", "go": "Go"}
 
     def __init__(self, *, offline=False, timeout=6.0, budget=20.0, use_cache=True, fixture=None):
         self.offline, self.timeout = offline, timeout
@@ -1422,6 +1424,10 @@ class Registry:
     def vulns(self, eco, name, version):
         return self.get(("osv", eco, name, version))
 
+    def version_time(self, eco, name, version):
+        """Publish time of one version (Go: the proxy lists versions without times), MISSING, or None if unknown."""
+        return self.get(("vtime", eco, name, version))
+
     def prefetch(self, keys) -> None:
         keys = [k for k in dict.fromkeys(keys) if k not in self.mem]
         if not keys:
@@ -1430,6 +1436,10 @@ class Registry:
             for k in keys:
                 self.get(k)
             return
+        osv = [k for k in keys if k[0] == "osv" and self._cached(k) is _NOT_CACHED]
+        if len(osv) > 1:
+            self._osv_batch(osv)
+            keys = [k for k in keys if k not in self.mem]
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(self.get, keys))
@@ -1449,6 +1459,32 @@ class Registry:
         self.mem[key] = val
         return val
 
+    def _osv_batch(self, keys):
+        """One OSV querybatch call per 1000 packages (results come back in query order, ids only)."""
+        import urllib.error
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i:i + 1000]
+            body = json.dumps({"queries": [{"package": {"name": k[2], "ecosystem": self.OSV_ECOSYSTEM[k[1]]},
+                                            "version": k[3]} for k in chunk]}).encode()
+            try:
+                if time.monotonic() > self.deadline:
+                    return
+                status, raw = self._http("https://api.osv.dev/v1/querybatch", method="POST", body=body)
+                results = json.loads(raw).get("results") if status == 200 else None
+                if not isinstance(results, list) or len(results) != len(chunk):
+                    raise ValueError("unexpected OSV response")
+            except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+                self.failures += 1
+                self.failure_reason = self.failure_reason or network_reason(e)
+                for k in chunk:
+                    self.mem[k] = None
+                continue
+            for k, res in zip(chunk, results):
+                ids = sorted({v["id"] for v in (res or {}).get("vulns", []) if isinstance(v, dict) and v.get("id")})
+                self.mem[k] = ids
+                self.cache["|".join(map(str, k))] = {"t": time.time(), "v": ids}
+                self.dirty = True
+
     def _cached(self, key):
         entry = self.cache.get("|".join(map(str, key)))
         if not isinstance(entry, dict) or "v" not in entry:
@@ -1467,7 +1503,9 @@ class Registry:
         if kind == "exists":
             return entry not in (None, MISSING)
         if entry in (None, MISSING):
-            return {"info": MISSING, "downloads": 0, "osv": []}[kind]
+            return {"info": MISSING, "downloads": 0, "osv": [], "vtime": MISSING}[kind]
+        if kind == "vtime":
+            return (entry.get("versions") or {}).get(key[3]) or MISSING
         if kind == "info":
             return {"name": name, "created": entry.get("created"), "versions": entry.get("versions", {}),
                     "latest": entry.get("latest"), "yanked": entry.get("yanked", []),
@@ -1505,12 +1543,17 @@ class Registry:
         kind, eco, name = key[0], key[1], key[2]
         try:
             if kind == "exists":
+                if eco == "go":
+                    return self._http(f"{GO_PROXY}/{go_escape(name)}/@latest")[0] == 200
                 if eco == "pypi":
                     return self._http(f"https://pypi.org/pypi/{norm_py(name)}/json", method="HEAD")[0] == 200
                 status, raw = self._http(f"https://registry.npmjs.org/-/package/{npm_quote(name)}/dist-tags")
                 return status == 200 and "latest" in json.loads(raw or b"{}")
             if kind == "info":
                 return self._fetch_info(eco, name)
+            if kind == "vtime":
+                status, raw = self._http(f"{GO_PROXY}/{go_escape(name)}/@v/{go_escape(key[3])}.info")
+                return json.loads(raw).get("Time") or MISSING if status == 200 else MISSING
             if kind == "downloads":
                 if eco == "npm":
                     status, raw = self._http("https://api.npmjs.org/downloads/point/last-week/"
@@ -1518,7 +1561,7 @@ class Registry:
                     return int(json.loads(raw).get("downloads", 0)) if status == 200 else 0
                 status, raw = self._http(f"https://pypistats.org/api/packages/{norm_py(name)}/recent")
                 return int(json.loads(raw)["data"]["last_week"]) if status == 200 else 0
-            body = json.dumps({"package": {"name": name, "ecosystem": "PyPI" if eco == "pypi" else "npm"},
+            body = json.dumps({"package": {"name": name, "ecosystem": self.OSV_ECOSYSTEM[eco]},
                                "version": key[3]}).encode()
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
@@ -1527,7 +1570,29 @@ class Registry:
             self.failure_reason = self.failure_reason or network_reason(e)
             return None
 
+    def _fetch_info_go(self, name):
+        """Versions from the proxy's @v/list (no times: those come from vtime), the first version's time as the
+        module's creation time. A module that only has pseudo-versions has an empty list; @latest still finds it."""
+        base = f"{GO_PROXY}/{go_escape(name)}"
+        status, raw = self._http(f"{base}/@v/list")
+        versions = [v.strip() for v in raw.decode("utf-8", "replace").splitlines() if v.strip()] if status == 200 else []
+        if not versions:
+            status, raw = self._http(f"{base}/@latest")
+            if status != 200:
+                return MISSING
+            d = json.loads(raw)
+            return {"name": name, "created": d.get("Time"), "versions": {}, "latest": d.get("Version"), "yanked": [],
+                    "deprecated": None}
+        ordered = sorted(versions, key=lambda v: (release_tuple(v) or (0,), "-" not in v.split("+")[0], v))
+        status, first = self._http(f"{base}/@v/{go_escape(ordered[0])}.info")
+        created = json.loads(first).get("Time") if status == 200 else None
+        stable = [v for v in ordered if "-" not in v]
+        return {"name": name, "created": created, "versions": {v: None for v in ordered},
+                "latest": (stable or ordered)[-1], "yanked": [], "deprecated": None}
+
     def _fetch_info(self, eco, name):
+        if eco == "go":
+            return self._fetch_info_go(name)
         if eco == "pypi":
             status, raw = self._http(f"https://pypi.org/pypi/{norm_py(name)}/json")
             if status != 200:
@@ -1627,11 +1692,13 @@ def _expr_start(text: str, pos: int) -> bool:
     if not head:
         return True
     c = head[-1]
+    if head.endswith(("++", "--")):                     # a postfix operator ends a value: n++ / 2
+        return False
     if c in "([{,;:=!&|?+-*%<>~^":
         return True
     if c.isalnum() or c in "_$":
         m = re.search(r"[A-Za-z_$][\w$]*$", head)
-        return bool(m) and m.group(0) in EXPR_KEYWORDS
+        return bool(m) and m.group(0) in EXPR_KEYWORDS and head[:m.start()].rstrip()[-1:] != "."
     return False
 
 
@@ -1853,6 +1920,7 @@ class Lexed:
             self.starts.append(off)
             off += len(ln) + 1
         self._masked: dict = {}
+        self._code: dict = {}
 
     def line(self, n):
         return self.lines[n - 1] if 0 < n <= len(self.lines) else ""
@@ -1868,9 +1936,13 @@ class Lexed:
         text = self.line(n) if text is None else text
         ok = where if isinstance(where, tuple) else (where,)
         for m in rx.finditer(text):
-            if self.kind_at(n, m.start()) in ok:
+            if self.region(n, m) in ok:
                 return m
         return None
+
+    def region(self, n, m):
+        """Region of a match: where its first non-blank character is (a pattern may start with the indentation)."""
+        return self.kind_at(n, m.start() + len(m.group(0)) - len(m.group(0).lstrip()))
 
     def masked(self, n, hide=(STR, COM)):
         """Line n with every hidden region replaced by spaces (same length, columns unchanged)."""
@@ -1883,11 +1955,11 @@ class Lexed:
 
     def code_text(self, hide=(STR, COM)):
         """The whole file with hidden regions blanked (newlines kept), for brace and keyword scans."""
-        if self._code is None:
-            self._code = "".join(" " if k in hide and ch != "\n" else ch for ch, k in zip(self.text, self.kinds))
-        return self._code
-
-    _code = None
+        got = self._code.get(hide)
+        if got is None:
+            got = self._code[hide] = "".join(" " if k in hide and ch != "\n" else ch
+                                              for ch, k in zip(self.text, self.kinds))
+        return got
 
 
 def lex_text(text, cfg):
@@ -1968,8 +2040,8 @@ def _spec_js() -> LanguageSpec:
               re.compile(r"\b(?:const|let|var)\s+(?P<name>[\w$]+)\s*(?::[^=;]+)?=\s*(?:async\s*)?"
                          r"(?:\([^()]*\)|[\w$]+)\s*(?::\s*[^=>{;]+)?=>\s*\{"),
               re.compile(r"^[ \t]*(?:(?:public|private|protected|static|async|readonly|override|get|set)\s+)*"
-                         + skip_kw + r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>\n]*>)?\s*\([^;{}()]*(?:\([^()]*\)[^;{}()]*)*\)"
-                         r"\s*(?::\s*[^{;=]+)?\{", re.M)),
+                         + skip_kw + r"(?P<name>[A-Za-z_$][\w$]*)(?:[ \t]*<[^>\n]*>)?[ \t]*\([^;{}()]*(?:\([^()]*\)[^;{}()]*)*\)"
+                         r"\s*(?::[ \t]*[^{;=\n]+)?\{", re.M)),
         loop=re.compile(r"\b(?:for|while)\b"), loop_header="paren",
         branch=re.compile(r"\b(?:if|for|while|case|catch)\b|&&|\|\||\?(?![.?])"))
 
@@ -1978,7 +2050,8 @@ def _spec_go() -> LanguageSpec:
     lex = LexConfig(line_comments=("//",), block_comments=((r"/\*", "*/", False),),
                     strings=(StrForm(r"`", "`", esc=""), StrForm(r'"', '"', nl=False), StrForm(r"'", "'", nl=False)))
     sql = r"(?:select|insert|update|delete)\b"
-    q = r"\.(?:Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext|Prepare|PrepareContext)\w*\("
+    lit = r"(?:[^\"`\\]|\\.)*"                 # the inside of a string literal, escapes included
+    q =r"\.(?:Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext|Prepare|PrepareContext)\w*\("
     return LanguageSpec(
         "go", lex, eco="go",
         rules=(
@@ -1987,11 +2060,11 @@ def _spec_go() -> LanguageSpec:
                 r"\s*\"(?:-c|/c|-Command)\"\s*,(?!\s*(?:\"[^\"\\]*\"|`[^`]*`)\s*\))"),
                 "shell command built at runtime"),
             LineRule("security.sql_injection", re.compile(
-                q + r"\s*(?:[\w.]+\s*,\s*)?(?:fmt\.Sprintf\(\s*[\"`][^\"`]*\b" + sql + r"|[\"`][^\"`]*\b" + sql
-                + r"[^\"`]*[\"`]\s*\+)", re.I), "SQL built from variables"),
+                q + r"\s*(?:[\w.]+\s*,\s*)?(?:fmt\.Sprintf\(\s*[\"`]" + lit + r"\b" + sql + r"|[\"`]" + lit + r"\b" + sql
+                + lit + r"[\"`]\s*\+(?!\s*[\"`]))", re.I), "SQL built from variables"),
             LineRule("security.weak_crypto", re.compile(
                 r"\brand\.(?:Int|Intn|Int31|Int31n|Int63|Int63n|Uint32|Uint64|Float64|Read|Perm|Shuffle)\w*\("),
-                "math/rand is not for secrets", needs=re.compile(r"\"math/rand(?:/v2)?\""),
+                "math/rand is not for secrets", needs=re.compile(r'\A(?!.*"crypto/rand")(?=.*"math/rand(?:/v2)?")', re.S),
                 also=re.compile(r"(?i)\w*(?:token|secret|password|passwd|nonce|salt|session|api_?key|otp|key)\w*")),
             LineRule("code.swallowed_exception", re.compile(
                 r"^\s*_\s*=\s*err\s*(?:;|$)|\bif\s+err\s*!=\s*nil\s*\{\s*\}"), "error silently dropped"),
@@ -2005,8 +2078,8 @@ def _spec_go() -> LanguageSpec:
         loop=re.compile(r"\bfor\b"), loop_header="eol", same_line_brace=True,
         branch=re.compile(r"\b(?:if|for|case|select)\b|&&|\|\|"),
         test_skip=re.compile(r"\.Skip(?:Now|f)?\("),
-        test_assert=re.compile(r"\b(?:t|b|tb|s\.T\(\))\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(|\b(?:assert|require)\.\w+\("),
-        test_case=re.compile(r"^func\s+(?P<name>(?:Test|Benchmark|Fuzz|Example)\w*)\s*\(", re.M),
+        test_assert=re.compile(r"\b(?:t|b|tb|s\.T\(\))\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(|\b(?:assert|require)\.(?!New\b)\w+\("),
+        test_case=re.compile(r"^func\s+(?:\([^)]*\)\s*)?(?P<name>(?:Test(?!Main\b)|Benchmark|Fuzz|Example)(?![a-z])\w*)\s*\(", re.M),
         swallow=re.compile(r"\bif\s+err\s*!=\s*nil\s*\{\s*$"), tests=("*_test.go",))
 
 
@@ -2071,9 +2144,13 @@ def _body_open(ct, pos, spec, pairs) -> int:
 
 def analyze_functions(lx, spec) -> list:
     """Function spans, decision points and loop nesting from brace structure. Heuristic: it runs on text with
-    strings and comments blanked, but it does not parse the language."""
+    strings and comments blanked, but it does not parse the language. Raises LexError when the file is too big or
+    the analysis runs past its time budget (the caller then skips it)."""
     import bisect
     ct = lx.code_text()
+    if len(ct) > 500_000:
+        raise LexError("too large for structure analysis")
+    deadline = time.monotonic() + LEX_SECONDS
     pairs = _brace_pairs(ct)
     starts = lx.starts
 
@@ -2086,13 +2163,16 @@ def analyze_functions(lx, spec) -> list:
             op = _body_open(ct, m.end(), spec, pairs)
             if op >= 0 and op in pairs and op not in found:
                 found[op] = (m.group("name"), m.start())
+            if len(found) & 63 == 0 and time.monotonic() > deadline:
+                raise LexError("structure analysis too slow")
     out = []
     for op, (name, header) in sorted(found.items()):
+        if time.monotonic() > deadline:
+            raise LexError("structure analysis too slow")
         close = pairs[op]
-        body = ct[op:close + 1]
         loops = []
-        for m in spec.loop.finditer(body) if spec.loop else ():
-            at = op + m.start()
+        for m in spec.loop.finditer(ct, op, close + 1) if spec.loop else ():
+            at = m.start()
             if spec.loop_header == "eol":
                 nl = ct.find("\n", at)
                 brace = ct.rfind("{", at, nl if nl >= 0 else len(ct))
@@ -2108,12 +2188,14 @@ def analyze_functions(lx, spec) -> list:
                         brace = end + len(rest) - len(rest.lstrip())
             if brace in pairs:
                 loops.append((brace, pairs[brace], line_of(at)))
-        depth, deepest = 0, line_of(header)
-        for lo, hi, ln in loops:
-            d = 1 + sum(1 for lo2, hi2, _l in loops if lo2 < lo and hi < hi2)
-            if d > depth:
-                depth, deepest = d, ln
-        cx = 1 + (len(spec.branch.findall(body)) if spec.branch else 0)
+        depth, deepest, open_ = 0, line_of(header), []      # loop bodies nest properly, so a stack gives the depth
+        for lo, hi, ln in sorted(loops):
+            while open_ and open_[-1] < lo:
+                open_.pop()
+            open_.append(hi)
+            if len(open_) > depth:
+                depth, deepest = len(open_), ln
+        cx = 1 + (len(spec.branch.findall(ct, op, close + 1)) if spec.branch else 0)
         first, last = line_of(header), line_of(close)
         out.append(FuncInfo(name, first, last, last - first + 1, cx, depth, deepest))
     return out
@@ -2130,14 +2212,37 @@ def hit(lx, rx, line, text, where=CODE):
 
 
 def _count(lx, rx, rows) -> int:
-    """Matches of `rx` that start in code, over (line number, text) rows."""
+    """Matches of `rx` over (line number, text) rows joined with newlines (so a match may span lines, as before);
+    with a lexer view only those that start in code count."""
+    from bisect import bisect_right
+    rows = list(rows)
+    joined = "\n".join(t for _, t in rows)
+    if lx is None:
+        return len(rx.findall(joined))
+    starts, off = [], 0
+    for _, t in rows:
+        starts.append(off)
+        off += len(t) + 1
     total = 0
-    for line, text in rows:
-        if lx is not None and lx.line(line).rstrip("\r") == text.rstrip("\r"):
-            total += sum(1 for m in rx.finditer(text) if lx.kind_at(line, m.start()) == CODE)
-        else:
-            total += len(rx.findall(text))
+    for m in rx.finditer(joined):
+        i = max(0, bisect_right(starts, m.start()) - 1)
+        line, text = rows[i]
+        if lx.line(line).rstrip("\r") != text.rstrip("\r") or lx.region(line, _Shift(m, starts[i])) == CODE:
+            total += 1
     return total
+
+
+class _Shift:
+    """A match seen from the line it starts on (group(0) for the text from its start, start() as a column)."""
+
+    def __init__(self, m, base):
+        self._m, self._base = m, base
+
+    def start(self):
+        return self._m.start() - self._base
+
+    def group(self, _n=0):
+        return self._m.group(0)
 
 
 def _needs(lx, rx, cache) -> bool:
@@ -2157,7 +2262,7 @@ def check_lang(ctx) -> list:
 
 
 def _lang_file(ctx, fc, spec) -> list:
-    out, lim, test = [], ctx.cfg["limits"], ctx.is_test(fc.path)
+    out, test = [], ctx.is_test(fc.path)
     lx = ctx.lexed(fc)
     if lx is None and spec.rules:
         return out                                   # no lexer view: the shared line checks still ran
@@ -2178,23 +2283,34 @@ def _lang_file(ctx, fc, spec) -> list:
             if hit(lx, spec.swallow, line, text, CODE) and re.fullmatch(r"\s*\}\s*", lx.masked(line + 1)):
                 out.append(make("code.swallowed_exception", fc.path, line, "empty error handler", key=text.strip()))
     if lx is not None and spec.func:
-        old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
-        old = {f.name: f for f in analyze_functions(old_lx, spec)} if old_lx is not None else {}
-        for f in analyze_functions(lx, spec):
-            if not any(ln in fc.added for ln in range(f.line, f.end + 1)):
-                continue
-            o = old.get(f.name)
-            if f.length > lim["function_lines"] and (o is None or f.length > o.length):
-                out.append(make("size.function_length", fc.path, f.line,
-                                f"{f.name}() is {f.length} lines (limit {lim['function_lines']})", key=f.name))
-            if f.complexity > lim["complexity"] and (o is None or f.complexity > o.complexity):
-                out.append(make("size.complexity", fc.path, f.line,
-                                f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}, estimated "
-                                "from brace structure)", key=f.name))
-            if f.depth >= lim["loop_depth"] and (o is None or f.depth > o.depth):
-                out.append(make("perf.nested_loops", fc.path, f.deepest,
-                                f"{f.name}() nests {f.depth} loops (≈O(n^{f.depth}), estimated from brace structure)",
-                                key=f.name))
+        try:
+            out += _structure_findings(ctx, fc, spec, lx)
+        except LexError as e:                       # too large or too slow: skip the structure rules for this file
+            note = f"lang.fallback: {fc.path}: {e}; size and loop checks skipped"
+            if note not in ctx.lang_notes:
+                ctx.lang_notes.append(note)
+    return out
+
+
+def _structure_findings(ctx, fc, spec, lx) -> list:
+    out, lim = [], ctx.cfg["limits"]
+    old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
+    old = {f.name: f for f in analyze_functions(old_lx, spec)} if old_lx is not None else {}
+    for f in analyze_functions(lx, spec):
+        if not any(ln in fc.added for ln in range(f.line, f.end + 1)):
+            continue
+        o = old.get(f.name)
+        if f.length > lim["function_lines"] and (o is None or f.length > o.length):
+            out.append(make("size.function_length", fc.path, f.line,
+                            f"{f.name}() is {f.length} lines (limit {lim['function_lines']})", key=f.name))
+        if f.complexity > lim["complexity"] and (o is None or f.complexity > o.complexity):
+            out.append(make("size.complexity", fc.path, f.line,
+                            f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}, estimated "
+                            "from brace structure)", key=f.name))
+        if f.depth >= lim["loop_depth"] and (o is None or f.depth > o.depth):
+            out.append(make("perf.nested_loops", fc.path, f.deepest,
+                            f"{f.name}() nests {f.depth} loops (≈O(n^{f.depth}), estimated from brace structure)",
+                            key=f.name))
     return out
 
 
@@ -2217,10 +2333,11 @@ def _lang_tests(ctx) -> list:
             files.append((fc, spec))
     if not files:
         return out
-    all_added = set()
+    all_added = set()          # (package directory | file name, test name): a test moved within the package or with its file
     for fc, spec in files:
         if not fc.deleted:
-            all_added |= set(_test_names(spec, ctx.lexed(fc), fc.added.items()))
+            for n in _test_names(spec, ctx.lexed(fc), fc.added.items()):
+                all_added |= {(fc.path.rsplit("/", 1)[0] if "/" in fc.path else "", n), (fc.name, n)}
     for fc, spec in files:
         lx = None if fc.deleted else ctx.lexed(fc)
         old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
@@ -2239,7 +2356,8 @@ def _lang_tests(ctx) -> list:
                     out.append(make("tests.assertions_removed", fc.path, None, f"net {lost} assertion(s) removed",
                                     key="asserts"))
         added_here = _test_names(spec, lx, fc.added.items()) if not fc.deleted else []
-        gone = [n for n in removed_names if n not in all_added]
+        where = fc.path.rsplit("/", 1)[0] if "/" in fc.path else ""
+        gone = [n for n in removed_names if (where, n) not in all_added and (fc.name, n) not in all_added]
         renamed = len([n for n in added_here if n not in removed_names])        # TestA -> TestB in the same file
         if len(gone) > renamed:
             out.append(make("tests.deleted", fc.path, None,
@@ -2602,13 +2720,14 @@ TRUSTED_DEFAULT = ("https://pypi.org/", "https://files.pythonhosted.org/", "http
 
 @dataclasses.dataclass
 class Dep:
-    eco: str                     # pypi | npm
+    eco: str                     # pypi | npm | go
     name: str
     spec: str = ""
     source: str = "registry"     # registry | git | url | path | index | workspace
     line: int | None = None
     origin: str = ""
     alias: str | None = None     # npm "npm:<target>" alias
+    indirect: bool = False       # go.mod "// indirect": added by `go mod tidy`
 
 
 REQ_NAME = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[[^\]]*\])?\s*(.*)$")
@@ -2827,6 +2946,8 @@ def manifest_kind(path: str):
         return "setup.py"
     if low == "package.json":
         return "npm"
+    if base in ("go.mod", "go.work"):
+        return "gomod"
     if low.endswith((".txt", ".in")) and ("requirements" in low or "constraints" in low
                                            or "/requirements/" in "/" + path.lower()):
         return "requirements"
@@ -3300,6 +3421,254 @@ def js_imports(ctx):
     return findings, candidates
 
 
+# --------------------------------------------------------------------------- manifests: Go modules
+
+GO_PROXY = "https://proxy.golang.org"
+GO_KNOWN = frozenset(("module", "go", "toolchain", "godebug", "exclude", "retract", "tool", "ignore", "require",
+                      "replace", "use"))
+GO_PSEUDO = re.compile(r"-\d{14}-[0-9a-f]{12}(?:\+incompatible)?$")
+
+
+def go_escape(text: str) -> str:
+    """The proxy's case encoding: every upper-case letter becomes `!` and its lower-case form."""
+    import urllib.parse
+    return urllib.parse.quote("".join("!" + c.lower() if c.isupper() else c for c in text), safe="/!")
+
+
+def _go_words(line: str) -> list:
+    line = re.sub(r"(?:^|\s)//.*$", "", line)
+    return [w[1:-1] if len(w) > 1 and w[0] in "\"`" and w[-1] == w[0] else w
+            for w in re.findall(r'"[^"]*"|`[^`]*`|\S+', line)]
+
+
+def parse_go_mod(text: str, path: str):
+    """(deps, problems, module) from a go.mod or go.work. deps maps a key to a Dep (eco "go"): a requirement is
+    source "registry" with its exact version as `spec`, a replace to a local directory is "path", a replace by
+    another module is "replace". problems lists (line, text) for lines that could not be understood: the manifest
+    is never silently treated as fine."""
+    deps, problems, module = {}, [], None
+    block = None
+    for n, raw in enumerate(text.split("\n"), 1):
+        words = _go_words(raw.rstrip("\r"))
+        if not words:
+            continue
+        if block is not None:
+            if words == [")"]:
+                block = None
+                continue
+            directive, args = block, words
+        else:
+            directive, args = words[0], words[1:]
+            if directive not in GO_KNOWN:
+                problems.append((n, raw.strip()[:80]))
+                continue
+            if args == ["("]:
+                block = directive
+                continue
+        if directive == "module" and args:
+            module = args[0]
+        elif directive == "require":
+            if len(args) == 2:
+                deps[args[0]] = Dep("go", args[0], args[1], "registry", n, path,
+                                    indirect=bool(re.search(r"//\s*indirect\b", raw)))
+            else:
+                problems.append((n, raw.strip()[:80]))
+        elif directive == "replace":
+            if "=>" in args and args.index("=>") in (1, 2) and len(args) - args.index("=>") in (2, 3):
+                at = args.index("=>")
+                old, new = args[0], args[at + 1]
+                local = new.startswith(("./", "../", "/", ".\\", "..\\")) or re.match(r"^[A-Za-z]:[\\/]", new)
+                deps[f"replace {old}"] = Dep("go", old, new, "path" if local else "replace", n, path)
+            else:
+                problems.append((n, raw.strip()[:80]))
+        elif directive in ("module", "use") and not args:
+            problems.append((n, raw.strip()[:80]))
+    if block is not None:
+        problems.append((len(text.split("\n")), f"unclosed {block} block"))
+    return deps, problems, module
+
+
+def go_private(module: str, extra=()) -> bool:
+    """GOPRIVATE / GONOPROXY patterns (comma separated globs matching a prefix of the module path) and [deps] private."""
+    import fnmatch
+    parts = module.split("/")
+    pats = [p for var in ("GOPRIVATE", "GONOPROXY") for p in os.environ.get(var, "").split(",") if p.strip()]
+    for pat in pats:
+        prefix = "/".join(parts[:pat.strip().count("/") + 1])
+        if fnmatch.fnmatchcase(prefix, pat.strip()):
+            return True
+    return any(path_matches("/".join(parts[:n]), extra) for n in range(1, len(parts) + 1))
+
+
+def go_registry_enabled() -> bool:
+    """False when GOPROXY points somewhere other than the public proxy (a private proxy knows other modules)."""
+    proxy = os.environ.get("GOPROXY", "")
+    return not proxy or "proxy.golang.org" in proxy
+
+
+def go_manifest(ctx, fc, pending) -> list:
+    """Findings for a changed go.mod / go.work; registry requirements are queued on `pending` like other manifests."""
+    out, dcfg = [], ctx.cfg["deps"]
+    new_text, old_text = ctx.new_text(fc), ctx.old_text(fc)
+    if new_text is None:
+        return out
+    new_deps, problems, _m = parse_go_mod(new_text, fc.path)
+    old_deps, old_problems, _o = parse_go_mod(old_text, fc.path) if old_text else ({}, [], None)
+    seen = {p[1] for p in old_problems}
+    for n, text in problems:
+        if text not in seen and (n in fc.added or fc.status == "A"):
+            out.append(make("deps.unverified", fc.path, n, f"{fc.name} line {n} could not be parsed: {text}",
+                            key=text))
+    for key, dep in new_deps.items():
+        old = old_deps.get(key)
+        if old and (old.spec, old.source) == (dep.spec, dep.source):
+            continue
+        if dep.source == "path":
+            out.append(make("deps.local_source", fc.path, dep.line, f"{dep.name} is replaced by the local path "
+                            f"{dep.spec}", key=key))
+        elif dep.source == "replace":
+            out.append(make("deps.untrusted_source", fc.path, dep.line,
+                            f"{dep.name} is replaced by another module ({dep.spec}); the proxy and checksum database "
+                            "see the replacement, not the original", key=key))
+        elif go_registry_enabled() and not go_private(dep.name, dcfg["private"]):
+            pending.append((dep, old, fc))
+    return out
+
+
+def go_evaluate(ctx, dep, old, path) -> list:
+    """Registry findings for one go.mod requirement. Versions in go.mod are exact (minimum version selection)."""
+    out, reg, dcfg, name = [], ctx.registry, ctx.cfg["deps"], dep.name
+    if dep.indirect:                                      # added by `go mod tidy`: only the vulnerability check
+        vulns = reg.vulns("go", name, dep.spec)
+        if vulns:
+            out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
+                            f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+        return out
+    info = reg.info("go", name)
+    if info is None:
+        return unverified(ctx, path, dep.line, f"{name}: could not reach the Go module proxy to verify it", name)
+    if info == MISSING:
+        return [make("deps.hallucinated", path, dep.line,
+                     f"{name} does not exist on the Go module proxy (if it is private, set GOPRIVATE or "
+                     "[deps] private)", key=name)]
+    if old is None:
+        age = age_days(info.get("created"))
+        if age is not None and age < dcfg["new_package_days"]:
+            out.append(make("deps.new_package", path, dep.line, f"{name} was first published {age_text(age)} ago",
+                            key=name))
+    when = reg.version_time("go", name, dep.spec)
+    if when is None:
+        return out + unverified(ctx, path, dep.line, f"{name} {dep.spec}: could not reach the Go module proxy", name)
+    if when == MISSING:
+        return out + [make("deps.hallucinated", path, dep.line, f"{name} has no version {dep.spec} on the Go module "
+                           "proxy", key=f"{name}@{dep.spec}")]
+    age = age_days(when)
+    if age is not None and age < dcfg["cooldown_days"] and not (old and reg.vulns("go", name, old.spec)):
+        out.append(make("deps.version_cooldown", path, dep.line,
+                        f"{name} {dep.spec} was published {age_text(age)} ago (cooldown: {dcfg['cooldown_days']} days)",
+                        key=f"{name}@{dep.spec}"))
+    vulns = reg.vulns("go", name, dep.spec)
+    if vulns:
+        out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
+                        f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+    return out
+
+
+@dataclasses.dataclass
+class GoImp:
+    path: str
+    line: int
+    spec: str                    # the import path
+    cands: list                  # module paths it may belong to, most likely first
+
+
+GO_IMPORT = re.compile(r"(?m)^[ \t]*import\b")
+GO_IMPORT_PATH = re.compile(r'"([^"\n]+)"|`([^`\n]+)`')
+
+
+def go_import_paths(text: str, masked=None) -> list:
+    """(line, import path) for every import statement. `masked` is the same text with strings and comments
+    blanked: the `import` keyword and the parentheses are found there, so an `import "x"` written inside a string
+    or a comment is not an import; the quoted paths themselves are read from `text`."""
+    masked = text if masked is None else masked
+    out = []
+    for m in GO_IMPORT.finditer(masked):
+        end = m.end()
+        paren = re.match(r"[ \t]*\(", masked[end:end + 80])
+        if paren:
+            close = masked.find(")", end + paren.end())
+            end_stmt = len(masked) if close < 0 else close
+        else:
+            nl = masked.find("\n", end)
+            end_stmt = len(masked) if nl < 0 else nl
+        for q in GO_IMPORT_PATH.finditer(text, end, end_stmt):
+            path = q.group(1) or q.group(2)
+            out.append((text.count("\n", 0, q.start()) + 1, path))
+    return out
+
+
+def go_candidates(spec: str) -> list:
+    """Module paths an import path may live in: hosts with a known layout first, then a couple of prefixes."""
+    parts = spec.split("/")
+    host = parts[0]
+    base = 2 if host == "gopkg.in" else 3 if host in ("github.com", "gitlab.com", "bitbucket.org", "golang.org") else 2
+    lens = [base] if host in ("github.com", "gitlab.com", "bitbucket.org", "golang.org", "gopkg.in") else [2, 3]
+    if len(parts) > base and re.fullmatch(r"v\d+", parts[base]):
+        lens.insert(0, base + 1)
+    return ["/".join(parts[:n]) for n in dict.fromkeys(lens) if n <= len(parts)]
+
+
+def go_project(ctx):
+    """({go.mod dir: (module path, declared module paths)}, [local module paths])."""
+    if "go" not in ctx.cache:
+        mods, local = {}, []
+        for p in ctx.files:
+            if p.rsplit("/", 1)[-1] == "go.mod" and not ctx.ignored(p):
+                deps, _problems, module = parse_go_mod(ctx.read_new(p) or "", p)
+                mods[p.rsplit("/", 1)[0] if "/" in p else ""] = (module, {d.name for d in deps.values()})
+                if module:
+                    local.append(module)
+        ctx.cache["go"] = (mods, local)
+    return ctx.cache["go"]
+
+
+def go_imports(ctx):
+    """deps.undeclared candidates: new imports of third-party packages that go.mod does not require. Skipped when
+    there is no go.mod above the file (nothing to compare with)."""
+    out = []
+    files = [fc for fc in ctx.code_changes({".go"}) if fc.added]
+    if not files or not go_registry_enabled():
+        return out
+    mods, local = go_project(ctx)
+    if not mods:
+        return out
+    private = ctx.cfg["deps"]["private"]
+    first = list(ctx.cfg["deps"]["first_party"]) + local
+
+    def paths(fc, which):
+        lx = ctx.lexed(fc, which)
+        if lx is None:
+            return go_import_paths((ctx.new_text(fc) if which == "new" else ctx.old_text(fc)) or "")
+        return go_import_paths(lx.code_text((COM,)), lx.code_text())
+    for fc in files:
+        dirs = fc.path.split("/")[:-1]
+        nearest = next((d for d in ("/".join(dirs[:i]) for i in range(len(dirs), -1, -1)) if d in mods), None)
+        if nearest is None:
+            continue
+        declared = mods[nearest][1]
+        old = {spec for _l, spec in paths(fc, "old")} if fc.old_spec else set()
+        seen = set()
+        for line, spec in paths(fc, "new"):
+            if line not in fc.added or spec in old or spec in seen or "." not in spec.split("/")[0] or spec == "C":
+                continue
+            seen.add(spec)
+            if any(spec == m or spec.startswith(m + "/") for m in declared | set(first)) \
+                    or go_private(spec, private):
+                continue
+            out.append(GoImp(fc.path, line, spec, go_candidates(spec)))
+    return out
+
+
 # --------------------------------------------------------------------------- checks: dependencies
 
 def exact_pin(eco, spec):
@@ -3408,6 +3777,9 @@ def check_deps(ctx) -> list:
         if fc.deleted or fc.binary or fc.symlink or ctx.ignored(fc.path):
             continue
         kind = manifest_kind(fc.path)
+        if kind == "gomod":
+            out += go_manifest(ctx, fc, pending)
+            continue
         if kind and kind != "setup.py":
             new_text = ctx.new_text(fc)
             new_deps, new_sources = parse_manifest(kind, new_text, fc.path)
@@ -3450,14 +3822,21 @@ def check_deps(ctx) -> list:
     js_find, js_cand = js_imports(ctx)
     out += py_find + js_find
     imports = py_cand + js_cand
-    squats = [(dep, fc, p) for dep, old, fc in pending if old is None
+    go_cand = go_imports(ctx)
+    squats = [(dep, fc, p) for dep, old, fc in pending if old is None and dep.eco != "go"
               for p in [typosquat_of(dep.eco, dep.alias or dep.name)] if p]
 
-    reg.prefetch([("info", d.eco, d.alias or d.name) for d, _, _ in pending]
+    reg.prefetch([("info", d.eco, d.alias or d.name) for d, _, _ in pending if not d.indirect]
+                 + [("vtime", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go" and not d.indirect]
                  + [("exists", i.eco, i.lookup) for i in imports]
+                 + [("exists", "go", c) for g in go_cand for c in g.cands]
                  + [("downloads", d.eco, d.alias or d.name) for d, _, _ in squats])
-    osv = []
+    osv = [("osv", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go"]
     for dep, old, _fc in pending:
+        if dep.eco == "go":
+            if old is not None and not old.indirect:
+                osv.append(("osv", "go", dep.name, old.spec))
+            continue
         info = reg.info(dep.eco, dep.alias or dep.name)
         if isinstance(info, dict):
             for spec in (dep.spec, old.spec if old else None):
@@ -3468,7 +3847,7 @@ def check_deps(ctx) -> list:
     reg.prefetch(osv)
 
     for dep, old, fc in pending:
-        out += evaluate_dep(ctx, dep, old, fc.path)
+        out += (go_evaluate if dep.eco == "go" else evaluate_dep)(ctx, dep, old, fc.path)
     for dep, fc, popular in squats:
         downloads = reg.downloads(dep.eco, dep.alias or dep.name)
         if downloads is not None and downloads >= dcfg["typosquat_min_weekly_downloads"]:
@@ -3493,6 +3872,18 @@ def check_deps(ctx) -> list:
                             f"{label}: '{imp.lookup}' is not installed here and not declared"
                             + ("" if imp.manifest else " (the project has no manifest)"),
                             action=None if imp.manifest else "warn", key=imp.lookup))
+    for g in go_cand:
+        found = [reg.exists("go", c) for c in g.cands]
+        if any(f is True for f in found):
+            mod = g.cands[found.index(True)]
+            out.append(make("deps.undeclared", g.path, g.line,
+                            f"'{g.spec}': module {mod} is not required by go.mod (run go get or go mod tidy)", key=mod))
+        elif all(f is False for f in found):
+            out.append(make("deps.hallucinated", g.path, g.line,
+                            f"'{g.spec}': no such module on the Go module proxy, and it is not in go.mod "
+                            "(if it is private, set GOPRIVATE or [deps] private)", key=g.cands[0]))
+        else:
+            out += unverified(ctx, g.path, g.line, f"'{g.spec}': could not reach the Go module proxy", g.cands[0])
     return out
 
 
@@ -3837,8 +4228,8 @@ def _suppression_hit(lx, rx, line, text):
     if lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
         return rx.search(text)
     for m in rx.finditer(text):
-        kind = lx.kind_at(line, m.start())
-        if kind == COM or (kind == CODE and m.group(0).startswith("@")):
+        kind = lx.region(line, m)
+        if kind == COM or (kind == CODE and m.group(0).lstrip().startswith("@")):
             return m
     return None
 
@@ -3974,8 +4365,7 @@ def _code_lines_file(ctx, fc) -> list:
     if is_js:
         for block in _blocks(fc.added):
             rows = [(ln, fc.added[ln]) for ln in block]
-            joined = "\n".join(lx.masked(ln, (COM,)) if lx is not None and lx.line(ln).rstrip("\r") == t.rstrip("\r")
-                               else t for ln, t in rows)
+            joined = "\n".join(t for _, t in rows)         # raw text: `catch (e) { /* ignore */ }` says it is meant
             for m in JS_SWALLOW.finditer(joined):
                 pre = joined[:m.start()]
                 line = block[0] + pre.count("\n")
@@ -6142,6 +6532,13 @@ def cmd_trust(args) -> int:
     return 0
 
 
+HEURISTIC_RULES = {
+    "size.function_length": "[Go and JavaScript/TypeScript: function spans are estimated from brace structure, not parsed]",
+    "size.complexity": "[Go and JavaScript/TypeScript: estimated by counting decision points in the function body]",
+    "perf.nested_loops": "[Go and JavaScript/TypeScript: loop nesting is estimated from brace structure]",
+}
+
+
 def cmd_explain(args) -> int:
     if not args.rule:
         print(ATTRIBUTION)
@@ -6155,6 +6552,8 @@ def cmd_explain(args) -> int:
         return 2
     allow = (f'[[allow]]\nrule = "{r.id}"\npath = "<glob>"            # or fingerprint = "<from -v output>"\n'
              f'reason = "<why this is safe>"')
+    if r.id in HEURISTIC_RULES:
+        r = dataclasses.replace(r, hint=r.hint + " " + HEURISTIC_RULES[r.id])
     print(f"{r.id}: {r.title}\n  default action: {r.action}   severity: {r.severity}   confidence: {r.confidence}"
           f"{'   stricter in sensitive paths' if r.escalate else ''}\n  fix: {r.hint}\n\n"
           f"Change it for the whole repo in .aigate/lite.toml:\n  [rules]\n  \"{r.id}\" = \"warn\"   # or off\n\n"

@@ -31,8 +31,9 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
-FIXTURE_VERSION = "3"            # bump when generated content changes; forces a rebuild
-SCENARIOS = ("A", "B", "C", "D", "E")
+FIXTURE_VERSION = "4"            # bump when generated content changes; forces a rebuild
+SCENARIOS = ("A", "B", "C", "D", "E", "F")
+INFO_SCENARIOS = ("F",)          # recorded, not gated: F is the polyglot commit (Go + TypeScript + Python)
 BASELINE_ENTRIES = 1000          # scenario E: the A change with a baseline of this size present
 COLD = ("A", "C")                # also measured with each EXTRA flag below, not gated
 EXTRA = {"cold": "--no-cache",   # result and lookup caches off
@@ -117,6 +118,75 @@ def write(repo, rel, text):
         fh.write(text)
 
 
+def go_module(i: int, lines: int = 30) -> str:
+    """Realistic, clean Go: stdlib imports, a struct, two small functions and a switch."""
+    body = [
+        f"// Package orders{i} has order helpers.",
+        f"package orders{i}",
+        "",
+        "import (",
+        '\t"encoding/json"',
+        '\t"fmt"',
+        ")",
+        "",
+        "type Item struct {",
+        "\tName string",
+        "\tQty  int",
+        "}",
+        "",
+        f"func Total{i}(items []Item) int {{",
+        "\tsum := 0",
+        "\tfor _, item := range items {",
+        "\t\tif item.Qty > 0 {",
+        "\t\t\tsum += item.Qty",
+        "\t\t}",
+        "\t}",
+        "\treturn sum",
+        "}",
+        "",
+        f"func Dump{i}(items []Item) (string, error) {{",
+        "\tb, err := json.Marshal(items)",
+        "\tif err != nil {",
+        '\t\treturn "", fmt.Errorf("dump: %w", err)',
+        "\t}",
+        "\treturn string(b), nil",
+        "}",
+    ]
+    while len(body) < lines:
+        body.append(f"// note {len(body)}")
+    return "\n".join(body[:lines]) + "\n"
+
+
+def go_test_module(i: int) -> str:
+    return (f"package orders{i}\n\nimport \"testing\"\n\nfunc TestTotal{i}(t *testing.T) {{\n"
+            f"\tif got := Total{i}([]Item{{{{\"a\", 2}}}}); got != 2 {{\n\t\tt.Errorf(\"total = %d\", got)\n\t}}\n}}\n")
+
+
+def ts_module(i: int, lines: int = 30) -> str:
+    body = [
+        "import { format } from './format';",
+        "",
+        f"export interface Item{i} {{ name: string; qty: number }}",
+        "",
+        f"export function total{i}(items: Item{i}[]): number {{",
+        "  let sum = 0;",
+        "  for (const item of items) {",
+        "    if (item.qty > 0) {",
+        "      sum += item.qty;",
+        "    }",
+        "  }",
+        "  return sum;",
+        "}",
+        "",
+        f"export const label{i} = (item: Item{i}): string => {{",
+        "  return format(item.name, item.qty);",
+        "};",
+    ]
+    while len(body) < lines:
+        body.append(f"// note {len(body)}")
+    return "\n".join(body[:lines]) + "\n"
+
+
 def init_small(repo):
     os.makedirs(repo)
     git(repo, "init", "-q", "-b", "main")
@@ -166,7 +236,14 @@ def stage_change(repo, scenario):
                 write(repo, f"web/gen/m{i:03d}.js", js_module(i, 10))
             else:
                 write(repo, f"app/gen/m{i:03d}.py", py_module(i, 10))
-    git(repo, "add", "-A", "--", "app", "web")
+    elif scenario == "F":
+        write(repo, "app/orders.py", py_module(0, 20))
+        write(repo, "svc/go.mod", "module example.com/svc\n\ngo 1.21\n\nrequire github.com/pkg/errors v0.9.1\n")
+        for i in range(4):
+            write(repo, f"svc/orders{i}/orders.go", go_module(i, 30))
+            write(repo, f"svc/orders{i}/orders_test.go", go_test_module(i))
+            write(repo, f"web/orders_{i}.ts", ts_module(i, 30))
+    git(repo, "add", "-A", "--", *[p for p in ("app", "web", "svc") if os.path.exists(os.path.join(repo, p))])
 
 
 def write_baseline(repo, n):
@@ -451,6 +528,8 @@ def against_gates(res) -> list:
         med, p95 = n["median_ms"] / o["median_ms"] - 1, n["p95_ms"] / o["p95_ms"] - 1
         if name == "startup-direct":
             continue                                   # informational: not how hooks start the gate
+        if name in INFO_SCENARIOS:
+            continue                                   # new in 0.3.0: recorded, no target
         if name in ("startup", "A"):
             if med > 0.05:
                 fails.append(f"{name}: median {o['median_ms']} -> {n['median_ms']} ms ({med * 100:+.1f}%, limit +5%)")

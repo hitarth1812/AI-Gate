@@ -1,4 +1,5 @@
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,8 @@ def test_check_results_and_exit_codes_do_not_depend_on_the_attribution(repo, tmp
     left, right = strip(real[1]), strip(copy[1])
     left.pop("version", None), right.pop("version", None)
     assert left == right
+    def timeless(result):                                   # the text report ends with its elapsed time ("0.2s")
+        return result[0], re.sub(r"\b\d+\.\d+s\b", "<time>", result[1])
     for args in (("check", "--offline", "-q"), ("check", "--format", "agent", "--offline")):
-        assert run_copy(repo, SCRIPT, *args)[:2] == run_copy(repo, clean, *args)[:2]
+        assert timeless(run_copy(repo, SCRIPT, *args)) == timeless(run_copy(repo, clean, *args))
     shutil.rmtree(tmp_path / "copy")

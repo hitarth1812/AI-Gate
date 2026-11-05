@@ -221,3 +221,34 @@ def test_lexing_is_linear_enough():
     t = time.perf_counter()
     lex_text(text, GO)
     assert time.perf_counter() - t < 5.0
+
+
+# ---------------------------------------------------------------- review fixes: hostile input stays fast
+
+def test_structure_analysis_survives_adversarial_whitespace_and_comments():
+    import time
+    spec = aigate.language_for("a.ts")
+    for text in ("foo /* " + "a" * 60000 + " */\nfunction f(){}\n", "css`" + "a" * 60000 + "`\n",
+                 "a" + "\n" * 200000 + "x\n", "g(a): y\n" * 5000):
+        lx = lex_text(text, spec.lex)
+        t = time.perf_counter()
+        try:
+            aigate.analyze_functions(lx, spec)
+        except LexError:
+            pass
+        assert time.perf_counter() - t < 6.0
+
+
+def test_sibling_loops_do_not_make_the_depth_quadratic():
+    import time
+    spec = aigate.language_for("a.go")
+    text = "func f() {\n" + "for i := 0; i < 3; i++ {\n}\n" * 12000 + "}\n"
+    lx = lex_text(text, spec.lex)
+    t = time.perf_counter()
+    funcs = aigate.analyze_functions(lx, spec)
+    assert funcs and funcs[0].depth == 1 and time.perf_counter() - t < 5.0
+
+
+def test_postfix_operators_and_property_keywords_end_a_value():
+    text = "n++ / 2; foo(); y = b / 3\nx.in / y; bar()\n"
+    assert kinds(text, JS, "foo") == CODE and kinds(text, JS, "bar") == CODE
