@@ -163,6 +163,8 @@ _RULE_ROWS = [
      "Catch Exception or something narrower."),
     ("code.debug_leftover", "fix", "medium", 0.95, "Debugger statement left in", "Remove it before committing."),
     ("code.console_log", "warn", "low", 0.6, "console.log left in source", "Remove it or use a logger."),
+    ("code.generate_directive", "warn", "low", 0.7, "Code generation directive added (//go:generate)",
+     "`go generate` runs this command on developer machines; check what it executes."),
     ("code.mutable_default", "warn", "medium", 0.9, "Mutable default argument",
      "Default to None and create the list/dict inside the function."),
     ("code.unused_import", "warn", "low", 0.8, "Import is never used", "Remove it."),
@@ -1099,6 +1101,8 @@ class Context:
         self._files = None
         self._texts: dict = {}
         self._asts: dict = {}
+        self._lex: dict = {}
+        self.lang_notes: list = []     # "lang.fallback: ..." (shown with -v)
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
         self.baseline: set = set()     # (rule, path, fingerprint) accepted by .aigate/baseline.json
@@ -1150,11 +1154,33 @@ class Context:
             self._asts[key] = (tree, err)
         return self._asts[key]
 
+    def lexed(self, fc, which="new"):
+        """The Lexed view (code / string / comment per character) of the new or old version of a file in a language
+        with a spec; None without a spec or text. If the lexer gives up the answer is None as well, a
+        lang.fallback note is recorded, and the caller uses its line-based checks."""
+        key = (fc.path, which)
+        if key not in self._lex:
+            spec, text, lx = language_for(fc.path), None, None
+            if spec is not None:
+                text = self.new_text(fc) if which == "new" else self.old_text(fc)
+            if text is not None and len(text) <= MAX_BYTES:
+                try:
+                    lx = lex_text(text, spec.lex)
+                except LexError as e:
+                    note = f"lang.fallback: {fc.path}: {e}; line-based checks used"
+                    if note not in self.lang_notes:
+                        self.lang_notes.append(note)
+            self._lex[key] = lx
+        return self._lex[key]
+
     def ignored(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["ignore"])
 
     def is_test(self, path) -> bool:
-        return path_matches(path, self.cfg["paths"]["tests"])
+        if path_matches(path, self.cfg["paths"]["tests"]):
+            return True
+        spec = language_for(path)
+        return bool(spec and spec.tests and path_matches(path, spec.tests))
 
     def sensitive(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["sensitive"])
@@ -1546,6 +1572,680 @@ class Registry:
             os.replace(tmp, self.cache_path)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------- languages: lexer
+
+# One generic lexer, driven by a per-language LexConfig. It does not tokenise: it classifies every character of a
+# file as code, string or comment, so a rule can ask "does this match start in code?" (`t.Skip(` inside a string or
+# a comment is not a skipped test). Any problem (an unterminated string or comment, deep nesting, a timeout) raises
+# LexError and the caller falls back to the plain line-based checks, so a lexer bug can hide a finding but never
+# invents one. Secrets scanning does not use the lexer at all.
+
+CODE, STR, COM = 0, 1, 2
+LEX_SECONDS = 2.0          # per file; a slower lex is abandoned (fallback)
+LEX_DEPTH = 40             # nested interpolations / block comments
+
+
+class LexError(Exception):
+    pass
+
+
+@dataclasses.dataclass(frozen=True)
+class StrForm:
+    """One string-literal syntax. `open` is a regex matched at the current position; the groups inside it are
+    available to `close` as {g1} (Rust r#"..."#, C# \"\"\"...\"\"\", Ruby %q(...) delimiters, heredoc tags)."""
+    open: str
+    close: str = '"'            # literal terminator ({g1} = first group of `open`); a line regex for heredocs
+    kind: str = "quote"         # quote | regex | heredoc | pct
+    esc: str = "\\"             # escape character ("" = none)
+    double: bool = False        # a doubled terminator is an escaped one (C# verbatim strings)
+    nl: bool = True             # may span lines (False: an unterminated literal ends at the end of its line)
+    interp: str = ""            # opens code inside the string ("${", "#{", "{")
+    interp_double: bool = False  # "{{" is a literal brace (C# $"...")
+    expr: bool = False          # only where an expression may start (JS regex literals, Ruby %w[...])
+
+
+@dataclasses.dataclass(frozen=True)
+class LexConfig:
+    line_comments: tuple = ()        # ("//", "#")
+    block_comments: tuple = ()       # ((open regex, close literal, nested), ...)
+    strings: tuple = ()              # StrForm, in priority order (longest openers first)
+
+
+EXPR_KEYWORDS = frozenset("return typeof instanceof in of new delete void throw case do else yield await "
+                          "when puts print p if unless while until and or not then".split())
+BRACE_PAIRS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_LEX_RES: dict = {}
+
+
+def _expr_start(text: str, pos: int) -> bool:
+    """May an expression start at `pos`? (after an operator, an opening bracket or a keyword; not after a value)."""
+    if text[pos - 1:pos] == "<":                       # JSX closing tag: </div>
+        return False
+    head = text[max(0, pos - 48):pos].rstrip()
+    if not head:
+        return True
+    c = head[-1]
+    if c in "([{,;:=!&|?+-*%<>~^":
+        return True
+    if c.isalnum() or c in "_$":
+        m = re.search(r"[A-Za-z_$][\w$]*$", head)
+        return bool(m) and m.group(0) in EXPR_KEYWORDS
+    return False
+
+
+def _lex_regexes(cfg):
+    """(opener regex, the same with braces for interpolations), compiled once per config."""
+    got = _LEX_RES.get(cfg)
+    if got is None:
+        parts = [f"(?P<b{i}>{rx})" for i, (rx, _c, _n) in enumerate(cfg.block_comments)]
+        parts += [f"(?P<l{i}>{re.escape(tok)})" for i, tok in enumerate(cfg.line_comments)]
+        parts += [f"(?P<s{i}>{form.open})" for i, form in enumerate(cfg.strings)]
+        base = "|".join(parts)
+        got = _LEX_RES[cfg] = (re.compile(base, re.M), re.compile(base + r"|(?P<ob>\{)|(?P<cb>\})", re.M))
+    return got
+
+
+def _form_regex(form, close):
+    key = (form, close)
+    got = _LEX_RES.get(key)
+    if got is None:
+        parts = []
+        if form.esc:
+            parts.append(re.escape(form.esc) + r"[\s\S]")
+        if form.interp:
+            parts.append("(?P<i>" + re.escape(form.interp) + ")")
+        parts.append("(?P<c>" + re.escape(close) + ")")
+        if not form.nl:
+            parts.append(r"(?P<n>\n)")
+        got = _LEX_RES[key] = re.compile("|".join(parts))
+    return got
+
+
+def _comment_regex(cfg, i):
+    key = (cfg, "comment", i)
+    got = _LEX_RES.get(key)
+    if got is None:
+        opener, close, nested = cfg.block_comments[i]
+        got = _LEX_RES[key] = re.compile("(?P<c>" + re.escape(close) + ")" + (f"|(?P<o>{opener})" if nested else ""), re.M)
+    return got
+
+
+class _Scanner:
+    def __init__(self, text, cfg):
+        self.text, self.cfg, self.n = text, cfg, len(text)
+        self.kinds = bytearray(self.n)
+        self.base, self.braced = _lex_regexes(cfg)
+        self.deadline = time.monotonic() + LEX_SECONDS
+        self.steps = 0
+        self.skip = None                 # (start, end): heredoc bodies of the current line, already consumed
+
+    def mark(self, a, b, kind):
+        if b > a:
+            self.kinds[a:b] = bytes((kind,)) * (b - a)
+
+    def tick(self):
+        self.steps += 1
+        if self.steps & 255 == 0 and time.monotonic() > self.deadline:
+            raise LexError("timeout")
+
+    def code(self, pos, depth, in_braces):
+        """Scan code from `pos`; with in_braces, return just after the `}` that closes an interpolation."""
+        if depth > LEX_DEPTH:
+            raise LexError("nesting too deep")
+        text, rx, level = self.text, self.braced if in_braces else self.base, 0
+        while True:
+            self.tick()
+            m = rx.search(text, pos)
+            if m is None:
+                if in_braces:
+                    raise LexError("unterminated interpolation")
+                return self.n
+            s, name = m.start(), m.lastgroup
+            if self.skip and s >= self.skip[0] and s < self.skip[1]:      # inside a consumed heredoc body
+                pos = self.skip[1]
+                continue
+            if name == "ob":
+                level += 1
+                pos = m.end()
+            elif name == "cb":
+                if level == 0:
+                    return m.end()
+                level -= 1
+                pos = m.end()
+            elif name[0] == "b":
+                pos = self.block_comment(m, int(name[1:]))
+            elif name[0] == "l":
+                end = text.find("\n", m.end())
+                end = self.n if end < 0 else end
+                self.mark(s, end, COM)
+                pos = end
+            else:
+                form = self.cfg.strings[int(name[1:])]
+                if form.expr and not _expr_start(text, s):
+                    pos = m.end() if form.kind != "regex" else s + 1
+                    continue
+                pos = self.string(form, m, depth)
+
+    def block_comment(self, m, i):
+        _opener, close, nested = self.cfg.block_comments[i]
+        rx, text, pos, level = _comment_regex(self.cfg, i), self.text, m.end(), 1
+        while True:
+            self.tick()
+            c = rx.search(text, pos)
+            if c is None:
+                raise LexError("unterminated block comment")
+            pos = c.end()
+            if c.lastgroup == "o":
+                level += 1
+                if level > LEX_DEPTH:
+                    raise LexError("block comments nested too deep")
+            else:
+                level -= 1
+                if level == 0:
+                    self.mark(m.start(), pos, COM)
+                    return pos
+
+    def string(self, form, m, depth):
+        start, pos = m.start(), m.end()
+        inner = m.groups()[m.lastindex:]                   # this form's own groups follow its wrapper group
+        if form.kind == "regex":
+            return self.regex_literal(start, pos)
+        if form.kind == "heredoc":
+            return self.heredoc(form, pos, next((g for g in inner if g), None))
+        if form.kind == "pct":
+            return self.percent(start, pos, inner[0] if inner else "")
+        close = form.close.replace("{g1}", (inner[0] if inner else "") or "")
+        rx, text, seg = _form_regex(form, close), self.text, start
+        while True:
+            self.tick()
+            c = rx.search(text, pos)
+            if c is None:
+                raise LexError("unterminated string")      # an unterminated string would swallow everything after it
+            kind = c.lastgroup
+            if kind is None:                                  # an escape sequence
+                pos = c.end()
+            elif kind == "n":                                 # a single-line literal ended unclosed at the newline
+                self.mark(seg, c.start(), STR)
+                return c.start()
+            elif kind == "c":
+                if form.double and text.startswith(close, c.end()):
+                    pos = c.end() + len(close)
+                    continue
+                self.mark(seg, c.end(), STR)
+                return c.end()
+            else:                                             # an interpolation opens
+                if form.interp_double and text.startswith(form.interp, c.end()):
+                    pos = c.end() + len(form.interp)
+                    continue
+                self.mark(seg, c.end(), STR)
+                pos = self.code(c.end(), depth + 1, True)
+                self.mark(pos - 1, pos, STR)                  # the closing brace belongs to the string again
+                seg = pos
+
+    def regex_literal(self, start, pos):
+        text, n, in_class = self.text, self.n, False
+        while pos < n:
+            ch = text[pos]
+            if ch == "\\":
+                pos += 2
+                continue
+            if ch == "\n":
+                return start + 1                              # not a regex after all: a division sign
+            if ch == "[":
+                in_class = True
+            elif ch == "]":
+                in_class = False
+            elif ch == "/" and not in_class:
+                self.mark(start, pos + 1, STR)
+                return pos + 1
+            pos += 1
+        return start + 1
+
+    def percent(self, start, pos, delim):
+        text, n, depth = self.text, self.n, 1
+        closer = BRACE_PAIRS.get(delim, delim)
+        while pos < n:
+            ch = text[pos]
+            if ch == "\\":
+                pos += 2
+                continue
+            if closer != delim and ch == delim:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    self.mark(start, pos + 1, STR)
+                    return pos + 1
+            pos += 1
+        raise LexError("unterminated percent literal")
+
+    def heredoc(self, form, pos, tag):
+        """The body starts on the line after the opener (after the previous heredoc's body, if any) and ends at the
+        terminator line. The rest of the opener's own line is scanned as code."""
+        if not tag:
+            raise LexError("heredoc without a tag")
+        text = self.text
+        eol = text.find("\n", pos)
+        if eol < 0:
+            raise LexError("heredoc opener on the last line")
+        chained = bool(self.skip and self.skip[0] == eol + 1)
+        body = self.skip[1] + 1 if chained else eol + 1
+        e = re.compile(form.close.replace("{g1}", re.escape(tag)), re.M).search(text, body)
+        if e is None:
+            raise LexError("unterminated heredoc")
+        finish = text.find("\n", e.end())
+        finish = self.n if finish < 0 else finish
+        self.mark(body, finish, STR)
+        self.skip = (self.skip[0] if chained else eol + 1, finish)
+        return pos
+
+
+class Lexed:
+    """Per-line access to the classification of one file."""
+
+    def __init__(self, text, kinds):
+        self.text, self.kinds = text, kinds
+        self.lines = text.split("\n")
+        self.starts, off = [], 0
+        for ln in self.lines:
+            self.starts.append(off)
+            off += len(ln) + 1
+        self._masked: dict = {}
+
+    def line(self, n):
+        return self.lines[n - 1] if 0 < n <= len(self.lines) else ""
+
+    def kind_at(self, n, col):
+        if not 0 < n <= len(self.lines):
+            return CODE
+        i = self.starts[n - 1] + col
+        return self.kinds[i] if i < len(self.kinds) else CODE
+
+    def search(self, rx, n, where=CODE, text=None):
+        """First match of `rx` on line n whose first character is in region `where` (CODE, STR, COM or a tuple)."""
+        text = self.line(n) if text is None else text
+        ok = where if isinstance(where, tuple) else (where,)
+        for m in rx.finditer(text):
+            if self.kind_at(n, m.start()) in ok:
+                return m
+        return None
+
+    def masked(self, n, hide=(STR, COM)):
+        """Line n with every hidden region replaced by spaces (same length, columns unchanged)."""
+        key = (n, hide)
+        if key not in self._masked:
+            base = self.starts[n - 1] if 0 < n <= len(self.lines) else 0
+            self._masked[key] = "".join(" " if self.kinds[base + i] in hide else ch
+                                        for i, ch in enumerate(self.line(n)))
+        return self._masked[key]
+
+    def code_text(self, hide=(STR, COM)):
+        """The whole file with hidden regions blanked (newlines kept), for brace and keyword scans."""
+        if self._code is None:
+            self._code = "".join(" " if k in hide and ch != "\n" else ch for ch, k in zip(self.text, self.kinds))
+        return self._code
+
+    _code = None
+
+
+def lex_text(text, cfg):
+    """Lexed(text), or LexError."""
+    sc = _Scanner(text, cfg)
+    try:
+        sc.code(0, 0, False)
+    except RecursionError as e:
+        raise LexError("recursion") from e
+    return Lexed(text, sc.kinds)
+
+
+# --------------------------------------------------------------------------- languages: specs
+
+# A LanguageSpec bundles everything the checks need to know about one language. Specs are built on first use
+# (their regexes are compiled then), so a commit without Go files never pays for the Go tables. Adding a language
+# means adding one builder below, plus its fixtures.
+
+@dataclasses.dataclass(frozen=True)
+class LineRule:
+    """A rule applied to added lines. `rx` must start in region `where` (CODE, COM, STR); scope limits it to
+    source files ("src"), test files ("test") or both ("any"). `needs` is an optional regex that must match the
+    file's code (e.g. an import) for the rule to apply."""
+    rule: str
+    rx: object
+    what: str
+    where: int = CODE
+    scope: str = "any"
+    needs: object = None
+    also: object = None               # must also match the line with comments blanked (e.g. a secret-ish word)
+
+
+@dataclasses.dataclass(frozen=True)
+class LanguageSpec:
+    name: str
+    lex: LexConfig
+    eco: str = ""                      # registry ecosystem ("go"); "" = no dependency checks
+    rules: tuple = ()                  # LineRule, language specific (the shared ones live in the line checks)
+    func: tuple = ()                   # regexes with a (?P<name>) group: where a function starts
+    loop: object = None                # regex: loop keywords
+    loop_header: str = "paren"         # "paren": for (...) {   "eol": for ... {
+    branch: object = None              # regex: decision points (complexity = 1 + matches)
+    same_line_brace: bool = False      # a function body's { is on the line of its header (Go)
+    test_skip: object = None           # regex: a skipped test (added lines of test files)
+    test_assert: object = None         # regex: one assertion
+    test_case: object = None           # regex with a (?P<name>) group: one test function
+    swallow: object = None             # regex: a header whose block, closed on the next line, drops an error
+    tests: tuple = ()                  # extra test-file globs
+
+
+_SPEC_EXT = {".go": "go", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".ts": "js", ".tsx": "js",
+             ".mts": "js", ".cts": "js"}
+_SPECS: dict = {}
+
+
+def language_for(path):
+    """The LanguageSpec of a file by extension, built on first use; None for languages without one."""
+    n = path.rsplit("/", 1)[-1].lower()
+    key = _SPEC_EXT.get(n[n.rfind("."):] if "." in n else "")
+    if key is None:
+        return None
+    if key not in _SPECS:
+        _SPECS[key] = {"go": _spec_go, "js": _spec_js}[key]()
+    return _SPECS[key]
+
+
+def _spec_js() -> LanguageSpec:
+    lex = LexConfig(
+        line_comments=("//",),
+        block_comments=((r"/\*", "*/", False),),
+        strings=(StrForm(r"`", "`", interp="${"),
+                 StrForm(r'"', '"', nl=False), StrForm(r"'", "'", nl=False),
+                 StrForm(r"/", "/", kind="regex", expr=True)))
+    skip_kw = r"(?!(?:if|for|while|switch|catch|function|return|else|with|do|try|new|typeof|await|yield)\b)"
+    return LanguageSpec(
+        "javascript", lex,
+        func=(re.compile(r"\bfunction\b\s*\*?\s*(?P<name>[\w$]+)\s*\("),
+              re.compile(r"\b(?:const|let|var)\s+(?P<name>[\w$]+)\s*(?::[^=;]+)?=\s*(?:async\s*)?"
+                         r"(?:\([^()]*\)|[\w$]+)\s*(?::\s*[^=>{;]+)?=>\s*\{"),
+              re.compile(r"^[ \t]*(?:(?:public|private|protected|static|async|readonly|override|get|set)\s+)*"
+                         + skip_kw + r"(?P<name>[A-Za-z_$][\w$]*)\s*(?:<[^>\n]*>)?\s*\([^;{}()]*(?:\([^()]*\)[^;{}()]*)*\)"
+                         r"\s*(?::\s*[^{;=]+)?\{", re.M)),
+        loop=re.compile(r"\b(?:for|while)\b"), loop_header="paren",
+        branch=re.compile(r"\b(?:if|for|while|case|catch)\b|&&|\|\||\?(?![.?])"))
+
+
+def _spec_go() -> LanguageSpec:
+    lex = LexConfig(line_comments=("//",), block_comments=((r"/\*", "*/", False),),
+                    strings=(StrForm(r"`", "`", esc=""), StrForm(r'"', '"', nl=False), StrForm(r"'", "'", nl=False)))
+    sql = r"(?:select|insert|update|delete)\b"
+    q = r"\.(?:Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext|Prepare|PrepareContext)\w*\("
+    return LanguageSpec(
+        "go", lex, eco="go",
+        rules=(
+            LineRule("security.shell", re.compile(
+                r"\bexec\.Command(?:Context)?\(\s*(?:[\w.]+\s*,\s*)?\"(?:sh|bash|zsh|dash|cmd(?:\.exe)?|powershell(?:\.exe)?)\"\s*,"
+                r"\s*\"(?:-c|/c|-Command)\"\s*,(?!\s*(?:\"[^\"\\]*\"|`[^`]*`)\s*\))"),
+                "shell command built at runtime"),
+            LineRule("security.sql_injection", re.compile(
+                q + r"\s*(?:[\w.]+\s*,\s*)?(?:fmt\.Sprintf\(\s*[\"`][^\"`]*\b" + sql + r"|[\"`][^\"`]*\b" + sql
+                + r"[^\"`]*[\"`]\s*\+)", re.I), "SQL built from variables"),
+            LineRule("security.weak_crypto", re.compile(
+                r"\brand\.(?:Int|Intn|Int31|Int31n|Int63|Int63n|Uint32|Uint64|Float64|Read|Perm|Shuffle)\w*\("),
+                "math/rand is not for secrets", needs=re.compile(r"\"math/rand(?:/v2)?\""),
+                also=re.compile(r"(?i)\w*(?:token|secret|password|passwd|nonce|salt|session|api_?key|otp|key)\w*")),
+            LineRule("code.swallowed_exception", re.compile(
+                r"^\s*_\s*=\s*err\s*(?:;|$)|\bif\s+err\s*!=\s*nil\s*\{\s*\}"), "error silently dropped"),
+            LineRule("code.placeholder", re.compile(
+                r"\bpanic\(\s*\"(?:todo|not\s+(?:yet\s+)?implemented|unimplemented|implement\s+me)[^\"]*\"\s*\)", re.I),
+                "panics with 'not implemented'"),
+            LineRule("code.generate_directive", re.compile(r"^\s*//\s*go:generate\b"), "runs a command at generate time",
+                     where=COM),
+        ),
+        func=(re.compile(r"\bfunc\s*(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?\("),),
+        loop=re.compile(r"\bfor\b"), loop_header="eol", same_line_brace=True,
+        branch=re.compile(r"\b(?:if|for|case|select)\b|&&|\|\|"),
+        test_skip=re.compile(r"\.Skip(?:Now|f)?\("),
+        test_assert=re.compile(r"\b(?:t|b|tb|s\.T\(\))\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(|\b(?:assert|require)\.\w+\("),
+        test_case=re.compile(r"^func\s+(?P<name>(?:Test|Benchmark|Fuzz|Example)\w*)\s*\(", re.M),
+        swallow=re.compile(r"\bif\s+err\s*!=\s*nil\s*\{\s*$"), tests=("*_test.go",))
+
+
+# --------------------------------------------------------------------------- languages: structure (braces)
+
+@dataclasses.dataclass
+class FuncInfo:
+    name: str
+    line: int
+    end: int
+    length: int
+    complexity: int
+    depth: int
+    deepest: int
+
+
+def _brace_pairs(ct: str) -> dict:
+    pairs, stack = {}, []
+    for m in re.finditer(r"[{}]", ct):
+        if m.group(0) == "{":
+            stack.append(m.start())
+        elif stack:
+            pairs[stack.pop()] = m.start()
+    return pairs
+
+
+def _paren_end(ct: str, i: int) -> int:
+    """Index just after the parenthesis group opening at ct[i] (or -1)."""
+    depth = 0
+    for j in range(i, len(ct)):
+        if ct[j] == "(":
+            depth += 1
+        elif ct[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+def _body_open(ct, pos, spec, pairs) -> int:
+    """Index of the { that opens a function body whose header ends at `pos`, or -1 (no body here)."""
+    if ct[pos - 1] == "{":
+        return pos - 1
+    depth, i, n = (1 if ct[pos - 1] == "(" else 0), pos, len(ct)       # the header regex may end inside the ( of the parameters
+    while i < n:
+        c = ct[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and c == "{":
+            before = ct[max(0, i - 12):i].rstrip()
+            if before.endswith(("interface", "struct")) and i in pairs:      # a type literal in the signature
+                i = pairs[i]
+            else:
+                return i
+        elif depth == 0 and (c == ";" or (spec.same_line_brace and c == "\n")):
+            return -1
+        i += 1
+    return -1
+
+
+def analyze_functions(lx, spec) -> list:
+    """Function spans, decision points and loop nesting from brace structure. Heuristic: it runs on text with
+    strings and comments blanked, but it does not parse the language."""
+    import bisect
+    ct = lx.code_text()
+    pairs = _brace_pairs(ct)
+    starts = lx.starts
+
+    def line_of(off):
+        return bisect.bisect_right(starts, off)
+
+    found = {}
+    for rx in spec.func:
+        for m in rx.finditer(ct):
+            op = _body_open(ct, m.end(), spec, pairs)
+            if op >= 0 and op in pairs and op not in found:
+                found[op] = (m.group("name"), m.start())
+    out = []
+    for op, (name, header) in sorted(found.items()):
+        close = pairs[op]
+        body = ct[op:close + 1]
+        loops = []
+        for m in spec.loop.finditer(body) if spec.loop else ():
+            at = op + m.start()
+            if spec.loop_header == "eol":
+                nl = ct.find("\n", at)
+                brace = ct.rfind("{", at, nl if nl >= 0 else len(ct))
+                if brace < 0 or ct[brace + 1:nl if nl >= 0 else len(ct)].strip():
+                    continue
+            else:
+                p = ct.find("(", at, at + 12)
+                end = _paren_end(ct, p) if p >= 0 else -1
+                brace = -1
+                if end >= 0:
+                    rest = ct[end:end + 12]
+                    if rest.lstrip().startswith("{"):
+                        brace = end + len(rest) - len(rest.lstrip())
+            if brace in pairs:
+                loops.append((brace, pairs[brace], line_of(at)))
+        depth, deepest = 0, line_of(header)
+        for lo, hi, ln in loops:
+            d = 1 + sum(1 for lo2, hi2, _l in loops if lo2 < lo and hi < hi2)
+            if d > depth:
+                depth, deepest = d, ln
+        cx = 1 + (len(spec.branch.findall(body)) if spec.branch else 0)
+        first, last = line_of(header), line_of(close)
+        out.append(FuncInfo(name, first, last, last - first + 1, cx, depth, deepest))
+    return out
+
+
+# --------------------------------------------------------------------------- languages: checks
+
+def hit(lx, rx, line, text, where=CODE):
+    """First match of `rx` in `text` (an added line) that starts in region `where`. Without a lexer (unknown
+    language, or the lexer gave up) it is a plain search: the old line-based behaviour."""
+    if lx is not None and lx.line(line).rstrip("\r") == text.rstrip("\r"):
+        return lx.search(rx, line, where, text)
+    return rx.search(text)
+
+
+def _count(lx, rx, rows) -> int:
+    """Matches of `rx` that start in code, over (line number, text) rows."""
+    total = 0
+    for line, text in rows:
+        if lx is not None and lx.line(line).rstrip("\r") == text.rstrip("\r"):
+            total += sum(1 for m in rx.finditer(text) if lx.kind_at(line, m.start()) == CODE)
+        else:
+            total += len(rx.findall(text))
+    return total
+
+
+def _needs(lx, rx, cache) -> bool:
+    if rx not in cache:
+        cache[rx] = bool(rx.search(lx.code_text((COM,)) if lx is not None else ""))
+    return cache[rx]
+
+
+def check_lang(ctx) -> list:
+    """Per-language rules from the specs (run by check_code_lines; the test rules are run by check_tests)."""
+    out = []
+    for fc in ctx.code_changes(CODE_EXTS):
+        spec = language_for(fc.path)
+        if spec is not None and (spec.rules or spec.func):
+            out += ctx.results.run("lang", ctx, fc, lambda fc=fc, spec=spec: _lang_file(ctx, fc, spec))
+    return out
+
+
+def _lang_file(ctx, fc, spec) -> list:
+    out, lim, test = [], ctx.cfg["limits"], ctx.is_test(fc.path)
+    lx = ctx.lexed(fc)
+    if lx is None and spec.rules:
+        return out                                   # no lexer view: the shared line checks still ran
+    needs = {}
+    for rule in spec.rules:
+        if (rule.scope == "src" and test) or (rule.scope == "test" and not test):
+            continue
+        if rule.needs is not None and not _needs(lx, rule.needs, needs):
+            continue
+        for line, text in fc.added.items():
+            if len(text) > 2000 or not hit(lx, rule.rx, line, text, rule.where):
+                continue
+            if rule.also is not None and not rule.also.search(lx.masked(line, (COM,))):
+                continue
+            out.append(make(rule.rule, fc.path, line, f"{rule.what}: {text.strip()[:70]}", key=text.strip()))
+    if spec.swallow is not None:
+        for line, text in fc.added.items():
+            if hit(lx, spec.swallow, line, text, CODE) and re.fullmatch(r"\s*\}\s*", lx.masked(line + 1)):
+                out.append(make("code.swallowed_exception", fc.path, line, "empty error handler", key=text.strip()))
+    if lx is not None and spec.func:
+        old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
+        old = {f.name: f for f in analyze_functions(old_lx, spec)} if old_lx is not None else {}
+        for f in analyze_functions(lx, spec):
+            if not any(ln in fc.added for ln in range(f.line, f.end + 1)):
+                continue
+            o = old.get(f.name)
+            if f.length > lim["function_lines"] and (o is None or f.length > o.length):
+                out.append(make("size.function_length", fc.path, f.line,
+                                f"{f.name}() is {f.length} lines (limit {lim['function_lines']})", key=f.name))
+            if f.complexity > lim["complexity"] and (o is None or f.complexity > o.complexity):
+                out.append(make("size.complexity", fc.path, f.line,
+                                f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}, estimated "
+                                "from brace structure)", key=f.name))
+            if f.depth >= lim["loop_depth"] and (o is None or f.depth > o.depth):
+                out.append(make("perf.nested_loops", fc.path, f.deepest,
+                                f"{f.name}() nests {f.depth} loops (≈O(n^{f.depth}), estimated from brace structure)",
+                                key=f.name))
+    return out
+
+
+def _test_names(spec, lx, rows) -> list:
+    names = []
+    for line, text in rows:
+        m = hit(lx, spec.test_case, line, text, CODE)
+        if m:
+            names.append(m.group("name"))
+    return names
+
+
+def _lang_tests(ctx) -> list:
+    """Skipped, shortened and deleted tests for languages whose spec describes their tests (Go)."""
+    out, files = [], []
+    for fc in ctx.changes:
+        spec = language_for(fc.path)
+        if spec is not None and spec.test_case and not fc.binary and not fc.symlink and not ctx.ignored(fc.path) \
+                and ctx.is_test(fc.path):
+            files.append((fc, spec))
+    if not files:
+        return out
+    all_added = set()
+    for fc, spec in files:
+        if not fc.deleted:
+            all_added |= set(_test_names(spec, ctx.lexed(fc), fc.added.items()))
+    for fc, spec in files:
+        lx = None if fc.deleted else ctx.lexed(fc)
+        old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
+        if fc.deleted:
+            old_rows = list(enumerate((ctx.old_text(fc) or "").split("\n"), 1))
+            removed_names = _test_names(spec, old_lx, old_rows)
+        else:
+            old_rows = fc.removed
+            removed_names = _test_names(spec, old_lx, old_rows)
+            for line, text in fc.added.items():
+                if spec.test_skip and hit(lx, spec.test_skip, line, text, CODE):
+                    out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
+            if spec.test_assert:
+                lost = _count(old_lx, spec.test_assert, old_rows) - _count(lx, spec.test_assert, fc.added.items())
+                if lost > 0:
+                    out.append(make("tests.assertions_removed", fc.path, None, f"net {lost} assertion(s) removed",
+                                    key="asserts"))
+        added_here = _test_names(spec, lx, fc.added.items()) if not fc.deleted else []
+        gone = [n for n in removed_names if n not in all_added]
+        renamed = len([n for n in added_here if n not in removed_names])        # TestA -> TestB in the same file
+        if len(gone) > renamed:
+            out.append(make("tests.deleted", fc.path, None,
+                            f"{len(gone) - renamed} test(s) removed: {', '.join(gone[:4])}{'…' if len(gone) > 4 else ''}",
+                            key=",".join(sorted(gone))))
+    return out
 
 
 # --------------------------------------------------------------------------- checks: secrets
@@ -3019,18 +3719,26 @@ def check_tests(ctx) -> list:
                                 f"`{ast.unparse(node)[:60]}` can never fail", key=ast.dump(node)))
 
     for fc in tests:
+        spec = language_for(fc.path)
+        if spec is not None and spec.test_case:
+            continue                                       # a language with its own test spec: see _lang_tests
         if fc.ext not in PY_EXTS and not fc.deleted:
-            removed = "\n".join(t for _, t in fc.removed)
-            added = "\n".join(fc.added.values())
+            lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
             for line, text in fc.added.items():
-                if JS_FOCUS.search(text):
+                if hit(lx, JS_FOCUS, line, text):
                     out.append(make("tests.focused", fc.path, line, text.strip()[:80], key=text.strip()))
-                elif JS_SKIP.search(text) or OTHER_SKIP.search(text):
+                elif hit(lx, JS_SKIP, line, text) or hit(lx, OTHER_SKIP, line, text):
                     out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
-                if JS_TRIVIAL.search(text):
+                if hit(lx, JS_TRIVIAL, line, text):
                     out.append(make("tests.trivial_assert", fc.path, line, text.strip()[:80], key=text.strip()))
-            lost_asserts = len(JS_ASSERT.findall(removed)) - len(JS_ASSERT.findall(added))
-            lost_tests = len(JS_TEST.findall(removed)) - len(JS_TEST.findall(added))
+            if lx is None and old_lx is None:              # no lexer view: count over the joined text, as before
+                removed = "\n".join(t for _, t in fc.removed)
+                added = "\n".join(fc.added.values())
+                lost_asserts = len(JS_ASSERT.findall(removed)) - len(JS_ASSERT.findall(added))
+                lost_tests = len(JS_TEST.findall(removed)) - len(JS_TEST.findall(added))
+            else:
+                lost_asserts = _count(old_lx, JS_ASSERT, fc.removed) - _count(lx, JS_ASSERT, fc.added.items())
+                lost_tests = _count(old_lx, JS_TEST, fc.removed) - _count(lx, JS_TEST, fc.added.items())
             if lost_tests > 0:
                 out.append(make("tests.deleted", fc.path, None, f"net {lost_tests} test case(s) removed", key="js-tests"))
             if lost_asserts > 0:
@@ -3096,14 +3804,14 @@ def check_tests(ctx) -> list:
                         out.append(make("tests.internals_touched", fc.path, line,
                                         f"{dotted_name(node.func)}() can hide failures or skew coverage",
                                         action="warn", key=dotted_name(node.func)))
-    return out
+    return out + _lang_tests(ctx)
 
 
 # --------------------------------------------------------------------------- checks: suppressions
 
 SUPPRESSIONS = [
     ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:(?:allow)|(?:#|//)\s*NOSONAR\b|"
-                                     r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d")),
+                                     r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d|//\s*nolint:[\w,\s-]*\bgosec\b")),
     ("suppress.blanket", re.compile(r"#\s*(?:flake8|ruff):\s*noqa\s*$|#\s*mypy:\s*ignore-errors|#\s*pylint:\s*skip-file|"
                                     r"//\s*@ts-nocheck|/\*\s*eslint-disable\s*\*/|^\s*//\s*eslint-disable\s*$|"
                                     r"#\s*pyright:\s*basic\b")),
@@ -3111,7 +3819,7 @@ SUPPRESSIONS = [
     ("suppress.coverage", re.compile(r"#\s*pragma:\s*no\s*(?:cover|branch)\b|(?:/\*|//)\s*(?:istanbul|c8|v8)\s+ignore\b")),
     ("suppress.lint", re.compile(r"#\s*noqa\b|#\s*pylint:\s*disable\b|//\s*eslint-disable-(?:next-)?line\b|"
                                  r"/\*\s*eslint-disable\b|//\s*@ts-expect-error\b|//\s*biome-ignore\b|//\s*nolint\b|"
-                                 r"@SuppressWarnings\b|#\s*rubocop:\s*disable\b")),
+                                 r"@SuppressWarnings\b|#\s*rubocop:\s*disable\b|//\s*lint:ignore\b")),
 ]
 TYPE_CAST = re.compile(r"\bas\s+any\b|:\s*any\b(?=\s*[,)=;\]>|])|<any>")
 
@@ -3123,17 +3831,30 @@ def check_suppressions(ctx) -> list:
     return out
 
 
+def _suppression_hit(lx, rx, line, text):
+    """A suppression marker counts only inside a comment (or, for an annotation such as @SuppressWarnings, in
+    code). Without a lexer view it is a plain search."""
+    if lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
+        return rx.search(text)
+    for m in rx.finditer(text):
+        kind = lx.kind_at(line, m.start())
+        if kind == COM or (kind == CODE and m.group(0).startswith("@")):
+            return m
+    return None
+
+
 def _suppressions_file(ctx, fc) -> list:
     out = []
     before = Counter()
-    for _, text in fc.removed:
+    lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
+    for old_line, text in fc.removed:
         for rule, rx in SUPPRESSIONS:
-            if rx.search(text):
+            if _suppression_hit(old_lx, rx, old_line, text):
                 before[rule] += 1
                 break
     for line, text in fc.added.items():
         for rule, rx in SUPPRESSIONS:
-            m = rx.search(text)
+            m = _suppression_hit(lx, rx, line, text)
             if m:
                 if before[rule]:
                     before[rule] -= 1            # the same suppression existed on an edited line
@@ -3142,8 +3863,9 @@ def _suppressions_file(ctx, fc) -> list:
                     out.append(make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
                                     legacy_key=marker))
                 break
-        if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
-            out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
+        cast = hit(lx, TYPE_CAST, line, text, CODE) if fc.ext in TS_EXTS else None
+        if cast and not text.lstrip().startswith("//"):
+            out.append(make("suppress.type_cast", fc.path, line, f"`{cast.group(0).strip()}` added",
                             key=text.strip()))
     return out
 
@@ -3173,7 +3895,7 @@ WEAK_CRYPTO = re.compile(
 NON_PY_RULES = [
     ("security.verification_disabled", re.compile(
         r"rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED['\"]?\]?\s*=\s*['\"]?0|strictSSL\s*:\s*false|"
-        r"algorithms\s*:\s*\[\s*['\"]none['\"]|(?i:insecureSkipVerify)\s*:\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(?:false|0)"),
+        r"algorithms\s*:\s*\[\s*['\"]none['\"]|(?i:insecureSkipVerify)\s*[:=]\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(?:false|0)"),
      "certificate or signature verification turned off"),
 ]
 JS_RULES = [
@@ -3211,37 +3933,55 @@ def check_code_lines(ctx) -> list:
     out = []
     for fc in ctx.code_changes(CODE_EXTS):
         out += ctx.results.run("code_lines", ctx, fc, lambda fc=fc: _code_lines_file(ctx, fc))
-    return out
+    return out + check_lang(ctx)
 
 
 def _code_lines_file(ctx, fc) -> list:
     out = []
     is_js, is_py = fc.ext in JS_EXTS, fc.ext in PY_EXTS
     test = ctx.is_test(fc.path)
+    lx = None if is_py else ctx.lexed(fc)           # code / string / comment view; None = line-based as before
     for line, text in fc.added.items():
         if len(text) > 2000:
             continue
-        m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
-        if m and c and c.start() <= m.start():
+        if lx is not None:
+            same = lx.line(line).rstrip("\r") == text.rstrip("\r")
+            placeholder = hit(lx, PLACEHOLDER_RE, line, text, COM)
+            js_placeholder = is_js and hit(lx, JS_PLACEHOLDER, line, text, CODE)
+            todo = hit(lx, TODO_RE, line, text, COM)
+            weak = WEAK_CRYPTO.search(lx.masked(line, (COM,)) if same else text)
+        else:
+            m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
+            placeholder = m and c and c.start() <= m.start()
+            js_placeholder = is_js and JS_PLACEHOLDER.search(text)
+            todo = TODO_RE.search(text)
+            weak = WEAK_CRYPTO.search(text)
+        if placeholder:
             out.append(make("code.placeholder", fc.path, line, text.strip()[:90], key=text.strip()))
-        elif is_js and JS_PLACEHOLDER.search(text):
+        elif js_placeholder:
             out.append(make("code.placeholder", fc.path, line, "throws 'not implemented'", key=text.strip()))
-        elif TODO_RE.search(text):
+        elif todo:
             out.append(make("code.todo", fc.path, line, text.strip()[:80], key=text.strip()))
-        if WEAK_CRYPTO.search(text):
+        if weak:
             out.append(make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip()))
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
-                if rx.search(text):
+                if hit(lx, rx, line, text, CODE):
                     out.append(make(rule, fc.path, line, what, key=text.strip()))
-        if is_js and not test and JS_CONSOLE.search(text) and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
+        if is_js and not test and hit(lx, JS_CONSOLE, line, text, CODE) \
+                and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
             out.append(make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip()))
     if is_js:
         for block in _blocks(fc.added):
-            joined = "\n".join(fc.added[ln] for ln in block)
+            rows = [(ln, fc.added[ln]) for ln in block]
+            joined = "\n".join(lx.masked(ln, (COM,)) if lx is not None and lx.line(ln).rstrip("\r") == t.rstrip("\r")
+                               else t for ln, t in rows)
             for m in JS_SWALLOW.finditer(joined):
-                out.append(make("code.swallowed_exception", fc.path, block[0] + joined[:m.start()].count("\n"),
-                                "empty catch", key=m.group(0)))
+                pre = joined[:m.start()]
+                line = block[0] + pre.count("\n")
+                if lx is not None and lx.kind_at(line, m.start() - (pre.rfind("\n") + 1)) != CODE:
+                    continue                                   # "catch {}" written inside a string
+                out.append(make("code.swallowed_exception", fc.path, line, "empty catch", key=m.group(0)))
     return out
 
 
@@ -4389,6 +5129,8 @@ def run_check(args, env, collect=False):
             except Exception as e:                     # one broken checker must not hide the others
                 findings.append(make("gate.error", "(gate)", None, f"{checker.name} failed: {type(e).__name__}: {e}",
                                      action=fail_action, key=checker.name))
+        if args.verbose:
+            notes += [n for n in ctx.lang_notes if n not in notes]
         if head is not None:
             if len(commits) > 300:
                 notes.append(f"{len(commits)} commits: secrets scanned in the first 300 only")
