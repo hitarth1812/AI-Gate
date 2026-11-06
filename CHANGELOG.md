@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.4.0 — unreleased: precision (Phase 4A)
+
+Driven by an audit run of a 553-file Go repository (`check --all`: 4 block, 67 fix, 341 warn, about 70% judged noise).
+People get the softer treatment; **an AI agent's change is held to everything it was held to before** (and bare
+`//nolint` is now a fix for everyone).
+
+### Changed (fewer false positives)
+- `secrets.generic` ignores `$VAR`, `${VAR}`, `$$VAR`, `%VAR%` (environment-style names) for everyone. For people an identifier
+  label (`reset_password`, `missing-token`) and, in documentation, a `dev-...` placeholder are information only.
+- `secrets.hardcoded`: a private-key marker needs a base64 body or its END marker; `strings.Contains(s, "-----BEGIN ...")`
+  no longer blocks. Documentation files keep the old behaviour. `secrets.env_file` is unchanged.
+- Generated files (`Code generated ... DO NOT EDIT`, `@generated`, `*.pb.go`, `*_generated.*`, swagger `docs.go`, minified
+  and vendored paths) skip size, copy-paste, loop and placeholder rules for people. Secrets, dependencies and syntax still run.
+- `code.duplicate_block`: import/use blocks and SQL files are ignored and the default minimum is 8 lines (people only).
+- `[limits.tests]` (`function_lines` 120, `complexity` 15, `file_lines` 1500) applies to a person's change to test files;
+  table-driven data rows count a quarter. The general limits are unchanged for everyone else.
+- `tests.skip_added`: environment-gated skips are warnings for people, with a hint to make CI fail when they fire.
+- Suppressions: a Go `//nolint:<linter> // <reason>` stays a warning, a bare or reasonless one is a fix; a justified
+  `type: ignore[code]  # why`, `@ts-ignore why` or `no cover - why` is a warning for people. Security suppressions stay fixes.
+- `security.sql_injection` in Go tests built from identifiers (`table`, `role`, `schema`, DDL/GRANT) is a warning for people.
+- `deps.vulnerable` names the fixed version, tells you which tool shows reachability (never run), and a `// indirect` Go
+  requirement is a warning for people.
+
+### Added
+- `check --all` / `audit`: `--summary` (per rule, per top directory, biggest files), `--group-by rule|path`,
+  `--max-findings N`, and a closing line that points at `aigate-lite baseline`. JSON gains `summary` and `truncated`.
+- Findings with action `pass` are information only (`allowed: "info only"` in JSON).
+- Bench scenario G (`check --all` over a generated 500-file polyglot repo, recorded, not gated); `bench/precision.py` and
+  `tests/precision_fixtures.py` (synthetic fixtures, before/after counts).
+
+### Faster
+- `check --all` on scenario G: about 1.7 s to about 1.37 s (per-path memoization of the ignore/test globs, which ran per
+  added line) plus a literal prefilter in front of the provider-key patterns.
+
+### Fixed
+- macOS: Go env file read from `~/Library/Application Support/go/env`; a hook test no longer needs coreutils beside git.
+
 ## 0.2.2 — unreleased: easier commands and attribution
 
 ### Added
