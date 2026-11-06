@@ -59,8 +59,7 @@ def test_an_agent_is_never_treated_more_leniently_than_before_phase_4(results, c
 
 
 # things that were never credentials, copy-paste or keys: removed for people and agents alike
-FALSE_POSITIVES_REMOVED_FOR_EVERYONE = {"label-reset", "label-missing", "label-kebab", "ref-dollar", "ref-double",
-                                        "pem-contains", "dup-imports", "dup-sql"}
+FALSE_POSITIVES_REMOVED_FOR_EVERYONE = {"ref-dollar", "ref-double", "pem-contains"}
 
 
 def test_the_fixture_set_reproduces_every_pattern_the_old_gate_got_wrong(results):
@@ -82,7 +81,7 @@ def test_secrets_values_that_are_variable_references_or_labels(repo):
     res = stage(repo, {"app.yaml": 'password: "$DB"\ntoken: "${T}"\nsecret: "$$S"\napi_key: "%K%"\n'
                                    'client_secret: "{{ .Values.s }}"\n'
                                    'access_token: "' + "Zx9kLm2Q" + 'w8vR4tY"\nauth_token: "refresh_token"\n'})
-    assert [f["line"] for f in find(res, "secrets.generic")] == [6]
+    assert [f["line"] for f in find(res, "secrets.generic") if not f["allowed"]] == [6]
 
 
 def test_a_private_key_needs_a_body(repo):
@@ -212,3 +211,74 @@ def test_a_baseline_entry_keeps_matching_after_a_finding_is_softened(repo):
     repo.commit("baseline")
     found = find(repo.check("--offline", "--all"), "tests.skip_added")
     assert found and all(f["allowed"] == "baseline" for f in found)
+
+
+# ------------------------------------------------------------------------------------------------ review of 4A
+
+AGENT = {"CLAUDECODE": "1"}
+
+
+def test_lowercase_passphrases_and_mixed_case_dollar_values_are_still_credentials(repo):
+    text = 'password = "correct-horse-battery-staple"\nsecret = "$Tr0ngPassw0rd"\napi_key: "hunter-two-words"\n'
+    res = stage(repo, {"app.py": text})
+    assert {(f["line"], f["action"]) for f in find(res, "secrets.generic") if f["allowed"] in (None, "info only")} >= {(2, "fix")}
+    agent = repo.check("--offline", env=AGENT)
+    assert [f["line"] for f in find(agent, "secrets.generic") if not f["allowed"]] == [1, 2, 3]
+
+
+def test_a_comment_prefixed_private_key_is_still_a_key(repo):
+    lines = "".join("// " + fx.KEY_LINES[0][i:i + 40] + "\n" for i in range(0, 64, 40))
+    res = stage(repo, {"a.go": "package a\n// " + fx.BEGIN + "\n" + lines})
+    assert find(res, "secrets.hardcoded")
+
+
+def test_a_use_call_does_not_hide_the_duplicates_after_it(repo):
+    block = "".join(f"\tv{i} := step({i})\n" for i in range(12))
+    text = "package a\n\nfunc a() {\n\tuse(func() {\n" + block + "\t})\n}\n"
+    res = stage(repo, {"a.go": text, "b.go": text.replace("func a", "func b")})
+    assert find(res, "code.duplicate_block")
+
+
+def test_agents_keep_duplicate_detection_in_import_blocks_and_sql_files(repo):
+    imports = 'import (\n' + "".join(f'\t"pkg{i}"\n' for i in range(9)) + ")\n"
+    sql = "".join(f"  col{i} text,\n" for i in range(9))
+    files = {"a.go": "package a\n\n" + imports, "b.go": "package b\n\n" + imports,
+             "m1.sql": "CREATE TABLE a (\n" + sql + ");\n", "m2.sql": "CREATE TABLE b (\n" + sql + ");\n"}
+    stage(repo, files)
+    assert not find(repo.check("--offline"), "code.duplicate_block")
+    assert {f["path"] for f in find(repo.check("--offline", env=AGENT), "code.duplicate_block")} >= {"b.go", "m2.sql"}
+
+
+def test_a_limit_someone_lowered_is_not_relaxed_for_test_files(repo):
+    repo.write(".aigate/lite.toml", "[limits]\nfunction_lines = 30\n")
+    body = "".join(f"    x{i} = {i}\n" for i in range(50))
+    res = stage(repo, {"test_big.py": "def test_big():\n" + body + "    assert x0 == 0\n"})
+    assert find(res, "size.function_length")
+
+
+def test_documentation_placeholders_are_not_softened_in_text_files_or_sensitive_paths(repo):
+    key = 'JWT_SECRET: "dev-s3cr3t' + '-4f9a8c"\n'
+    res = stage(repo, {"docs/ok.md": key, "credentials.txt": key})
+    got = {f["path"]: f["allowed"] for f in find(res, "secrets.generic")}
+    assert got["docs/ok.md"] == "info only" and got["credentials.txt"] is None
+
+
+def test_a_skip_is_environment_gated_only_by_the_line_just_above_it(repo):
+    text = ('package a\n\nimport "testing"\n\nfunc TestA(t *testing.T) {\n\tx := os.Getenv("HOME")\n\t_ = x\n\tt.Skip()\n}\n')
+    res = stage(repo, {"a_test.go": text})
+    assert {f["action"] for f in find(res, "tests.skip_added")} == {"fix"}
+
+
+def test_sql_with_a_call_operand_is_not_judged_by_its_identifier(repo):
+    text = 'package a\n\nfunc TestA() {\n\tdb.Exec("DELETE FROM " + table + " WHERE a = " + f(x))\n}\n'
+    res = stage(repo, {"a_test.go": text})
+    assert [f["action"] for f in find(res, "security.sql_injection")] == ["fix"]
+
+
+def test_a_failed_fixed_version_lookup_is_not_remembered(monkeypatch):
+    from conftest import aigate
+    reg = aigate.Registry(offline=False, use_cache=False)
+    reg.mem[("osv", "go", "x/y", "v1.0.0")] = ["GHSA-1"]
+    monkeypatch.setattr(reg, "_http", lambda url, method="GET", body=None: (503, b""))
+    assert reg.fixed_in("go", "x/y", "v1.0.0") == "" and ("fixed", "go", "x/y", "v1.0.0") in reg.mem
+    assert reg.cache == {}                                      # nothing was written for the next run to trust

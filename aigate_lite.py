@@ -1614,14 +1614,15 @@ class Registry:
                 when = json.loads(raw).get("Time")
                 return when if isinstance(when, str) and when else None
             if kind == "fixed":
-                best = None
+                best, failed = None, False
                 for vid in (self.vulns(eco, name, key[3]) or [])[:5]:        # a few advisories are enough to name a fix
                     status, raw = self._http("https://api.osv.dev/v1/vulns/" + urllib.parse.quote(str(vid), safe=""))
+                    failed = failed or status != 200
                     if status == 200:
                         fx = osv_fixed(json.loads(raw), self.OSV_ECOSYSTEM[eco], name, key[3])
                         if fx and (best is None or _cmp(release_tuple(fx), release_tuple(best)) > 0):
                             best = fx           # the version that fixes all of them
-                return best or ""
+                return best or (None if failed else "")       # a failed lookup is not remembered as "no fix"
             if kind == "downloads":
                 if eco == "npm":
                     status, raw = self._http("https://api.npmjs.org/downloads/point/last-week/"
@@ -2361,6 +2362,8 @@ SQL_IDENT_NAME = re.compile(r"(?i)^(?:table|tbl|role|schema|db|database|column|c
 def _sql_identifier_style(text) -> bool:
     """A statement a test builds out of identifiers (DDL, GRANT, or variables named table/role/schema/db): they cannot be
     bound as parameters. Judged for people only (see Finding.human); non-test code and plain values are unchanged."""
+    if re.search(r"[+,]\s*[\w.]+\(", text):               # an operand that is a call: not judged by its name
+        return False
     if SQL_DDL.search(text):
         return True
     names = [m.group(1).split(".")[-1] for m in SQL_OPERAND.finditer(text)]
@@ -2551,7 +2554,7 @@ DEFAULT_PASSWORDS = {"postgres", "password", "root", "admin", "secret", "example
                      "changeme", "mysql", "redis"}
 
 
-VAR_REF = re.compile(r"\$\$?(?:\{[A-Za-z_]\w*[^}]*\}|[A-Za-z_]\w*)|%[A-Za-z_]\w*%")      # $VAR ${VAR} $$VAR %VAR%
+VAR_REF = re.compile(r"\$\$?(?:\{[A-Z_][A-Z0-9_]*[^}]*\}|[A-Z_][A-Z0-9_]*)|%[A-Z_][A-Z0-9_]*%")   # $VAR ${VAR} $$VAR %VAR% (env-style names)
 LABEL_VALUE = re.compile(r"[a-z]{2,}(?:[_-][a-z]{2,})+")        # reset_password, missing-token: a name, not a secret
 DOC_PATH = re.compile(r"(?i)(?:^|/)(?:docs?|documentation)/|\.(?:md|markdown|rst|adoc|txt)$|(?:^|/)readme[^/]*$")
 DOC_DEV_VALUE = re.compile(r"(?i)^(?:dev|local|demo|sample|test)[_-]")
@@ -2560,8 +2563,8 @@ DOC_DEV_VALUE = re.compile(r"(?i)^(?:dev|local|demo|sample|test)[_-]")
 def _looks_like_secret(name: str, val: str) -> bool:
     if NAME_EXCLUDE.search(name) or PLACEHOLDER_VALUE.search(val):
         return False
-    if VAR_REF.fullmatch(val) or (len(val) <= 40 and LABEL_VALUE.fullmatch(val)):
-        return False                                                  # a reference to a variable, or an identifier label
+    if VAR_REF.fullmatch(val):
+        return False                                                  # a reference to an environment variable
     if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", val):                    # the name of an env var, not its value
         return False
     if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", val):       # a dotted reference
@@ -2569,6 +2572,15 @@ def _looks_like_secret(name: str, val: str) -> bool:
     if val.startswith(("http://", "https://", "/", "./", "../", "~")):
         return False
     return entropy(val) >= 3.0
+
+
+def _soft_value(val, docs) -> str | None:
+    """"pass" (information only) for people when a credential-named value is an identifier label such as `reset_password`
+    or, in documentation, a `dev-...` placeholder. An AI agent's change keeps the finding: a passphrase of lowercase words
+    looks the same as a label."""
+    if len(val) <= 40 and LABEL_VALUE.fullmatch(val):
+        return "pass"
+    return "pass" if docs and DOC_DEV_VALUE.match(val) else None
 
 
 def _pem_body(fc, line_no, rest) -> bool:
@@ -2580,7 +2592,7 @@ def _pem_body(fc, line_no, rest) -> bool:
         if more is None:
             break
         window.append(more)
-    joined = "\n".join(window)
+    joined = "\n".join(re.sub(r"^\s*(?:#|//|\*|;|--(?=\s))+\s?", "", ln) for ln in window)      # comment-prefixed keys too
     if re.search(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY", joined):         # the block is closed: a key, however short
         return True
     flat = re.sub(r"\\[nrt]|[\s\"'`+\\,;]", "", joined)
@@ -2613,15 +2625,17 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
     if found or ctx.ignored(fc.path) or is_lockfile(fc.path) or lname == ".env" or lname.startswith(".env."):
         return found                                              # env files are judged as a whole by secrets.env_file
     soft = "warn" if ctx.is_test(fc.path) else None              # fixtures in tests are usually fake
-    docs = bool(DOC_PATH.search(fc.path))
+    docs = bool(DOC_PATH.search(fc.path)) and fc.ext != ".txt" and not ctx.sensitive(fc.path)
     for m in GENERIC_ASSIGN.finditer(text):
         if _looks_like_secret(m.group("name"), m.group("val")):
-            add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft,
-                "pass" if docs and DOC_DEV_VALUE.match(m.group("val")) else None)
+            val = m.group("val")
+            add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
+                _soft_value(val, docs))
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
-            add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft)
+            add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft,
+                _soft_value(m.group("val"), False))
     for m in JWT_RE.finditer(text):
         add("secrets.generic", m.group(1), f"JSON Web Token ({redact(m.group(1))})", soft)
     for m in CONN_RE.finditer(text):
@@ -4126,9 +4140,9 @@ SKIP_HINT = "make CI fail when this skip fires (e.g. an env var that turns the s
 
 
 def _before(lx, fc, line) -> str:
-    """The two lines above `line` (the `if` that guards a skip)."""
+    """The line above `line` (the `if` that guards a skip)."""
     get = lx.line if lx is not None else (lambda n: fc.added.get(n, ""))
-    return get(line - 2) + "\n" + get(line - 1)
+    return get(line - 1)
 
 
 def skip_finding(fc, line, text, before="") -> Finding:
@@ -4879,7 +4893,10 @@ def test_relief(ctx, fc, key, measured, lines=None) -> str | None:
     lim = ctx.cfg["limits"]
     if lines is not None:
         measured -= table_rows(lines) * (1 - ROW_WEIGHT)
-    return "off" if measured <= max(lim[key], lim["tests"][key]) else None
+    general = lim[key]
+    if general >= DEFAULT_CONFIG["limits"][key]:           # a limit someone lowered on purpose (strict preset) stays
+        general = max(general, lim["tests"][key])
+    return "off" if measured <= general else None
 
 
 def _limit_note(ctx, fc, key) -> str:
@@ -5169,7 +5186,7 @@ def check_files(ctx) -> list:
 # repeat their column lists on purpose) and, for people, blocks shorter than DUP_HUMAN_MIN meaningful lines when the
 # limit was left at its default; an AI agent's change keeps the old, tighter default.
 DUP_HUMAN_MIN = 8
-IMPORT_OPEN = re.compile(r"(?:pub\s+)?(?:import|use|from\s+[\w.]+\s+import)\b[^;]*[({]\s*$")
+IMPORT_OPEN = re.compile(r"(?:pub\s+)?(?:import\s*[({]|use\s+[\w:]+::\{|from\s+[\w.]+\s+import\s*\()[^;)}]*$")
 IMPORT_CLOSE = re.compile(r"[)}][^;]*;?\s*$")
 
 
@@ -5178,7 +5195,8 @@ def check_duplicates(ctx) -> list:
     n = ctx.cfg["limits"]["duplicate_lines"]
     if n == DEFAULT_CONFIG["limits"]["duplicate_lines"] and not ctx.agent:
         n = DUP_HUMAN_MIN
-    files = [fc for fc in ctx.code_changes(CODE_EXTS, tests=False) if fc.added and fc.ext != ".sql"]
+    relief = not ctx.agent                      # import blocks and SQL files are skipped for people only
+    files = [fc for fc in ctx.code_changes(CODE_EXTS, tests=False) if fc.added and not (relief and fc.ext == ".sql")]
     rows_by, index = {}, defaultdict(list)
     skip = re.compile(r"[{}()\[\];,]+|(?:else|try|finally|pass|break|continue|return|end)\s*:?;?")
     for fc in files:
@@ -5188,10 +5206,10 @@ def check_duplicates(ctx) -> list:
         rows, in_import = [], False
         for i, raw in enumerate(text.splitlines(), 1):
             s = re.sub(r"\s+", " ", raw.strip())
-            if in_import:
+            if relief and in_import:
                 in_import = not IMPORT_CLOSE.match(s)
                 continue
-            if IMPORT_OPEN.match(s):
+            if relief and IMPORT_OPEN.match(s):
                 in_import = True
                 continue
             if len(s) >= 4 and not skip.fullmatch(s) and not s.startswith(("#", "//", "*", "/*", "import ", "from ", "@")):

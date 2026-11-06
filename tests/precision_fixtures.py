@@ -132,9 +132,9 @@ FILES = {
 # (case id, rule, path, text that identifies the line, expectation for a human, expectation for an agent)
 # an expectation is an action name ("block", "fix", "warn", "pass") or None for "no finding"
 CASES = [
-    ("label-reset", "secrets.generic", "internal/auth/labels.go", "PurposeResetPassword", None, None),
-    ("label-missing", "secrets.generic", "internal/auth/labels.go", "reasonMissingToken", None, None),
-    ("label-kebab", "secrets.generic", "internal/auth/labels.go", "tokenKindRefresh", None, None),
+    ("label-reset", "secrets.generic", "internal/auth/labels.go", "PurposeResetPassword", "pass", "fix"),
+    ("label-missing", "secrets.generic", "internal/auth/labels.go", "reasonMissingToken", "pass", "fix"),
+    ("label-kebab", "secrets.generic", "internal/auth/labels.go", "tokenKindRefresh", "pass", "fix"),
     ("real-password", "secrets.generic", "internal/auth/labels.go", "adminPassword", "fix", "fix"),
     ("ref-dollar", "secrets.generic", "deploy/app.yaml", "$DB_PASSWORD", None, None),
     ("ref-brace", "secrets.generic", "deploy/app.yaml", "${APP_SECRET}", None, None),
@@ -156,9 +156,9 @@ CASES = [
     ("gen-suffix-size", "size.function_length", "internal/store/models_generated.go", "func big", None, "warn"),
     ("vendor-size", "size.function_length", "vendor/example.com/dep/dep.go", "func big", None, None),   # paths.ignore already skips vendor/
     ("hand-size", "size.function_length", "internal/hand/written.go", "func big", "warn", "warn"),
-    ("dup-imports", "code.duplicate_block", "dup/two.go", "package x", None, None),
+    ("dup-imports", "code.duplicate_block", "dup/two.go", "package x", None, "warn"),
     ("dup-short", "code.duplicate_block", "dup/three.go", "c := a * b", None, "warn"),
-    ("dup-sql", "code.duplicate_block", "migrations/002_more.sql", "id bigint", None, None),
+    ("dup-sql", "code.duplicate_block", "migrations/002_more.sql", "id bigint", None, "warn"),
     ("dup-real", "code.duplicate_block", "dup/six.go", "v0 :=", "warn", "warn"),
     ("table-test", "size.function_length", "pkg/table_test.go", "func TestTable", None, "warn"),
     ("long-test", "size.function_length", "pkg/long_test.go", "func TestLong", "warn", "warn"),
