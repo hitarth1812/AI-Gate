@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aigate-lite"
-version = "0.2.1"
+dynamic = ["version"]
 description = "Free, local commit-time gate that checks AI-written code before it is committed or pushed"
 readme = "README.md"
 authors = [{ name = "Hitarth Khatiwala", email = "hitarthkhatiwala@gmail.com" }]
@@ -24,6 +24,9 @@ Repository = "https://github.com/hitarth1812/AI-Gate"
 
 [tool.setuptools]
 py-modules = ["aigate_lite"]
+
+[tool.setuptools.dynamic]
+version = { attr = "aigate_lite.__version__" }
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -50,7 +50,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.2.1"
+__version__ = "0.4.0"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
@@ -201,6 +201,11 @@ _RULE_ROWS = [
     ("commands.untrusted", "warn", "low", 1.0, "Configured commands not approved yet, so they did not run",
      "Review the [[commands]] in .aigate/lite.toml, then run `aigate-lite trust`."),
     ("gate.config_invalid", "warn", "low", 1.0, "Problem in .aigate/lite.toml", "Fix the entry named in the message."),
+    ("gate.version_too_old", "block", "high", 1.0, "aigate-lite is older than this repository requires",
+     "Upgrade aigate-lite (pipx upgrade aigate-lite, uv tool upgrade aigate-lite or pip install -U aigate-lite), or ask "
+     "the team to change [gate] requires in .aigate/lite.toml."),
+    ("gate.version_too_new", "warn", "low", 1.0, "aigate-lite is newer than this repository's [gate] requires range",
+     "Fine to continue; ask the team to widen [gate] requires in .aigate/lite.toml after checking the changelog."),
     ("gate.error", "block", "high", 1.0, "aigate-lite could not finish a check",
      "This is a bug or an environment problem, and the gate fails closed. Bypass once with git commit --no-verify and report it."),
 ]
@@ -759,7 +764,7 @@ def is_lockfile(path: str) -> bool:
 # --------------------------------------------------------------------------- configuration
 
 DEFAULT_CONFIG = {
-    "gate": {"fail_closed": True, "offline": "warn", "max_seconds": 20, "cache": False},
+    "gate": {"fail_closed": True, "offline": "warn", "max_seconds": 20, "cache": False, "requires": ""},
     "rules": {},
     "paths": {
         "ignore": ["**/node_modules/**", "**/vendor/**", "**/third_party/**", "dist/**", "build/**",
@@ -875,6 +880,61 @@ def merge_config(raw: dict, problems: list) -> dict:
     return cfg
 
 
+REQUIRES_CLAUSE = re.compile(r"\s*(>=|<=|==|!=|~=|>|<)\s*(\d+(?:\.\d+)*)(\.\*)?\s*")
+
+
+def parse_requires(text):
+    """[(operator, release tuple, wildcard)] for a range like ">=0.4,<0.5", or None when it is not one. A small subset of
+    PEP 440: comma-separated clauses of >=, <=, >, <, ==, != and ~= over release numbers (1, 1.2, 1.2.3); `==1.2.*`
+    is allowed. Pre-release, post-release, dev and local parts are not understood and make the range invalid."""
+    clauses = []
+    for part in text.split(","):
+        m = REQUIRES_CLAUSE.fullmatch(part)
+        if not m or (m.group(3) and m.group(1) not in ("==", "!=")):
+            return None
+        clauses.append((m.group(1), tuple(int(n) for n in m.group(2).split(".")), bool(m.group(3))))
+    return clauses or None
+
+
+def release_numbers(version):
+    """The leading release numbers of a version string ("0.4.0" -> (0, 4, 0); "0.4.0a1" -> (0, 4, 0)), or None."""
+    m = re.match(r"\s*(\d+(?:\.\d+)*)", str(version or ""))
+    return tuple(int(n) for n in m.group(1).split(".")) if m else None
+
+
+def requires_status(text, version):
+    """("ok" | "old" | "new" | "odd", why): where `version` stands against a `requires` range. "old" means below the
+    minimum, "new" above the maximum, "odd" excluded by a != clause or unparseable."""
+    clauses, have = parse_requires(text or ""), release_numbers(version)
+    if clauses is None or have is None:
+        return "odd", f"cannot compare {version!r} with {text!r}"
+
+    def cmp(a, b):
+        n = max(len(a), len(b))
+        a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
+        return (a > b) - (a < b)
+    for op, want, wild in clauses:
+        c = cmp(have, want)
+        if op == "~=":
+            lower_ok, upper = c >= 0, want[:-1] if len(want) > 1 else want
+            if not lower_ok:
+                return "old", f"{version} is below {op}{'.'.join(map(str, want))}"
+            if have[:len(upper)] != upper:
+                return "new", f"{version} is outside {op}{'.'.join(map(str, want))}"
+        elif op == "==":
+            ok = have[:len(want)] == want if wild else c == 0
+            if not ok:
+                return ("old" if c < 0 else "new"), f"{version} does not match =={'.'.join(map(str, want))}{'.*' if wild else ''}"
+        elif op == "!=":
+            if (have[:len(want)] == want) if wild else c == 0:
+                return "odd", f"{version} is excluded by !={'.'.join(map(str, want))}"
+        elif (op == ">=" and c < 0) or (op == ">" and c <= 0):
+            return "old", f"{version} is below {op}{'.'.join(map(str, want))}"
+        elif (op == "<=" and c > 0) or (op == "<" and c >= 0):
+            return "new", f"{version} is above {op}{'.'.join(map(str, want))}"
+    return "ok", ""
+
+
 def validate_config(cfg: dict, problems: list) -> None:
     rules = {}
     for key, value in (cfg.get("rules") or {}).items():
@@ -932,6 +992,10 @@ def validate_config(cfg: dict, problems: list) -> None:
     if cfg["gate"].get("offline") not in ("warn", "block", "skip"):
         problems.append("gate.offline must be warn, block or skip")
         cfg["gate"]["offline"] = "warn"
+    requires = cfg["gate"].get("requires", "")
+    if not isinstance(requires, str) or (requires.strip() and parse_requires(requires) is None):
+        problems.append('gate.requires must be a version range such as ">=0.4,<0.5" (release numbers only)')
+        cfg["gate"]["requires"] = ""
     if not isinstance(cfg["gate"].get("cache", False), bool):
         problems.append("gate.cache must be true or false")
         cfg["gate"]["cache"] = False
@@ -5354,6 +5418,22 @@ def is_generated(ctx, path) -> bool:
     return memo[path]
 
 
+def version_findings(cfg) -> list:
+    """The team's version pin ([gate] requires): older than the minimum blocks, newer than the maximum warns. The config
+    an AI agent's commit is judged by comes from HEAD, so an agent cannot lower the pin in the same commit."""
+    text = (cfg["gate"].get("requires") or "").strip()
+    if not text:
+        return []
+    status, why = requires_status(text, __version__)
+    if status == "old":
+        return [make("gate.version_too_old", CONFIG_PATH, None,
+                     f"this repository requires aigate-lite {text} and this is {__version__} ({why})", key=text)]
+    if status in ("new", "odd"):
+        return [make("gate.version_too_new", CONFIG_PATH, None,
+                     f"this repository expects aigate-lite {text} and this is {__version__} ({why})", key=text)]
+    return []
+
+
 def apply_policy(findings, ctx, env) -> list:
     overrides, allows = ctx.cfg["rules"], ctx.cfg["allow"]
     env_allow = [r.strip() for r in env.get("AIGATE_ALLOW", "").split(",") if r.strip()]
@@ -5977,6 +6057,7 @@ def run_check(args, env, collect=False):
         stats["removed"] += sum(len(fc.removed) for fc in counted)
         for problem in cfg.problems:
             findings.append(make("gate.config_invalid", CONFIG_PATH, None, problem, key=problem))
+        findings += version_findings(cfg)
         fail_action = "block" if cfg["gate"].get("fail_closed", True) else "warn"
         for checker in CHECKERS:
             if head is not None and not full and checker.name in SECRET_CHECKERS:
@@ -6230,7 +6311,9 @@ if [ -n "$AIGATE_PYTHON" ]; then
 fi"""
 
 
-def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
+def hook_script(kind: str, vendored: bool, py: str, script: str, mode=None) -> str:
+    if mode == "installed":
+        return installed_hook_script(kind, py)
     local = f'"$HOOK_DIR/{kind}.local"'
     lines = ["#!/bin/sh", f"{HOOK_MARK} ({kind}). Remove with: aigate-lite uninstall",
              'HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"']
@@ -6274,6 +6357,83 @@ def hook_script(kind: str, vendored: bool, py: str, script: str) -> str:
     else:
         lines.append(f'exec {run} check --staged')
     return "\n".join(lines) + "\n"
+
+
+HOOK_MODE_RE = re.compile(r"^# aigate-lite mode: (\w+)", re.M)
+HOOK_AGENT_TEST = ('[ -n "$CLAUDECODE$AI_AGENT$GEMINI_CLI$AIGATE_AGENT" ] || [ "$(printf %s "$AIGATE_PROVENANCE" | '
+                   "tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')\" = agent ]")
+
+
+def hook_mode(text: str) -> str:
+    """installed | vendored | path (the hook pins the path of the script that ran `install`)."""
+    m = HOOK_MODE_RE.search(text)
+    if m:
+        return m.group(1)
+    return "path" if re.search(r"^SCRIPT='", text, re.M) else "vendored"
+
+
+def installed_hook_script(kind: str, py: str) -> str:
+    """Hook for the installed mode: nothing about where the package lives is written into it. It runs, in order,
+    $AIGATE_BIN (ignored for AI agents, like AIGATE_PYTHON), `aigate-lite` on PATH, the Python pinned at install with
+    `-m aigate_lite`, then any Python 3.11+ that can import it, and otherwise stops with the install command. A
+    candidate that cannot be executed (exit 126/127: a venv that was moved or removed) falls through to the next."""
+    what = "push" if kind == "pre-push" else "commit"
+    local = f'"$HOOK_DIR/{kind}.local"'
+    lines = ["#!/bin/sh", f"{HOOK_MARK} ({kind}). Remove with: aigate-lite uninstall",
+             "# aigate-lite mode: installed", 'HOOK_DIR="$(cd "$(dirname "$0")" && pwd)"']
+    if kind == "pre-push":
+        lines += ['REFS="$(cat)"', 'REMOTE="$1"',
+                  f'if [ -x {local} ]; then printf "%s\\n" "$REFS" | {local} "$@" || exit $?; fi',
+                  'run_with() { printf "%s\\n" "$REFS" | "$@" check --push --remote "$REMOTE"; }']
+    else:
+        lines += [f'if [ -x {local} ]; then {local} "$@" || exit $?; fi', 'run_with() { "$@" check --staged; }']
+    generic = " ".join(_sh_quote(" ".join(c)) if len(c) > 1 else c[0] for c in PY_GENERIC)
+    lines += [f"PINNED={_sh_quote(py.replace(chr(92), '/'))}",
+              'TRIED=""',
+              "attempt() {",
+              '  label=$1; shift',
+              '  run_with "$@"; rc=$?',
+              '  if [ "$rc" -eq 126 ] || [ "$rc" -eq 127 ]; then',
+              '    TRIED="$TRIED',
+              '  $label: could not be run"',
+              '    return 1',
+              '  fi',
+              '  exit "$rc"',
+              "}",
+              "mod_try() {",
+              '  "$@" -P -c "import aigate_lite" </dev/null >/dev/null 2>&1 || {',
+              '    TRIED="$TRIED',
+              '  $*: no aigate_lite module"; return 1; }',
+              '  attempt "$* -m aigate_lite" "$@" -P -m aigate_lite',
+              "}",
+              'if [ -n "$AIGATE_BIN" ]; then',
+              f'  if {HOOK_AGENT_TEST}; then',
+              f'    echo "aigate-lite: AIGATE_BIN is ignored while an AI agent runs the {what}" >&2',
+              '  elif [ -x "$AIGATE_BIN" ]; then attempt "AIGATE_BIN" "$AIGATE_BIN"',
+              '  else TRIED="$TRIED',
+              '  AIGATE_BIN: not an executable file"; fi',
+              "fi",
+              'if command -v aigate-lite >/dev/null 2>&1; then attempt "aigate-lite on PATH" aigate-lite; fi',
+              'if [ -x "$PINNED" ]; then mod_try "$PINNED"; fi',
+              f"for c in {generic}; do mod_try $c; done",
+              f'printf "aigate-lite is not installed; run: pipx install aigate-lite (bypass once with git {what} '
+              f'--no-verify)\\nTried:%s\\n" "$TRIED" >&2',
+              "exit 1"]
+    return "\n".join(lines) + "\n"
+
+
+def installed_package() -> bool:
+    """Whether this copy of the gate is a pip/pipx/uv-installed package (its distribution record lists this very file), as
+    opposed to a loose aigate_lite.py somebody runs by path. Only an installed package can be found again by `python -m
+    aigate_lite`, so only then is the installed mode the default."""
+    try:
+        from importlib import metadata
+        dist = metadata.distribution("aigate-lite")
+        here = os.path.normcase(os.path.realpath(os.path.abspath(__file__)))
+        return any(os.path.normcase(os.path.realpath(str(dist.locate_file(f)))) == here
+                   for f in (dist.files or []) if str(f).replace("\\", "/") == "aigate_lite.py")
+    except Exception:            # no metadata, odd metadata: treat as not installed
+        return False
 
 
 @dataclasses.dataclass
@@ -6345,6 +6505,21 @@ def _sh_quote(value: str) -> str:
     return "'" + value.replace("'", "'\\''") + "'"
 
 
+PRE_COMMIT_INSTALLED_SNIPPET = """  - repo: local
+    hooks:
+      - id: aigate-lite
+        name: aigate-lite
+        entry: aigate-lite check --staged
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: aigate-lite-push
+        name: aigate-lite (push)
+        entry: aigate-lite check --push
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]"""
 PRE_COMMIT_SNIPPET = """  - repo: local
     hooks:
       - id: aigate-lite
@@ -6362,15 +6537,34 @@ PRE_COMMIT_SNIPPET = """  - repo: local
         stages: [pre-push]"""
 
 
+MODES = ("installed", "vendored")
+
+
+def resolve_mode(args) -> str:
+    """The hook mode `install` was asked for: --mode, else --vendor, else installed when this copy is an installed
+    package, else `path` (the long-standing behaviour for a loose file: the hook pins that file's location)."""
+    return getattr(args, "mode", None) or ("vendored" if args.vendor else None) or \
+        ("installed" if installed_package() else "path")
+
+
 def cmd_install(args) -> int:
     repo = Repo.discover()
     hooks_dir = repo.git_path("hooks")
+    mode = resolve_mode(args)
+    args.vendor = mode == "vendored"
     hooks_path = run_git(repo.root, "config", "--get", "core.hooksPath", check=False).strip()
     if hooks_path and not args.force:
         print(f"core.hooksPath is set to {hooks_path!r} (husky or a similar tool manages your hooks).\n"
               "Add this line to that tool's pre-commit hook instead:\n"
-              "    python3 .aigate/aigate_lite.py check --staged\n"
-              "(run `aigate-lite install --vendor --force` to copy the script into .aigate/ and install anyway)")
+              + ("    aigate-lite check --staged\n(run `aigate-lite install --force` to install plain git hooks anyway)"
+                 if mode == "installed" else
+                 "    python3 .aigate/aigate_lite.py check --staged\n"
+                 "(run `aigate-lite install --vendor --force` to copy the script into .aigate/ and install anyway)"))
+        return 1
+    if os.path.exists(os.path.join(repo.root, ".pre-commit-config.yaml")) and not args.force and mode == "installed":
+        print("This repo uses the pre-commit framework. Add this to .pre-commit-config.yaml under `repos:` and run "
+              "`pre-commit install -t pre-commit -t pre-push`:\n" + PRE_COMMIT_INSTALLED_SNIPPET +
+              "\nOr install plain git hooks anyway with --force (the existing hook is kept and still runs first).")
         return 1
     if os.path.exists(os.path.join(repo.root, ".pre-commit-config.yaml")) and not args.force:
         print("This repo uses the pre-commit framework. Copy aigate_lite.py to .aigate/aigate_lite.py,\n"
@@ -6412,10 +6606,19 @@ def cmd_install(args) -> int:
             if not ours:                               # renamed after closing: Windows refuses open files
                 os.replace(path, path + ".local")
         with open(path, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(hook_script(kind, args.vendor, sys.executable, script))
+            fh.write(hook_script(kind, args.vendor, sys.executable, script, mode=mode))
         os.chmod(path, 0o755)
         print(f"installed {kind} hook -> {path}")
-    print(hook_python_line(args.vendor))
+    if mode == "installed":
+        print("hook mode: installed (the hook runs $AIGATE_BIN, then `aigate-lite` on PATH, then "
+              f"{sys.executable} -m aigate_lite; it never records where the package lives)")
+        if not installed_package():
+            print("note: this copy is not an installed package. Until `pipx install aigate-lite` (or uv tool/pip) puts "
+                  "`aigate-lite` on PATH, the hooks stop commits with that instruction.")
+    else:
+        print(f"hook mode: {mode}" + ("" if mode == "vendored" else
+              f" (pinned to {script}; `pipx install aigate-lite` then `aigate-lite install` removes that dependency)"))
+        print(hook_python_line(args.vendor))
     if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
         print("optional: `aigate-lite init` writes .aigate/lite.toml to tune rules and add your test command")
     return 0
@@ -6574,12 +6777,21 @@ def detect_project(root, files) -> ProjectInfo:
     return ProjectInfo(langs, eco, list(dict.fromkeys(tests)), private, trusted)
 
 
+def requires_for(version: str) -> str:
+    """The minor range of a version for [gate] requires: 0.4.2 -> ">=0.4,<0.5"."""
+    nums = release_numbers(version) or (0, 0)
+    major, minor = nums[0], (nums[1] if len(nums) > 1 else 0)
+    return f">={major}.{minor},<{major}.{minor + 1}"
+
+
 def init_text(preset: str, info: ProjectInfo) -> str:
     """The .aigate/lite.toml `init` writes: the preset, detected non-default keys, commented test commands."""
     lines = ["# aigate-lite configuration (written by `aigate-lite init`). Every key is optional; see",
              "# examples/lite.toml for all of them. Rule ids: `aigate-lite explain`.",
              "version = 1",
-             f'preset = "{preset}"            # relaxed | balanced | strict']
+             f'preset = "{preset}"            # relaxed | balanced | strict',
+             "", "[gate]",
+             f'requires = "{requires_for(__version__)}"   # the aigate-lite versions this team uses (older blocks, newer warns)']
     if info.private or info.trusted_sources:
         lines += ["", "[deps]"]
         if info.private:
@@ -6629,12 +6841,28 @@ def cmd_init(args) -> int:
 
 
 def cmd_setup(args) -> int:
-    """install --vendor (hooks plus a copy of the gate in .aigate/), then a starter config if there is none."""
+    """Hooks plus a starter config. The hooks run an installed aigate-lite when this copy is an installed package; a loose
+    file (python /path/aigate_lite.py setup) cannot be found again by name, so it is vendored into .aigate/, as before.
+    A repository that already has .aigate/aigate_lite.py stays vendored (`aigate-lite unvendor` switches it)."""
     import argparse
-    rc = cmd_install(argparse.Namespace(force=args.force, vendor=True, no_pre_push=False))
+    repo = Repo.discover()
+    have_copy = os.path.exists(os.path.join(repo.root, ".aigate", "aigate_lite.py"))
+    mode = getattr(args, "mode", None) or ("vendored" if args.vendor else None)
+    note = ""
+    if mode is None:
+        if have_copy:
+            mode, note = "vendored", ("this repository already has .aigate/aigate_lite.py, so it stays vendored; to use the "
+                                      "installed tool instead: pipx install aigate-lite, then aigate-lite unvendor")
+        elif installed_package():
+            mode = "installed"
+        else:
+            mode, note = "vendored", ("running from a loose aigate_lite.py, so the gate is copied into .aigate/; "
+                                      "pipx install aigate-lite makes `setup` use the installed tool instead")
+    rc = cmd_install(argparse.Namespace(force=args.force, vendor=mode == "vendored", mode=mode, no_pre_push=False))
     if rc:
         return rc
-    repo = Repo.discover()
+    if note:
+        print("note: " + note)
     if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
         rc = cmd_init(argparse.Namespace(preset=args.preset, print=False, force=False))
         if rc:
@@ -6644,6 +6872,28 @@ def cmd_setup(args) -> int:
           "  aigate-lite baseline   # accept today's findings so only new ones block\n"
           "  git add .aigate && git commit -m 'add aigate-lite'\n"
           + ATTRIBUTION)
+    return 0
+
+
+def cmd_unvendor(args) -> int:
+    """Switch a repository from the vendored copy to the installed tool: rewrite the hooks, and print (never run) the
+    `git rm` that removes the copy."""
+    import argparse
+    repo = Repo.discover()
+    copy = [p for p in (".aigate/aigate_lite.py", ".aigate/NOTICE") if os.path.exists(os.path.join(repo.root, p))]
+    if not installed_package() and not args.force:
+        print("aigate-lite: this copy is not an installed package, so hooks in installed mode would not find it.\n"
+              "  fix: pipx install aigate-lite (or uv tool install aigate-lite), then run `aigate-lite unvendor` again "
+              "(--force rewrites the hooks anyway)", file=sys.stderr)
+        return 1
+    rc = cmd_install(argparse.Namespace(force=args.force, vendor=False, mode="installed", no_pre_push=False))
+    if rc:
+        return rc
+    if copy:
+        print("The vendored copy is no longer used. Remove it and commit:\n  git rm " + " ".join(copy) +
+              "\n  git commit -m 'use the installed aigate-lite'\n(aigate-lite did not run this)")
+    else:
+        print("There was no vendored copy in .aigate/.")
     return 0
 
 
@@ -7078,6 +7328,9 @@ def _doctor_python(env, hooks_dir):
         with open(os.path.join(hooks_dir, "pre-commit"), encoding="utf-8", errors="replace") as fh:
             text = fh.read()
         if HOOK_MARK in text:
+            if hook_mode(text) == "installed":
+                out.append(_doctor_installed_hook(text))
+                return out
             m = re.search(r"^PY='((?:[^']|'\\'')*)'$", text, re.M)
             pinned = m.group(1).replace("'\\''", "'") if m else None
             vendored = m is None
@@ -7095,6 +7348,61 @@ def _doctor_python(env, hooks_dir):
     else:
         out.append(_check("python.hook", "ok", f"{label} uses {choice.reason}"))
     return out
+
+
+def _doctor_installed_hook(text):
+    """What a hook in installed mode would run right now: aigate-lite on PATH, else the pinned Python with -m."""
+    import shutil
+    found = shutil.which("aigate-lite")
+    if found:
+        return _check("python.hook", "ok", f"installed hook runs {found}")
+    m = re.search(r"^PINNED='((?:[^']|'\\'')*)'$", text, re.M)
+    pinned = m.group(1).replace("'\\''", "'") if m else None
+    if pinned and os.path.exists(pinned):
+        try:
+            ok = subprocess.run([pinned, "-P", "-c", "import aigate_lite"], capture_output=True, timeout=15,
+                                stdin=subprocess.DEVNULL).returncode == 0
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        if ok:
+            return _check("python.hook", "ok", f"installed hook runs {pinned} -m aigate_lite (aigate-lite is not on PATH)")
+    return _check("python.hook", "fail", "installed hook cannot find aigate-lite: not on PATH, and the Python pinned at "
+                  "install cannot import it; commits are blocked", "run: pipx install aigate-lite (or: aigate-lite install --vendor)")
+
+
+def _doctor_install(repo, cfg, hooks_dir):
+    """Hook mode, running version, vendored copy and the team's [gate] requires range in one line."""
+    mode = "not installed"
+    try:
+        with open(os.path.join(hooks_dir, "pre-commit"), encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+        if HOOK_MARK in text:
+            mode = hook_mode(text)
+    except OSError:
+        pass
+    copy = None
+    try:
+        with open(os.path.join(repo.root, ".aigate", "aigate_lite.py"), encoding="utf-8", errors="replace") as fh:
+            m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+        copy = m.group(1) if m else "unknown"
+    except OSError:
+        pass
+    how = "installed package" if installed_package() else "loose file"
+    requires = (cfg["gate"].get("requires") or "").strip()
+    detail = (f"hook mode: {mode}; running aigate-lite {__version__} ({how}); vendored copy: {copy or 'none'}; "
+              f"requires: {requires or 'not set'}")
+    status, why = requires_status(requires, __version__) if requires else ("ok", "")
+    if status == "old":
+        return _check("install", "fail", f"{detail}; {why}", "run: pipx upgrade aigate-lite (or: uv tool upgrade aigate-lite)")
+    if status in ("new", "odd"):
+        return _check("install", "warn", f"{detail}; {why}", "widen [gate] requires in .aigate/lite.toml after reading the changelog")
+    if copy and requires and requires_status(requires, copy)[0] != "ok":
+        return _check("install", "warn", f"{detail}; the vendored copy {copy} is outside that range",
+                      "run: aigate-lite install --vendor (then commit .aigate/aigate_lite.py)")
+    if mode == "path":
+        return _check("install", "warn", detail + "; the hooks pin this script's location",
+                      "run: pipx install aigate-lite, then aigate-lite install (or: aigate-lite install --vendor)")
+    return _check("install", "ok", detail)
 
 
 def _doctor_git(cwd):
@@ -7124,6 +7432,10 @@ def _doctor_hooks(repo, hooks_dir):
             continue
         if os.name != "nt" and not os.access(path, os.X_OK):
             out.append(("fail", f"{kind} hook is not executable", f"run: chmod +x {path}"))
+            continue
+        if hook_mode(text) == "installed":
+            chained = " (runs your old hook first: " + kind + ".local)" if os.path.exists(path + ".local") else ""
+            out.append(("ok", f"{kind}{chained}", ""))
             continue
         m = re.search(r"^SCRIPT='((?:[^']|'\\'')*)'$", text, re.M)
         script = m.group(1).replace("'\\''", "'") if m else os.path.join(repo.root, ".aigate", "aigate_lite.py")
@@ -7326,7 +7638,7 @@ def doctor_report(env, offline=False, fetch=None) -> list:
             checks.append(_check("repo", "ok", repo.root))
         cfg = load_config(repo, "worktree")
         checks += [_doctor_hooks(repo, hooks_dir), _doctor_hook_manager(repo), _doctor_version(repo),
-                   _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg), _doctor_baseline(repo)]
+                   _doctor_install(repo, cfg, hooks_dir), _doctor_config(cfg), _doctor_commands(repo, cfg), _doctor_cache(cfg), _doctor_baseline(repo)]
         scope = load_scope(repo)
         checks.append(_check("scope", "ok", "task scope: " + ", ".join(scope) if scope else
                              "no task scope set (every path is in scope)"))
@@ -7421,10 +7733,15 @@ def build_parser():
     u = sub.add_parser("setup", help="one step: install the hooks (vendored) and write a starter config")
     u.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
     u.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
+    u.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ (same as --mode vendored)")
+    u.add_argument("--mode", choices=MODES, help="installed: hooks run the installed aigate-lite; vendored: .aigate/ copy")
     i = sub.add_parser("install", help="install the pre-commit and pre-push git hooks")
     i.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     i.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ and point the hooks there")
     i.add_argument("--no-pre-push", action="store_true", help="install only the pre-commit hook")
+    i.add_argument("--mode", choices=MODES, help="installed: hooks run the installed aigate-lite; vendored: .aigate/ copy")
+    v = sub.add_parser("unvendor", help="switch a repository from the vendored copy to the installed tool")
+    v.add_argument("--force", action="store_true", help="rewrite the hooks even if this copy is not an installed package")
     sub.add_parser("uninstall", help="remove the hooks this tool installed")
     n = sub.add_parser("init", help="detect the project and write .aigate/lite.toml")
     n.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
@@ -7467,7 +7784,7 @@ def main(argv=None) -> int:
         command = args.command
         if args.command == "check":
             return run_check(args, dict(os.environ))
-        return {"setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
+        return {"setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "unvendor": cmd_unvendor, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
                 "doctor": cmd_doctor, "baseline": cmd_baseline,
                 "fix": cmd_fix}[args.command](args)
