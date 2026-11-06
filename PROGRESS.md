@@ -1654,3 +1654,24 @@ Before: 3.6 s profiled / 1.72 s wall. `path_matches` 35,394 calls = 1.55 s cumul
 
 ### Bench vs e332152 (`py -3.12 bench/bench.py --against e332152`, 40 pairs, gates PASS)
 startup +2.0% med; A +2.2%; B -3.2%; C -17.1%; D +0.7%; E +0.2%; F -1.8%; G -22.8% (G, F recorded only). Git calls and blobs equal for A-E. The machine was slower in this run than in the baseline run (A 291 ms vs 259 ms), so A/startup +2% is inside the run's own noise but above the +-0.3% self-vs-self band; first 4A bench (before review fixes) gave startup +2.4%, A +1.5%.
+
+
+## Phase 5 -> P5A: installed mode (branch phase-5, from phase-4 tip dabbba6)
+
+Decisions from the human at Step 0: base = phase-4; version 0.4.0 (not 0.3.0); main CI reported green (not read here, gh is not logged in); repo stays private for now. The `aigate` alias decision is still open (needed before 5B; `tests/test_attribution.py` pins both scripts).
+
+### Built
+- `__version__ = "0.4.0"`, pyproject reads it (`dynamic`, `[tool.setuptools.dynamic]`).
+- `installed_hook_script`: no recorded package location; order AIGATE_BIN (not for agents) -> `aigate-lite` on PATH (not for agents) -> pinned Python `-m aigate_lite` -> any Python that can import it -> "aigate-lite is not installed; run: pipx install aigate-lite (bypass once with git commit --no-verify)". Exit 126/127 falls through. Agents run Python with `-I`.
+- `install --mode installed|vendored` (`--vendor` alias), `setup` (installed when this copy is an installed package, else vendors as before; keeps a vendored repo vendored), `unvendor`, `[gate] requires` (`gate.version_too_old` block, `gate.version_too_new` warn; 69 rules), `init`/`setup` write the minor range, `doctor` `install` check.
+- DEVIATION to decide: plain `setup` from a loose `aigate_lite.py` still vendors, because the old test `test_setup_installs_hooks_the_script_and_a_config` requires it and a loose file cannot be found again by name. Only an installed package defaults to installed mode. Plain `install` from a loose file keeps pinning the file ("path" mode) and `doctor` warns about it.
+- Old test touched: `tests/test_trust.py` rule-count pin 67 -> 69 (two new rules). No other old test changed.
+
+### Independent review (read-only sub-agent) -> fixes
+Agents could be shimmed through PATH (now: no lookup by name for agents, `-I`), `requires` severity depended on clause order and treated pre-releases as releases (all clauses judged, pre-release below its release, `!=` blocks), a 5000-digit number crashed config loading (digit caps), hard-coded agent variables in the hook (now from BUILTIN_AGENT_ENV), doctor false fail and unvendor downgrade warning. Not changed: a malformed `requires` is only a config warning (no pin applies); doctor `which` can name a repo file on Windows.
+
+### Tests (final code 831d69c)
+Windows 11: 3.11, 3.12, 3.13, 3.14: 767 passed, 12 skipped each. Ubuntu (WSL2): 3.11-3.14: 778 passed, 1 skipped each. NOT run: macOS, GitHub Actions, a real `pipx`/`uv tool` install (a hand-built wheel installed into a venv stands in; on WSL, where the system Python has no ensurepip, the wheel is unpacked like an installer). Real-venv tests: installed_package(), setup, end-to-end hook, agent through pinned Python, unvendor, moved-and-recreated venv (POSIX).
+
+### Bench (py -3.12 bench/bench.py --against dabbba6, 40 pairs, gates PASS)
+startup +1.4%, A +0.1%, B -0.4%, C -0.1%, D -0.1%, E +0.4%, F +0.9%, G +0.3% (medians); git/blobs equal. Startup mode comparison (`py -3.12 bench/installed.py --pairs 40`, Windows): startup median vendored 116.5 ms, installed console script 140.2 ms (+20.4%, the .exe launcher starts a second process), installed `python -P -m aigate_lite` 123.8 ms (+6.3%), loose file 203.2 ms (+74.5%). Scenario A: vendored 264.5, installed 292.6 (+10.6%), `-m` 274.9 (+3.9%), loose 354.4. Baseline (self vs self) for this phase was not re-measured; earlier self-vs-self bands were +-0.3%.

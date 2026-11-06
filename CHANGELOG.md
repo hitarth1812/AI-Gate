@@ -34,6 +34,24 @@ People get the softer treatment; **an AI agent's change is held to everything it
 - `check --all` on scenario G: about 1.7 s to about 1.37 s (per-path memoization of the ignore/test globs, which ran per
   added line) plus a literal prefilter in front of the provider-key patterns.
 
+### Installed mode (Phase 5A)
+- Hooks can now run an installed `aigate-lite` (pipx, uv tool, pip) instead of a copied script. The installed-mode hook never
+  records where the package lives. It tries `$AIGATE_BIN` (ignored while an AI agent runs the commit, like `AIGATE_PYTHON`),
+  `aigate-lite` on PATH, the Python pinned at install with `-P -m aigate_lite`, then any Python 3.11+ that can import it,
+  and otherwise stops with "aigate-lite is not installed; run: pipx install aigate-lite (bypass once with git commit
+  --no-verify)". A candidate that cannot be executed (a moved or removed venv) falls through to the next.
+- `install --mode installed|vendored` (`--vendor` is the same as `--mode vendored`). `setup` uses installed mode when this copy is an
+  installed package and otherwise vendors, as before (a loose `aigate_lite.py` cannot be found again by name). A repository that
+  already has `.aigate/aigate_lite.py` stays vendored and `setup` says how to switch.
+- `aigate-lite unvendor`: rewrites the hooks for installed mode and prints, never runs, `git rm .aigate/aigate_lite.py .aigate/NOTICE`.
+- `[gate] requires = ">=0.4,<0.5"`: older than the minimum blocks (`gate.version_too_old`) with an upgrade command, newer than
+  the maximum warns (`gate.version_too_new`). Release numbers only; an agent's commit is judged by the copy in HEAD.
+  `init` and `setup` write the running version's minor range. Two new rules (69 in total).
+- `doctor` gains an `install` check: hook mode, running version (installed package or loose file), vendored copy and the
+  requires range. A hook in installed mode that cannot find the tool is a `python.hook` failure.
+- The version has one source, `__version__`; pyproject reads it with `[tool.setuptools.dynamic]`.
+- `bench/installed.py`: startup of installed vs vendored mode.
+
 ### Fixed
 - macOS: Go env file read from `~/Library/Application Support/go/env`; a hook test no longer needs coreutils beside git.
 
