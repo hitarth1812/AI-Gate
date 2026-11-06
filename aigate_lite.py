@@ -3534,8 +3534,13 @@ def go_setting(name: str) -> str:
         values, where = {}, os.environ.get("GOENV", "")
         if where != "off":
             if not where:
-                base = (os.environ.get("APPDATA") if os.name == "nt" else
-                        os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"))
+                home = os.path.expanduser("~")
+                if os.name == "nt":
+                    base = os.environ.get("APPDATA")
+                elif sys.platform == "darwin":
+                    base = os.path.join(home, "Library", "Application Support")      # os.UserConfigDir on macOS
+                else:
+                    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
                 where = os.path.join(base or "", "go", "env")
             try:
                 with open(where, encoding="utf-8", errors="replace") as fh:

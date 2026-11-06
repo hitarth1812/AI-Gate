@@ -434,3 +434,17 @@ def test_go_private_pattern_semantics(monkeypatch):
     monkeypatch.setenv("GOPRIVATE", "*.corp.io,github.com/acme/*")
     assert aigate.go_private("git.corp.io/team/x") and aigate.go_private("github.com/acme/tool/v2")
     assert not aigate.go_private("github.com/other/tool") and not aigate.go_private("corp.io/x")
+
+
+def test_go_env_file_location_follows_the_platform_config_dir(tmp_path, monkeypatch):
+    mac = tmp_path / "Library" / "Application Support" / "go"
+    mac.mkdir(parents=True)
+    (mac / "env").write_text("GOPRIVATE=corp.example/*\n")
+    for var in ("GOENV", "GOPRIVATE", "XDG_CONFIG_HOME"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setattr(aigate.os, "name", "posix")
+    monkeypatch.setattr(aigate.sys, "platform", "darwin")
+    monkeypatch.setattr(aigate, "_GO_ENV_FILE", {})
+    assert aigate.go_setting("GOPRIVATE") == "corp.example/*"
