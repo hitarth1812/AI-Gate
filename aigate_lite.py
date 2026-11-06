@@ -163,6 +163,8 @@ _RULE_ROWS = [
      "Catch Exception or something narrower."),
     ("code.debug_leftover", "fix", "medium", 0.95, "Debugger statement left in", "Remove it before committing."),
     ("code.console_log", "warn", "low", 0.6, "console.log left in source", "Remove it or use a logger."),
+    ("code.generate_directive", "warn", "low", 0.7, "Code generation directive added (//go:generate)",
+     "`go generate` runs this command on developer machines; check what it executes."),
     ("code.mutable_default", "warn", "medium", 0.9, "Mutable default argument",
      "Default to None and create the list/dict inside the function."),
     ("code.unused_import", "warn", "low", 0.8, "Import is never used", "Remove it."),
@@ -742,10 +744,10 @@ DEFAULT_CONFIG = {
         "tests": ["**/tests/**", "**/test/**", "**/__tests__/**", "**/spec/**", "test_*.py", "*_test.py",
                   "conftest.py", "*.test.*", "*.spec.*", "*_test.go", "*Test.java", "*Tests.java"],
         "sensitive": ["**/auth/**", "**/security/**", "**/payments/**", "**/billing/**", "**/crypto/**",
-                      "**/migrations/**"],
+                      "**/migrations/**", "go.mod", "go.sum", "go.work", "go.work.sum"],
         "forbidden": [],
         "forbidden_for_agents": [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**",
-                                 "lefthook.yml"],
+                                 "lefthook.yml", "go.work", "go.work.sum"],
     },
     "limits": {"function_lines": 60, "complexity": 10, "loop_depth": 3, "file_lines": 800,
                "diff_added_lines": 400, "diff_files": 25, "duplicate_lines": 6},
@@ -1099,6 +1101,8 @@ class Context:
         self._files = None
         self._texts: dict = {}
         self._asts: dict = {}
+        self._lex: dict = {}
+        self.lang_notes: list = []     # "lang.fallback: ..." (shown with -v)
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
         self.baseline: set = set()     # (rule, path, fingerprint) accepted by .aigate/baseline.json
@@ -1150,11 +1154,33 @@ class Context:
             self._asts[key] = (tree, err)
         return self._asts[key]
 
+    def lexed(self, fc, which="new"):
+        """The Lexed view (code / string / comment per character) of the new or old version of a file in a language
+        with a spec; None without a spec or text. If the lexer gives up the answer is None as well, a
+        lang.fallback note is recorded, and the caller uses its line-based checks."""
+        key = (fc.path, which)
+        if key not in self._lex:
+            spec, text, lx = language_for(fc.path), None, None
+            if spec is not None:
+                text = self.new_text(fc) if which == "new" else self.old_text(fc)
+            if text is not None and len(text) <= MAX_BYTES:
+                try:
+                    lx = lex_text(text, spec.lex)
+                except LexError as e:
+                    note = f"lang.fallback: {fc.path}: {e}; line-based checks used"
+                    if note not in self.lang_notes:
+                        self.lang_notes.append(note)
+            self._lex[key] = lx
+        return self._lex[key]
+
     def ignored(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["ignore"])
 
     def is_test(self, path) -> bool:
-        return path_matches(path, self.cfg["paths"]["tests"])
+        if path_matches(path, self.cfg["paths"]["tests"]):
+            return True
+        spec = language_for(path)
+        return bool(spec and spec.tests and path_matches(path, spec.tests))
 
     def sensitive(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["sensitive"])
@@ -1361,7 +1387,9 @@ def npm_quote(name: str) -> str:
 class Registry:
     """PyPI / npm / OSV lookups with a local cache. Every getter returns None when the answer is unknown."""
 
-    TTL = {"exists": (86400, 3600), "info": (86400, 3600), "downloads": (7 * 86400, 3600), "osv": (86400, 3600)}
+    TTL = {"exists": (86400, 3600), "info": (86400, 3600), "downloads": (7 * 86400, 3600), "osv": (86400, 3600),
+           "vtime": (7 * 86400, 3600)}
+    OSV_ECOSYSTEM = {"pypi": "PyPI", "npm": "npm", "go": "Go"}
 
     def __init__(self, *, offline=False, timeout=6.0, budget=20.0, use_cache=True, fixture=None):
         self.offline, self.timeout = offline, timeout
@@ -1396,6 +1424,10 @@ class Registry:
     def vulns(self, eco, name, version):
         return self.get(("osv", eco, name, version))
 
+    def version_time(self, eco, name, version):
+        """Publish time of one version (Go: the proxy lists versions without times), MISSING, or None if unknown."""
+        return self.get(("vtime", eco, name, version))
+
     def prefetch(self, keys) -> None:
         keys = [k for k in dict.fromkeys(keys) if k not in self.mem]
         if not keys:
@@ -1404,6 +1436,10 @@ class Registry:
             for k in keys:
                 self.get(k)
             return
+        osv = [k for k in keys if k[0] == "osv" and self._cached(k) is _NOT_CACHED]
+        if len(osv) > 1:
+            self._osv_batch(osv)
+            keys = [k for k in keys if k not in self.mem]
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(self.get, keys))
@@ -1423,6 +1459,34 @@ class Registry:
         self.mem[key] = val
         return val
 
+    def _osv_batch(self, keys):
+        """One OSV querybatch call per 1000 packages (results come back in query order, ids only)."""
+        import urllib.error
+        for i in range(0, len(keys), 1000):
+            chunk = keys[i:i + 1000]
+            body = json.dumps({"queries": [{"package": {"name": k[2], "ecosystem": self.OSV_ECOSYSTEM[k[1]]},
+                                            "version": k[3]} for k in chunk]}).encode()
+            try:
+                if time.monotonic() > self.deadline:
+                    return
+                status, raw = self._http("https://api.osv.dev/v1/querybatch", method="POST", body=body)
+                results = json.loads(raw).get("results") if status == 200 else None
+                if not isinstance(results, list) or len(results) != len(chunk):
+                    raise ValueError("unexpected OSV response")
+            except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                self.failures += 1
+                self.failure_reason = self.failure_reason or network_reason(e)
+                for k in chunk:
+                    self.mem[k] = None
+                continue
+            for k, res in zip(chunk, results):
+                found = res.get("vulns") if isinstance(res, dict) else None
+                ids = sorted({v["id"] for v in found if isinstance(v, dict) and isinstance(v.get("id"), str)}) \
+                    if isinstance(found, list) else []
+                self.mem[k] = ids
+                self.cache["|".join(map(str, k))] = {"t": time.time(), "v": ids}
+                self.dirty = True
+
     def _cached(self, key):
         entry = self.cache.get("|".join(map(str, key)))
         if not isinstance(entry, dict) or "v" not in entry:
@@ -1441,7 +1505,9 @@ class Registry:
         if kind == "exists":
             return entry not in (None, MISSING)
         if entry in (None, MISSING):
-            return {"info": MISSING, "downloads": 0, "osv": []}[kind]
+            return {"info": MISSING, "downloads": 0, "osv": [], "vtime": MISSING}[kind]
+        if kind == "vtime":
+            return (entry.get("versions") or {}).get(key[3]) or MISSING
         if kind == "info":
             return {"name": name, "created": entry.get("created"), "versions": entry.get("versions", {}),
                     "latest": entry.get("latest"), "yanked": entry.get("yanked", []),
@@ -1479,12 +1545,20 @@ class Registry:
         kind, eco, name = key[0], key[1], key[2]
         try:
             if kind == "exists":
+                if eco == "go":
+                    return self._http(f"{GO_PROXY}/{go_escape(name)}/@latest")[0] == 200
                 if eco == "pypi":
                     return self._http(f"https://pypi.org/pypi/{norm_py(name)}/json", method="HEAD")[0] == 200
                 status, raw = self._http(f"https://registry.npmjs.org/-/package/{npm_quote(name)}/dist-tags")
                 return status == 200 and "latest" in json.loads(raw or b"{}")
             if kind == "info":
                 return self._fetch_info(eco, name)
+            if kind == "vtime":
+                status, raw = self._http(f"{GO_PROXY}/{go_escape(name)}/@v/{go_escape(key[3])}.info")
+                if status != 200:
+                    return MISSING
+                when = json.loads(raw).get("Time")
+                return when if isinstance(when, str) and when else None
             if kind == "downloads":
                 if eco == "npm":
                     status, raw = self._http("https://api.npmjs.org/downloads/point/last-week/"
@@ -1492,16 +1566,40 @@ class Registry:
                     return int(json.loads(raw).get("downloads", 0)) if status == 200 else 0
                 status, raw = self._http(f"https://pypistats.org/api/packages/{norm_py(name)}/recent")
                 return int(json.loads(raw)["data"]["last_week"]) if status == 200 else 0
-            body = json.dumps({"package": {"name": name, "ecosystem": "PyPI" if eco == "pypi" else "npm"},
+            body = json.dumps({"package": {"name": name, "ecosystem": self.OSV_ECOSYSTEM[eco]},
                                "version": key[3]}).encode()
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
-        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError) as e:
+        except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             self.failures += 1
             self.failure_reason = self.failure_reason or network_reason(e)
             return None
 
+    def _fetch_info_go(self, name):
+        """Versions from the proxy's @v/list (no times: those come from vtime), the first version's time as the
+        module's creation time. A module that only has pseudo-versions has an empty list; @latest still finds it."""
+        base = f"{GO_PROXY}/{go_escape(name)}"
+        status, raw = self._http(f"{base}/@v/list")
+        versions = [v.strip() for v in raw.decode("utf-8", "replace").splitlines() if v.strip()] if status == 200 else []
+        if not versions:
+            status, raw = self._http(f"{base}/@latest")
+            if status != 200:
+                return MISSING
+            d = json.loads(raw)
+            return {"name": name, "created": d.get("Time") if isinstance(d.get("Time"), str) else None,
+                    "versions": {}, "latest": d.get("Version") if isinstance(d.get("Version"), str) else None,
+                    "yanked": [], "deprecated": None}
+        ordered = sorted(versions, key=lambda v: (release_tuple(v) or (0,), "-" not in v.split("+")[0], v))
+        status, first = self._http(f"{base}/@v/{go_escape(ordered[0])}.info")
+        created = json.loads(first).get("Time") if status == 200 else None
+        created = created if isinstance(created, str) else None
+        stable = [v for v in ordered if "-" not in v]
+        return {"name": name, "created": created, "versions": {v: None for v in ordered},
+                "latest": (stable or ordered)[-1], "yanked": [], "deprecated": None}
+
     def _fetch_info(self, eco, name):
+        if eco == "go":
+            return self._fetch_info_go(name)
         if eco == "pypi":
             status, raw = self._http(f"https://pypi.org/pypi/{norm_py(name)}/json")
             if status != 200:
@@ -1546,6 +1644,760 @@ class Registry:
             os.replace(tmp, self.cache_path)
         except OSError:
             pass
+
+
+# --------------------------------------------------------------------------- languages: lexer
+
+# One generic lexer, driven by a per-language LexConfig. It does not tokenise: it classifies every character of a
+# file as code, string or comment, so a rule can ask "does this match start in code?" (`t.Skip(` inside a string or
+# a comment is not a skipped test). Any problem (an unterminated string or comment, deep nesting, a timeout) raises
+# LexError and the caller falls back to the plain line-based checks, so a lexer bug can hide a finding but never
+# invents one. Secrets scanning does not use the lexer at all.
+
+CODE, STR, COM = 0, 1, 2
+LEX_SECONDS = 2.0          # per file; a slower lex is abandoned (fallback)
+LEX_DEPTH = 40             # nested interpolations / block comments
+
+
+class LexError(Exception):
+    pass
+
+
+_REQUIRED = object()
+
+
+def _record(cls_name, /, **fields):
+    """A small keyword/positional record class with no per-class code generation. (@dataclass costs about 0.6 ms
+    each at import, and these records are only needed once a language file is checked.)"""
+    names = tuple(fields)
+
+    def __init__(self, *args, **kw):
+        if len(args) > len(names) or set(kw) - set(names) or any(n in kw for n in names[:len(args)]):
+            raise TypeError(f"{cls_name}: bad arguments")
+        given = dict(zip(names, args), **kw)
+        for n in names:
+            v = given.get(n, fields[n])
+            if v is _REQUIRED:
+                raise TypeError(f"{cls_name}: missing {n}")
+            setattr(self, n, v)
+
+    def __repr__(self):
+        return f"{cls_name}(" + ", ".join(f"{n}={getattr(self, n)!r}" for n in names) + ")"
+    return type(cls_name, (), {"__slots__": names, "__init__": __init__, "__repr__": __repr__, "__module__": __name__})
+
+
+# StrForm: one string-literal syntax. `open` is a regex matched at the current position; the groups inside it are
+# available to `close` as {g1} (Rust r#"..."#, C# triple-quoted raw strings, Ruby %q(...) delimiters, heredoc tags).
+StrForm = _record(
+    "StrForm", open=_REQUIRED,
+    close='"',              # literal terminator ({g1} = first group of `open`); a line regex for heredocs
+    kind="quote",           # quote | regex | heredoc | pct
+    esc="\\",              # escape character ("" = none)
+    double=False,           # a doubled terminator is an escaped one (C# verbatim strings)
+    nl=True,                # may span lines (False: an unterminated literal ends at the end of its line)
+    interp="",              # opens code inside the string ("${", "#{", "{")
+    interp_double=False,    # "{{" is a literal brace (C# $"...")
+    expr=False)             # only where an expression may start (JS regex literals, Ruby %w[...])
+LexConfig = _record(
+    "LexConfig",
+    line_comments=(),       # ("//", "#")
+    block_comments=(),      # ((open regex, close literal, nested), ...)
+    strings=())             # StrForm, in priority order (longest openers first)
+
+
+EXPR_KEYWORDS = frozenset("return typeof instanceof in of new delete void throw case do else yield await "
+                          "when puts print p if unless while until and or not then".split())
+BRACE_PAIRS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_LEX_RES: dict = {}
+
+
+def _expr_start(text: str, pos: int) -> bool:
+    """May an expression start at `pos`? (after an operator, an opening bracket or a keyword; not after a value)."""
+    if text[pos - 1:pos] == "<":                       # JSX closing tag: </div>
+        return False
+    head = text[max(0, pos - 48):pos].rstrip()
+    if not head:
+        return True
+    c = head[-1]
+    if head.endswith(("++", "--")):                     # a postfix operator ends a value: n++ / 2
+        return False
+    if c in "([{,;:=!&|?+-*%<>~^":
+        return True
+    if c.isalnum() or c in "_$":
+        m = re.search(r"[A-Za-z_$][\w$]*$", head)
+        return bool(m) and m.group(0) in EXPR_KEYWORDS and head[:m.start()].rstrip()[-1:] != "."
+    return False
+
+
+def _lex_regexes(cfg):
+    """(opener regex, the same with braces for interpolations), compiled once per config."""
+    got = _LEX_RES.get(cfg)
+    if got is None:
+        parts = [f"(?P<b{i}>{rx})" for i, (rx, _c, _n) in enumerate(cfg.block_comments)]
+        parts += [f"(?P<l{i}>{re.escape(tok)})" for i, tok in enumerate(cfg.line_comments)]
+        parts += [f"(?P<s{i}>{form.open})" for i, form in enumerate(cfg.strings)]
+        base = "|".join(parts)
+        got = _LEX_RES[cfg] = (re.compile(base, re.M), re.compile(base + r"|(?P<ob>\{)|(?P<cb>\})", re.M))
+    return got
+
+
+def _form_regex(form, close):
+    key = (form, close)
+    got = _LEX_RES.get(key)
+    if got is None:
+        parts = []
+        if form.esc:
+            parts.append(re.escape(form.esc) + r"[\s\S]")
+        if form.interp:
+            parts.append("(?P<i>" + re.escape(form.interp) + ")")
+        parts.append("(?P<c>" + re.escape(close) + ")")
+        if not form.nl:
+            parts.append(r"(?P<n>\n)")
+        got = _LEX_RES[key] = re.compile("|".join(parts))
+    return got
+
+
+def _comment_regex(cfg, i):
+    key = (cfg, "comment", i)
+    got = _LEX_RES.get(key)
+    if got is None:
+        opener, close, nested = cfg.block_comments[i]
+        got = _LEX_RES[key] = re.compile("(?P<c>" + re.escape(close) + ")" + (f"|(?P<o>{opener})" if nested else ""), re.M)
+    return got
+
+
+class _Scanner:
+    def __init__(self, text, cfg):
+        self.text, self.cfg, self.n = text, cfg, len(text)
+        self.kinds = bytearray(self.n)
+        self.base, self.braced = _lex_regexes(cfg)
+        self.deadline = time.monotonic() + LEX_SECONDS
+        self.steps = 0
+        self.skip = None                 # (start, end): heredoc bodies of the current line, already consumed
+
+    def mark(self, a, b, kind):
+        if b > a:
+            self.kinds[a:b] = bytes((kind,)) * (b - a)
+
+    def tick(self):
+        self.steps += 1
+        if self.steps & 255 == 0 and time.monotonic() > self.deadline:
+            raise LexError("timeout")
+
+    def code(self, pos, depth, in_braces):
+        """Scan code from `pos`; with in_braces, return just after the `}` that closes an interpolation."""
+        if depth > LEX_DEPTH:
+            raise LexError("nesting too deep")
+        text, rx, level = self.text, self.braced if in_braces else self.base, 0
+        while True:
+            self.tick()
+            m = rx.search(text, pos)
+            if m is None:
+                if in_braces:
+                    raise LexError("unterminated interpolation")
+                return self.n
+            s, name = m.start(), m.lastgroup
+            if self.skip and s >= self.skip[0] and s < self.skip[1]:      # inside a consumed heredoc body
+                pos = self.skip[1]
+                continue
+            if name == "ob":
+                level += 1
+                pos = m.end()
+            elif name == "cb":
+                if level == 0:
+                    return m.end()
+                level -= 1
+                pos = m.end()
+            elif name[0] == "b":
+                pos = self.block_comment(m, int(name[1:]))
+            elif name[0] == "l":
+                end = text.find("\n", m.end())
+                end = self.n if end < 0 else end
+                self.mark(s, end, COM)
+                pos = end
+            else:
+                form = self.cfg.strings[int(name[1:])]
+                if form.expr and not _expr_start(text, s):
+                    pos = m.end() if form.kind != "regex" else s + 1
+                    continue
+                pos = self.string(form, m, depth)
+
+    def block_comment(self, m, i):
+        _opener, close, nested = self.cfg.block_comments[i]
+        rx, text, pos, level = _comment_regex(self.cfg, i), self.text, m.end(), 1
+        while True:
+            self.tick()
+            c = rx.search(text, pos)
+            if c is None:
+                raise LexError("unterminated block comment")
+            pos = c.end()
+            if c.lastgroup == "o":
+                level += 1
+                if level > LEX_DEPTH:
+                    raise LexError("block comments nested too deep")
+            else:
+                level -= 1
+                if level == 0:
+                    self.mark(m.start(), pos, COM)
+                    return pos
+
+    def string(self, form, m, depth):
+        start, pos = m.start(), m.end()
+        inner = m.groups()[m.lastindex:]                   # this form's own groups follow its wrapper group
+        if form.kind == "regex":
+            return self.regex_literal(start, pos)
+        if form.kind == "heredoc":
+            return self.heredoc(form, pos, next((g for g in inner if g), None))
+        if form.kind == "pct":
+            return self.percent(start, pos, inner[0] if inner else "")
+        close = form.close.replace("{g1}", (inner[0] if inner else "") or "")
+        rx, text, seg = _form_regex(form, close), self.text, start
+        while True:
+            self.tick()
+            c = rx.search(text, pos)
+            if c is None:
+                raise LexError("unterminated string")      # an unterminated string would swallow everything after it
+            kind = c.lastgroup
+            if kind is None:                                  # an escape sequence
+                pos = c.end()
+            elif kind == "n":                                 # a single-line literal ended unclosed at the newline
+                self.mark(seg, c.start(), STR)
+                return c.start()
+            elif kind == "c":
+                if form.double and text.startswith(close, c.end()):
+                    pos = c.end() + len(close)
+                    continue
+                self.mark(seg, c.end(), STR)
+                return c.end()
+            else:                                             # an interpolation opens
+                if form.interp_double and text.startswith(form.interp, c.end()):
+                    pos = c.end() + len(form.interp)
+                    continue
+                self.mark(seg, c.end(), STR)
+                pos = self.code(c.end(), depth + 1, True)
+                self.mark(pos - 1, pos, STR)                  # the closing brace belongs to the string again
+                seg = pos
+
+    def regex_literal(self, start, pos):
+        text, n, in_class = self.text, self.n, False
+        while pos < n:
+            ch = text[pos]
+            if ch == "\\":
+                pos += 2
+                continue
+            if ch == "\n":
+                return start + 1                              # not a regex after all: a division sign
+            if ch == "[":
+                in_class = True
+            elif ch == "]":
+                in_class = False
+            elif ch == "/" and not in_class:
+                self.mark(start, pos + 1, STR)
+                return pos + 1
+            pos += 1
+        return start + 1
+
+    def percent(self, start, pos, delim):
+        text, n, depth = self.text, self.n, 1
+        closer = BRACE_PAIRS.get(delim, delim)
+        while pos < n:
+            ch = text[pos]
+            if ch == "\\":
+                pos += 2
+                continue
+            if closer != delim and ch == delim:
+                depth += 1
+            elif ch == closer:
+                depth -= 1
+                if depth == 0:
+                    self.mark(start, pos + 1, STR)
+                    return pos + 1
+            pos += 1
+        raise LexError("unterminated percent literal")
+
+    def heredoc(self, form, pos, tag):
+        """The body starts on the line after the opener (after the previous heredoc's body, if any) and ends at the
+        terminator line. The rest of the opener's own line is scanned as code."""
+        if not tag:
+            raise LexError("heredoc without a tag")
+        text = self.text
+        eol = text.find("\n", pos)
+        if eol < 0:
+            raise LexError("heredoc opener on the last line")
+        chained = bool(self.skip and self.skip[0] == eol + 1)
+        body = self.skip[1] + 1 if chained else eol + 1
+        e = re.compile(form.close.replace("{g1}", re.escape(tag)), re.M).search(text, body)
+        if e is None:
+            raise LexError("unterminated heredoc")
+        finish = text.find("\n", e.end())
+        finish = self.n if finish < 0 else finish
+        self.mark(body, finish, STR)
+        self.skip = (self.skip[0] if chained else eol + 1, finish)
+        return pos
+
+
+class Lexed:
+    """Per-line access to the classification of one file."""
+
+    def __init__(self, text, kinds):
+        self.text, self.kinds = text, kinds
+        self.lines = text.split("\n")
+        self.starts, off = [], 0
+        for ln in self.lines:
+            self.starts.append(off)
+            off += len(ln) + 1
+        self._masked: dict = {}
+        self._code: dict = {}
+
+    def line(self, n):
+        return self.lines[n - 1] if 0 < n <= len(self.lines) else ""
+
+    def kind_at(self, n, col):
+        if not 0 < n <= len(self.lines):
+            return CODE
+        i = self.starts[n - 1] + col
+        return self.kinds[i] if i < len(self.kinds) else CODE
+
+    def search(self, rx, n, where=CODE, text=None):
+        """First match of `rx` on line n whose first character is in region `where` (CODE, STR, COM or a tuple)."""
+        text = self.line(n) if text is None else text
+        ok = where if isinstance(where, tuple) else (where,)
+        for m in rx.finditer(text):
+            if self.region(n, m) in ok:
+                return m
+        return None
+
+    def region(self, n, m):
+        """Region of a match: where its first non-blank character is (a pattern may start with the indentation)."""
+        return self.kind_at(n, m.start() + len(m.group(0)) - len(m.group(0).lstrip()))
+
+    def masked(self, n, hide=(STR, COM)):
+        """Line n with every hidden region replaced by spaces (same length, columns unchanged)."""
+        key = (n, hide)
+        if key not in self._masked:
+            base = self.starts[n - 1] if 0 < n <= len(self.lines) else 0
+            line = self.line(n)
+            self._masked[key] = _blank(line, self.kinds[base:base + len(line)], hide)
+        return self._masked[key]
+
+    def code_text(self, hide=(STR, COM)):
+        """The whole file with hidden regions blanked (newlines kept), for brace and keyword scans."""
+        got = self._code.get(hide)
+        if got is None:
+            got = self._code[hide] = _blank(self.text, self.kinds, hide)
+        return got
+
+
+def _blank(text, kinds, hide):
+    """`text` with the characters whose kind is in `hide` replaced by spaces (newlines kept), by runs."""
+    key = ("hide", hide)
+    rx = _LEX_RES.get(key)
+    if rx is None:
+        rx = _LEX_RES[key] = re.compile(b"[" + bytes(hide) + b"]+")
+    out, pos = [], 0
+    for m in rx.finditer(kinds):
+        a, b = m.span()
+        out.append(text[pos:a])
+        seg = text[a:b]
+        out.append(re.sub(r"[^\n]", " ", seg) if "\n" in seg else " " * (b - a))
+        pos = b
+    if not out:
+        return text
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def lex_text(text, cfg):
+    """Lexed(text), or LexError."""
+    sc = _Scanner(text, cfg)
+    try:
+        sc.code(0, 0, False)
+    except RecursionError as e:
+        raise LexError("recursion") from e
+    return Lexed(text, sc.kinds)
+
+
+# --------------------------------------------------------------------------- languages: specs
+
+# A LanguageSpec bundles everything the checks need to know about one language. Specs are built on first use
+# (their regexes are compiled then), so a commit without Go files never pays for the Go tables. Adding a language
+# means adding one builder below, plus its fixtures.
+
+# LineRule: a rule applied to added lines. `rx` must start in region `where` (CODE, COM, STR); scope limits it to
+# source files ("src"), test files ("test") or both ("any"). `needs` is an optional regex that must match the
+# file's code (e.g. an import) for the rule to apply; `also` must match the line with comments blanked.
+LineRule = _record("LineRule", rule=_REQUIRED, rx=_REQUIRED, what=_REQUIRED, where=CODE, scope="any", needs=None,
+                   also=None)
+LanguageSpec = _record(
+    "LanguageSpec", name=_REQUIRED, lex=_REQUIRED,
+    eco="",                 # registry ecosystem ("go"); "" = no dependency checks
+    rules=(),               # LineRule, language specific (the shared ones live in the line checks)
+    func=(),                # regexes with a (?P<name>) group: where a function starts
+    loop=None,              # regex: loop keywords
+    loop_header="paren",    # "paren": for (...) {   "eol": for ... {
+    branch=None,            # regex: decision points (complexity = 1 + matches)
+    same_line_brace=False,  # a function body's { is on the line of its header (Go)
+    test_skip=None,         # regex: a skipped test (added lines of test files)
+    test_assert=None,       # regex: one assertion
+    test_case=None,         # regex with a (?P<name>) group: one test function
+    swallow=None,           # regex: a header whose block, closed on the next line, drops an error
+    tests=())               # extra test-file globs
+
+
+_SPEC_EXT = {".go": "go", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".ts": "js", ".tsx": "js",
+             ".mts": "js", ".cts": "js"}
+_SPECS: dict = {}
+
+
+def language_for(path):
+    """The LanguageSpec of a file by extension, built on first use; None for languages without one."""
+    n = path.rsplit("/", 1)[-1].lower()
+    key = _SPEC_EXT.get(n[n.rfind("."):] if "." in n else "")
+    if key is None:
+        return None
+    if key not in _SPECS:
+        _SPECS[key] = {"go": _spec_go, "js": _spec_js}[key]()
+    return _SPECS[key]
+
+
+def _spec_js() -> LanguageSpec:
+    lex = LexConfig(
+        line_comments=("//",),
+        block_comments=((r"/\*", "*/", False),),
+        strings=(StrForm(r"`", "`", interp="${"),
+                 StrForm(r'"', '"', nl=False), StrForm(r"'", "'", nl=False),
+                 StrForm(r"/", "/", kind="regex", expr=True)))
+    skip_kw = r"(?!(?:if|for|while|switch|catch|function|return|else|with|do|try|new|typeof|await|yield)\b)"
+    return LanguageSpec(
+        "javascript", lex,
+        func=(re.compile(r"\bfunction\b\s*\*?\s*(?P<name>[\w$]+)\s*\("),
+              re.compile(r"\b(?:const|let|var)\s+(?P<name>[\w$]+)\s*(?::[^=;]+)?=\s*(?:async\s*)?"
+                         r"(?:\([^()]*\)|[\w$]+)\s*(?::\s*[^=>{;]+)?=>\s*\{"),
+              re.compile(r"^[ \t]*(?:(?:public|private|protected|static|async|readonly|override|get|set)\s+)*"
+                         + skip_kw + r"(?P<name>[A-Za-z_$][\w$]*)(?:[ \t]*<[^>\n]*>)?[ \t]*\([^;{}()]*(?:\([^()]*\)[^;{}()]*)*\)"
+                         r"\s*(?::[ \t]*[^{;=\n]+)?\{", re.M)),
+        loop=re.compile(r"\b(?:for|while)\b"), loop_header="paren",
+        branch=re.compile(r"\b(?:if|for|while|case|catch)\b|&&|\|\||\?(?![.?])"))
+
+
+def _spec_go() -> LanguageSpec:
+    lex = LexConfig(line_comments=("//",), block_comments=((r"/\*", "*/", False),),
+                    strings=(StrForm(r"`", "`", esc=""), StrForm(r'"', '"', nl=False), StrForm(r"'", "'", nl=False)))
+    sql = r"(?:select|insert|update|delete)\b"
+    lit = r"(?:[^\"`\\]|\\.)*"                 # the inside of a string literal, escapes included
+    q =r"\.(?:Query|QueryRow|Exec|QueryContext|QueryRowContext|ExecContext|Prepare|PrepareContext)\w*\("
+    return LanguageSpec(
+        "go", lex, eco="go",
+        rules=(
+            LineRule("security.shell", re.compile(
+                r"\bexec\.Command(?:Context)?\(\s*(?:[\w.]+\s*,\s*)?\"(?:sh|bash|zsh|dash|cmd(?:\.exe)?|powershell(?:\.exe)?)\"\s*,"
+                r"\s*\"(?:-c|/c|-Command)\"\s*,(?!\s*(?:\"[^\"\\]*\"|`[^`]*`)\s*\))"),
+                "shell command built at runtime"),
+            LineRule("security.sql_injection", re.compile(
+                q + r"\s*(?:[\w.]+\s*,\s*)?(?:fmt\.Sprintf\(\s*[\"`]" + lit + r"\b" + sql + r"|[\"`]" + lit + r"\b" + sql
+                + lit + r"[\"`]\s*\+(?!\s*[\"`]))", re.I), "SQL built from variables"),
+            LineRule("security.weak_crypto", re.compile(
+                r"\brand\.(?:Int|Intn|Int31|Int31n|Int63|Int63n|Uint32|Uint64|Float64|Read|Perm|Shuffle)\w*\("),
+                "math/rand is not for secrets", needs=re.compile(r'\A(?!.*"crypto/rand")(?=.*"math/rand(?:/v2)?")', re.S),
+                also=re.compile(r"(?i)\w*(?:token|secret|password|passwd|nonce|salt|session|api_?key|otp|key)\w*")),
+            LineRule("code.swallowed_exception", re.compile(
+                r"^\s*_\s*=\s*err\s*(?:;|$)|\bif\s+err\s*!=\s*nil\s*\{\s*\}"), "error silently dropped"),
+            LineRule("code.placeholder", re.compile(
+                r"\bpanic\(\s*\"(?:todo|not\s+(?:yet\s+)?implemented|unimplemented|implement\s+me)[^\"]*\"\s*\)", re.I),
+                "panics with 'not implemented'"),
+            LineRule("code.generate_directive", re.compile(r"^\s*//\s*go:generate\b"), "runs a command at generate time",
+                     where=COM),
+        ),
+        func=(re.compile(r"\bfunc\s*(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)?\("),),
+        loop=re.compile(r"\bfor\b"), loop_header="eol", same_line_brace=True,
+        branch=re.compile(r"\b(?:if|for|case|select)\b|&&|\|\|"),
+        test_skip=re.compile(r"\.Skip(?:Now|f)?\("),
+        test_assert=re.compile(r"\b(?:t|b|tb|s\.T\(\))\.(?:Error|Errorf|Fatal|Fatalf|Fail|FailNow)\(|\b(?:assert|require)\.(?!New\b)\w+\("),
+        test_case=re.compile(r"^func\s+(?:\([^)]*\)\s*)?(?P<name>(?:Test(?!Main\b)|Benchmark|Fuzz|Example)(?![a-z])\w*)\s*\(", re.M),
+        swallow=re.compile(r"\bif\s+err\s*!=\s*nil\s*\{\s*$"), tests=("*_test.go",))
+
+
+# --------------------------------------------------------------------------- languages: structure (braces)
+
+FuncInfo = _record("FuncInfo", name=_REQUIRED, line=_REQUIRED, end=_REQUIRED, length=_REQUIRED,
+                   complexity=_REQUIRED, depth=_REQUIRED, deepest=_REQUIRED)
+
+
+def _brace_pairs(ct: str) -> dict:
+    pairs, stack = {}, []
+    for m in re.finditer(r"[{}]", ct):
+        if m.group(0) == "{":
+            stack.append(m.start())
+        elif stack:
+            pairs[stack.pop()] = m.start()
+    return pairs
+
+
+def _paren_end(ct: str, i: int) -> int:
+    """Index just after the parenthesis group opening at ct[i] (or -1)."""
+    depth = 0
+    for j in range(i, len(ct)):
+        if ct[j] == "(":
+            depth += 1
+        elif ct[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return j + 1
+    return -1
+
+
+def _body_open(ct, pos, spec, pairs) -> int:
+    """Index of the { that opens a function body whose header ends at `pos`, or -1 (no body here)."""
+    if ct[pos - 1] == "{":
+        return pos - 1
+    depth, i, n = (1 if ct[pos - 1] == "(" else 0), pos, len(ct)       # the header regex may end inside the ( of the parameters
+    while i < n:
+        c = ct[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0 and c == "{":
+            before = ct[max(0, i - 12):i].rstrip()
+            if before.endswith(("interface", "struct")) and i in pairs:      # a type literal in the signature
+                i = pairs[i]
+            else:
+                return i
+        elif depth == 0 and (c == ";" or (spec.same_line_brace and c == "\n")):
+            return -1
+        i += 1
+    return -1
+
+
+def analyze_functions(lx, spec) -> list:
+    """Function spans, decision points and loop nesting from brace structure. Heuristic: it runs on text with
+    strings and comments blanked, but it does not parse the language. Raises LexError when the file is too big or
+    the analysis runs past its time budget (the caller then skips it)."""
+    import bisect
+    ct = lx.code_text()
+    if len(ct) > 500_000:
+        raise LexError("too large for structure analysis")
+    deadline = time.monotonic() + LEX_SECONDS
+    pairs = _brace_pairs(ct)
+    starts = lx.starts
+
+    def line_of(off):
+        return bisect.bisect_right(starts, off)
+
+    found = {}
+    for rx in spec.func:
+        for m in rx.finditer(ct):
+            op = _body_open(ct, m.end(), spec, pairs)
+            if op >= 0 and op in pairs and op not in found:
+                found[op] = (m.group("name"), m.start())
+            if len(found) & 63 == 0 and time.monotonic() > deadline:
+                raise LexError("structure analysis too slow")
+    out = []
+    for op, (name, header) in sorted(found.items()):
+        if time.monotonic() > deadline:
+            raise LexError("structure analysis too slow")
+        close = pairs[op]
+        loops = []
+        for m in spec.loop.finditer(ct, op, close + 1) if spec.loop else ():
+            at = m.start()
+            if spec.loop_header == "eol":
+                nl = ct.find("\n", at)
+                brace = ct.rfind("{", at, nl if nl >= 0 else len(ct))
+                if brace < 0 or ct[brace + 1:nl if nl >= 0 else len(ct)].strip():
+                    continue
+            else:
+                p = ct.find("(", at, at + 12)
+                end = _paren_end(ct, p) if p >= 0 else -1
+                brace = -1
+                if end >= 0:
+                    rest = ct[end:end + 12]
+                    if rest.lstrip().startswith("{"):
+                        brace = end + len(rest) - len(rest.lstrip())
+            if brace in pairs:
+                loops.append((brace, pairs[brace], line_of(at)))
+        depth, deepest, open_ = 0, line_of(header), []      # loop bodies nest properly, so a stack gives the depth
+        for lo, hi, ln in sorted(loops):
+            while open_ and open_[-1] < lo:
+                open_.pop()
+            open_.append(hi)
+            if len(open_) > depth:
+                depth, deepest = len(open_), ln
+        cx = 1 + (len(spec.branch.findall(ct, op, close + 1)) if spec.branch else 0)
+        first, last = line_of(header), line_of(close)
+        out.append(FuncInfo(name, first, last, last - first + 1, cx, depth, deepest))
+    return out
+
+
+# --------------------------------------------------------------------------- languages: checks
+
+def hit(lx, rx, line, text, where=CODE):
+    """First match of `rx` in `text` (an added line) that starts in region `where`. Without a lexer (unknown
+    language, or the lexer gave up) it is a plain search: the old line-based behaviour."""
+    m = rx.search(text)                         # most lines match nothing: one C-level search settles them
+    if m is None or lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
+        return m
+    return lx.search(rx, line, where, text)
+
+
+def _count(lx, rx, rows) -> int:
+    """Matches of `rx` over (line number, text) rows joined with newlines (so a match may span lines, as before);
+    with a lexer view only those that start in code count."""
+    from bisect import bisect_right
+    rows = list(rows)
+    joined = "\n".join(t for _, t in rows)
+    if lx is None:
+        return len(rx.findall(joined))
+    starts, off = [], 0
+    for _, t in rows:
+        starts.append(off)
+        off += len(t) + 1
+    total = 0
+    for m in rx.finditer(joined):
+        i = max(0, bisect_right(starts, m.start()) - 1)
+        line, text = rows[i]
+        if lx.line(line).rstrip("\r") != text.rstrip("\r") or lx.region(line, _Shift(m, starts[i])) == CODE:
+            total += 1
+    return total
+
+
+class _Shift:
+    """A match seen from the line it starts on (group(0) for the text from its start, start() as a column)."""
+
+    def __init__(self, m, base):
+        self._m, self._base = m, base
+
+    def start(self):
+        return self._m.start() - self._base
+
+    def group(self, _n=0):
+        return self._m.group(0)
+
+
+def _needs(lx, rx, cache) -> bool:
+    if rx not in cache:
+        cache[rx] = bool(rx.search(lx.code_text((COM,)) if lx is not None else ""))
+    return cache[rx]
+
+
+def check_lang(ctx) -> list:
+    """Per-language rules from the specs (run by check_code_lines; the test rules are run by check_tests)."""
+    out = []
+    for fc in ctx.code_changes(CODE_EXTS):
+        spec = language_for(fc.path)
+        if spec is not None and (spec.rules or spec.func):
+            out += ctx.results.run("lang", ctx, fc, lambda fc=fc, spec=spec: _lang_file(ctx, fc, spec))
+    return out
+
+
+def _lang_file(ctx, fc, spec) -> list:
+    out, test = [], bool(spec.rules) and ctx.is_test(fc.path)
+    lx = ctx.lexed(fc)
+    if lx is None and spec.rules:
+        return out                                   # no lexer view: the shared line checks still ran
+    needs = {}
+    for rule in spec.rules:
+        if (rule.scope == "src" and test) or (rule.scope == "test" and not test):
+            continue
+        if rule.needs is not None and not _needs(lx, rule.needs, needs):
+            continue
+        for line, text in fc.added.items():
+            if len(text) > 2000 or not hit(lx, rule.rx, line, text, rule.where):
+                continue
+            if rule.also is not None and not rule.also.search(lx.masked(line, (COM,))):
+                continue
+            out.append(make(rule.rule, fc.path, line, f"{rule.what}: {text.strip()[:70]}", key=text.strip()))
+    if spec.swallow is not None:
+        for line, text in fc.added.items():
+            if hit(lx, spec.swallow, line, text, CODE) and re.fullmatch(r"\s*\}\s*", lx.masked(line + 1)):
+                out.append(make("code.swallowed_exception", fc.path, line, "empty error handler", key=text.strip()))
+    if lx is not None and spec.func:
+        try:
+            out += _structure_findings(ctx, fc, spec, lx)
+        except LexError as e:                       # too large or too slow: skip the structure rules for this file
+            note = f"lang.fallback: {fc.path}: {e}; size and loop checks skipped"
+            if note not in ctx.lang_notes:
+                ctx.lang_notes.append(note)
+    return out
+
+
+def _structure_findings(ctx, fc, spec, lx) -> list:
+    out, lim = [], ctx.cfg["limits"]
+    # cheap guard on the raw text (it over-counts, so it never skips a file that could trigger): a file with fewer
+    # lines, loop keywords and decision points than the limits cannot hold a function that exceeds them
+    if lx.text.count("\n") < lim["function_lines"] \
+            and (spec.loop is None or len(spec.loop.findall(lx.text)) < lim["loop_depth"]) \
+            and (spec.branch is None or len(spec.branch.findall(lx.text)) < lim["complexity"]):
+        return out
+    old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
+    old = {f.name: f for f in analyze_functions(old_lx, spec)} if old_lx is not None else {}
+    for f in analyze_functions(lx, spec):
+        if not any(ln in fc.added for ln in range(f.line, f.end + 1)):
+            continue
+        o = old.get(f.name)
+        if f.length > lim["function_lines"] and (o is None or f.length > o.length):
+            out.append(make("size.function_length", fc.path, f.line,
+                            f"{f.name}() is {f.length} lines (limit {lim['function_lines']})", key=f.name))
+        if f.complexity > lim["complexity"] and (o is None or f.complexity > o.complexity):
+            out.append(make("size.complexity", fc.path, f.line,
+                            f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}, estimated "
+                            "from brace structure)", key=f.name))
+        if f.depth >= lim["loop_depth"] and (o is None or f.depth > o.depth):
+            out.append(make("perf.nested_loops", fc.path, f.deepest,
+                            f"{f.name}() nests {f.depth} loops (≈O(n^{f.depth}), estimated from brace structure)",
+                            key=f.name))
+    return out
+
+
+def _test_names(spec, lx, rows) -> list:
+    names = []
+    for line, text in rows:
+        m = hit(lx, spec.test_case, line, text, CODE)
+        if m:
+            names.append(m.group("name"))
+    return names
+
+
+def _lang_tests(ctx) -> list:
+    """Skipped, shortened and deleted tests for languages whose spec describes their tests (Go)."""
+    out, files = [], []
+    for fc in ctx.changes:
+        spec = language_for(fc.path)
+        if spec is not None and spec.test_case and not fc.binary and not fc.symlink and not ctx.ignored(fc.path) \
+                and ctx.is_test(fc.path):
+            files.append((fc, spec))
+    if not files:
+        return out
+    all_added = set()          # (package directory | file name, test name): a test moved within the package or with its file
+    for fc, spec in files:
+        if not fc.deleted:
+            for n in _test_names(spec, ctx.lexed(fc), fc.added.items()):
+                all_added |= {(fc.path.rsplit("/", 1)[0] if "/" in fc.path else "", n), (fc.name, n)}
+    for fc, spec in files:
+        lx = None if fc.deleted else ctx.lexed(fc)
+        old_lx = ctx.lexed(fc, "old") if fc.old_spec else None
+        if fc.deleted:
+            old_rows = list(enumerate((ctx.old_text(fc) or "").split("\n"), 1))
+            removed_names = _test_names(spec, old_lx, old_rows)
+        else:
+            old_rows = fc.removed
+            removed_names = _test_names(spec, old_lx, old_rows)
+            for line, text in fc.added.items():
+                if spec.test_skip and hit(lx, spec.test_skip, line, text, CODE):
+                    out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
+            if spec.test_assert:
+                lost = _count(old_lx, spec.test_assert, old_rows) - _count(lx, spec.test_assert, fc.added.items())
+                if lost > 0:
+                    out.append(make("tests.assertions_removed", fc.path, None, f"net {lost} assertion(s) removed",
+                                    key="asserts"))
+        added_here = _test_names(spec, lx, fc.added.items()) if not fc.deleted else []
+        where = fc.path.rsplit("/", 1)[0] if "/" in fc.path else ""
+        gone = [n for n in removed_names if (where, n) not in all_added and (fc.name, n) not in all_added]
+        renamed = len([n for n in added_here if n not in removed_names])        # TestA -> TestB in the same file
+        if len(gone) > renamed:
+            out.append(make("tests.deleted", fc.path, None,
+                            f"{len(gone) - renamed} test(s) removed: {', '.join(gone[:4])}{'…' if len(gone) > 4 else ''}",
+                            key=",".join(sorted(gone))))
+    return out
 
 
 # --------------------------------------------------------------------------- checks: secrets
@@ -1902,13 +2754,14 @@ TRUSTED_DEFAULT = ("https://pypi.org/", "https://files.pythonhosted.org/", "http
 
 @dataclasses.dataclass
 class Dep:
-    eco: str                     # pypi | npm
+    eco: str                     # pypi | npm | go
     name: str
     spec: str = ""
     source: str = "registry"     # registry | git | url | path | index | workspace
     line: int | None = None
     origin: str = ""
     alias: str | None = None     # npm "npm:<target>" alias
+    indirect: bool = False       # go.mod "// indirect": added by `go mod tidy`
 
 
 REQ_NAME = re.compile(r"^\s*([A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?)\s*(\[[^\]]*\])?\s*(.*)$")
@@ -2127,6 +2980,8 @@ def manifest_kind(path: str):
         return "setup.py"
     if low == "package.json":
         return "npm"
+    if base in ("go.mod", "go.work"):
+        return "gomod"
     if low.endswith((".txt", ".in")) and ("requirements" in low or "constraints" in low
                                            or "/requirements/" in "/" + path.lower()):
         return "requirements"
@@ -2600,6 +3455,295 @@ def js_imports(ctx):
     return findings, candidates
 
 
+# --------------------------------------------------------------------------- manifests: Go modules
+
+GO_PROXY = "https://proxy.golang.org"
+GO_KNOWN = frozenset(("module", "go", "toolchain", "godebug", "exclude", "retract", "tool", "ignore", "require",
+                      "replace", "use"))
+
+
+def go_escape(text: str) -> str:
+    """The proxy's case encoding: every upper-case letter becomes `!` and its lower-case form."""
+    import urllib.parse
+    return urllib.parse.quote("".join("!" + c.lower() if c.isupper() else c for c in text), safe="/!")
+
+
+def _go_words(line: str) -> list:
+    line = re.sub(r"//.*$", "", line)
+    return [w[1:-1] if len(w) > 1 and w[0] in "\"`" and w[-1] == w[0] else w
+            for w in re.findall(r'"[^"]*"|`[^`]*`|\S+', line)]
+
+
+def parse_go_mod(text: str, path: str):
+    """(deps, problems, module) from a go.mod or go.work. deps maps a key to a Dep (eco "go"): a requirement is
+    source "registry" with its exact version as `spec`, a replace to a local directory is "path", a replace by
+    another module is "replace". problems lists (line, text) for lines that could not be understood: the manifest
+    is never silently treated as fine."""
+    deps, problems, module = {}, [], None
+    block = None
+    for n, raw in enumerate(text.split("\n"), 1):
+        words = _go_words(raw.rstrip("\r"))
+        if not words:
+            continue
+        if block is not None:
+            if words == [")"]:
+                block = None
+                continue
+            directive, args = block, words
+        else:
+            directive, args = words[0], words[1:]
+            if directive not in GO_KNOWN:
+                problems.append((n, raw.strip()[:80]))
+                continue
+            if args == ["("]:
+                block = directive
+                continue
+        if directive == "module" and args:
+            module = args[0]
+        elif directive == "require":
+            if len(args) == 2:
+                deps[args[0]] = Dep("go", args[0], args[1], "registry", n, path,
+                                    indirect=bool(re.search(r"//\s*indirect\b", raw)))
+            else:
+                problems.append((n, raw.strip()[:80]))
+        elif directive == "replace":
+            if "=>" in args and args.index("=>") in (1, 2) and len(args) - args.index("=>") in (2, 3):
+                at = args.index("=>")
+                old, new = args[0], args[at + 1]
+                local = new.startswith(("./", "../", "/", ".\\", "..\\")) or re.match(r"^[A-Za-z]:[\\/]", new)
+                deps[f"replace {old} {args[1] if at == 2 else ''}"] = Dep(
+                    "go", old, new, "path" if local else "replace", n, path)
+            else:
+                problems.append((n, raw.strip()[:80]))
+        elif directive in ("module", "use") and not args:
+            problems.append((n, raw.strip()[:80]))
+    if block is not None:
+        problems.append((len(text.split("\n")), f"unclosed {block} block"))
+    return deps, problems, module
+
+
+_GO_ENV_FILE: dict = {}
+
+
+def go_setting(name: str) -> str:
+    """A Go setting: the process environment first, then the file `go env -w` writes ($GOENV, else the user config
+    directory's go/env). GOENV=off disables the file."""
+    if name in os.environ:
+        return os.environ[name]
+    if "file" not in _GO_ENV_FILE:
+        values, where = {}, os.environ.get("GOENV", "")
+        if where != "off":
+            if not where:
+                base = (os.environ.get("APPDATA") if os.name == "nt" else
+                        os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config"))
+                where = os.path.join(base or "", "go", "env")
+            try:
+                with open(where, encoding="utf-8", errors="replace") as fh:
+                    for line in fh:
+                        key, eq, value = line.strip().partition("=")
+                        if eq and key and not key.startswith("#"):
+                            values[key] = value
+            except OSError:
+                pass
+        _GO_ENV_FILE["file"] = values
+    return _GO_ENV_FILE["file"].get(name, "")
+
+
+def go_private(module: str, extra=()) -> bool:
+    """GOPRIVATE / GONOPROXY patterns (comma separated globs matching a prefix of the module path) and [deps] private."""
+    import fnmatch
+    parts = module.split("/")
+    pats = [p for var in ("GOPRIVATE", "GONOPROXY") for p in go_setting(var).split(",") if p.strip()]
+    for pat in pats:
+        prefix = "/".join(parts[:pat.strip().count("/") + 1])
+        if fnmatch.fnmatchcase(prefix, pat.strip()):
+            return True
+    return any(path_matches("/".join(parts[:n]), extra) for n in range(1, len(parts) + 1))
+
+
+def go_registry_enabled() -> bool:
+    """False when GOPROXY does not start with the public proxy (a private proxy, `direct` or `off` knows other
+    modules, or none): only the first entry of the list decides, as it is asked first."""
+    proxy = go_setting("GOPROXY").strip()
+    return not proxy or "proxy.golang.org" in re.split(r"[,|]", proxy)[0]
+
+
+def go_manifest(ctx, fc, pending) -> list:
+    """Findings for a changed go.mod / go.work; registry requirements are queued on `pending` like other manifests."""
+    out, dcfg = [], ctx.cfg["deps"]
+    new_text, old_text = ctx.new_text(fc), ctx.old_text(fc)
+    if new_text is None:
+        return out
+    new_deps, problems, _m = parse_go_mod(new_text, fc.path)
+    old_deps, old_problems, _o = parse_go_mod(old_text, fc.path) if old_text else ({}, [], None)
+    seen = {p[1] for p in old_problems}
+    for n, text in problems:
+        if text not in seen and (n in fc.added or fc.status == "A"):
+            out.append(make("deps.unverified", fc.path, n, f"{fc.name} line {n} could not be parsed: {text}",
+                            key=text))
+    replaced = {d.name for k, d in new_deps.items() if k.startswith("replace ")}
+    siblings = set(go_project(ctx)[1])             # modules of this repository
+    for key, dep in new_deps.items():
+        old = old_deps.get(key)
+        if old and (old.spec, old.source) == (dep.spec, dep.source):
+            continue
+        if dep.source == "registry" and (dep.name in replaced or dep.name in siblings):
+            continue                               # satisfied locally or by the replacement (reported separately)
+        if dep.source == "path":
+            out.append(make("deps.local_source", fc.path, dep.line, f"{dep.name} is replaced by the local path "
+                            f"{dep.spec}", key=key))
+        elif dep.source == "replace":
+            out.append(make("deps.untrusted_source", fc.path, dep.line,
+                            f"{dep.name} is replaced by another module ({dep.spec}); the proxy and checksum database "
+                            "see the replacement, not the original", key=key))
+        elif go_registry_enabled() and not go_private(dep.name, dcfg["private"]):
+            pending.append((dep, old, fc))
+    return out
+
+
+def go_evaluate(ctx, dep, old, path) -> list:
+    """Registry findings for one go.mod requirement. Versions in go.mod are exact (minimum version selection)."""
+    out, reg, dcfg, name = [], ctx.registry, ctx.cfg["deps"], dep.name
+    if dep.indirect:           # added by `go mod tidy`: the version must exist and be clean; no age rules (and no noise)
+        if reg.version_time("go", name, dep.spec) == MISSING:
+            out.append(make("deps.hallucinated", path, dep.line, f"{name} has no version {dep.spec} on the Go module "
+                            "proxy (marked // indirect)", key=f"{name}@{dep.spec}"))
+        vulns = reg.vulns("go", name, dep.spec)
+        if vulns:
+            out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
+                            f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+        return out
+    info = reg.info("go", name)
+    if info is None:
+        return unverified(ctx, path, dep.line, f"{name}: could not reach the Go module proxy to verify it", name)
+    if info == MISSING:
+        return [make("deps.hallucinated", path, dep.line,
+                     f"{name} does not exist on the Go module proxy (if it is private, set GOPRIVATE or "
+                     "[deps] private)", key=name)]
+    if old is None:
+        age = age_days(info.get("created"))
+        if age is not None and age < dcfg["new_package_days"]:
+            out.append(make("deps.new_package", path, dep.line, f"{name} was first published {age_text(age)} ago",
+                            key=name))
+    when = reg.version_time("go", name, dep.spec)
+    if when is None:
+        return out + unverified(ctx, path, dep.line, f"{name} {dep.spec}: could not reach the Go module proxy", name)
+    if when == MISSING:
+        return out + [make("deps.hallucinated", path, dep.line, f"{name} has no version {dep.spec} on the Go module "
+                           "proxy", key=f"{name}@{dep.spec}")]
+    age = age_days(when)
+    if age is not None and age < dcfg["cooldown_days"] and not (old and reg.vulns("go", name, old.spec)):
+        out.append(make("deps.version_cooldown", path, dep.line,
+                        f"{name} {dep.spec} was published {age_text(age)} ago (cooldown: {dcfg['cooldown_days']} days)",
+                        key=f"{name}@{dep.spec}"))
+    vulns = reg.vulns("go", name, dep.spec)
+    if vulns:
+        out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
+                        f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+    return out
+
+
+GoImp = _record("GoImp", path=_REQUIRED, line=_REQUIRED, spec=_REQUIRED, cands=_REQUIRED)   # cands: module paths, likeliest first
+
+
+GO_IMPORT = re.compile(r"(?m)^[ \t]*import\b")
+GO_IMPORT_PATH = re.compile(r'"([^"\n]+)"|`([^`\n]+)`')
+
+
+def go_import_paths(text: str, masked=None) -> list:
+    """(line, import path) for every import statement. `masked` is the same text with strings and comments
+    blanked: the `import` keyword and the parentheses are found there, so an `import "x"` written inside a string
+    or a comment is not an import; the quoted paths themselves are read from `text`."""
+    masked = text if masked is None else masked
+    out = []
+    for m in GO_IMPORT.finditer(masked):
+        end = m.end()
+        paren = re.match(r"[ \t]*\(", masked[end:end + 80])
+        if paren:
+            close = masked.find(")", end + paren.end())
+            end_stmt = len(masked) if close < 0 else close
+        else:
+            nl = masked.find("\n", end)
+            end_stmt = len(masked) if nl < 0 else nl
+        for q in GO_IMPORT_PATH.finditer(text, end, end_stmt):
+            path = q.group(1) or q.group(2)
+            out.append((text.count("\n", 0, q.start()) + 1, path))
+    return out
+
+
+def go_candidates(spec: str) -> list:
+    """Module paths an import path may live in: hosts with a known layout first, then a couple of prefixes."""
+    parts = spec.split("/")
+    host = parts[0]
+    if host == "gopkg.in":                              # gopkg.in/pkg.v3 or gopkg.in/user/pkg.v3
+        n = 2 if len(parts) < 2 or re.search(r"\.v\d+$", parts[1]) else 3
+        return ["/".join(parts[:n])]
+    if host in ("github.com", "bitbucket.org", "golang.org"):    # fixed layout host/owner/repo[/vN]
+        lens = [4, 3] if len(parts) > 3 and re.fullmatch(r"v\d+", parts[3]) else [3]
+        return ["/".join(parts[:n]) for n in lens if n <= len(parts)]
+    return ["/".join(parts[:n]) for n in range(min(len(parts), 6), 1, -1)]     # anywhere else: every plausible root
+
+
+def go_layout_known(spec: str) -> bool:
+    """True when go_candidates is complete for this import path (so that no candidate existing means a fake)."""
+    return spec.split("/")[0] in ("github.com", "bitbucket.org", "golang.org", "gopkg.in")
+
+
+def go_project(ctx):
+    """({go.mod dir: (module path, declared module paths)}, [local module paths])."""
+    if "go" not in ctx.cache:
+        mods, local = {}, []
+        for p in ctx.files:
+            if p.rsplit("/", 1)[-1] == "go.mod" and not ctx.ignored(p):
+                deps, _problems, module = parse_go_mod(ctx.read_new(p) or "", p)
+                mods[p.rsplit("/", 1)[0] if "/" in p else ""] = (module, {d.name for d in deps.values()})
+                if module:
+                    local.append(module)
+        ctx.cache["go"] = (mods, local)
+    return ctx.cache["go"]
+
+
+def go_imports(ctx):
+    """deps.undeclared candidates: new imports of third-party packages that go.mod does not require. Skipped when
+    there is no go.mod above the file (nothing to compare with)."""
+    out = []
+    files = [fc for fc in ctx.code_changes({".go"}) if fc.added]
+    if not files or not go_registry_enabled():
+        return out
+    mods, local = go_project(ctx)
+    if not mods:
+        return out
+    private = ctx.cfg["deps"]["private"]
+    first = list(ctx.cfg["deps"]["first_party"]) + local
+
+    def paths(fc, which):
+        lx = ctx.lexed(fc, which)
+        if lx is None:
+            return go_import_paths((ctx.new_text(fc) if which == "new" else ctx.old_text(fc)) or "")
+        return go_import_paths(lx.code_text((COM,)), lx.code_text())
+    for fc in files:
+        dirs = fc.path.split("/")[:-1]
+        nearest = next((d for d in ("/".join(dirs[:i]) for i in range(len(dirs), -1, -1)) if d in mods), None)
+        if nearest is None:
+            continue
+        declared = mods[nearest][1]
+        old = {spec for _l, spec in paths(fc, "old")} if fc.old_spec else set()
+        seen = set()
+        for line, spec in paths(fc, "new"):
+            if line not in fc.added or spec in old or spec in seen or "." not in spec.split("/")[0] or spec == "C":
+                continue
+            if "/testdata/" in "/" + fc.path:
+                continue                           # the go tool ignores testdata: fake import paths are fixtures
+            seen.add(spec)
+            if any(spec == m or spec.startswith(m + "/") for m in declared | set(first)) \
+                    or go_private(spec, private):
+                continue
+            cands = go_candidates(spec)
+            if cands:
+                out.append(GoImp(fc.path, line, spec, cands))
+    return out
+
+
 # --------------------------------------------------------------------------- checks: dependencies
 
 def exact_pin(eco, spec):
@@ -2708,6 +3852,9 @@ def check_deps(ctx) -> list:
         if fc.deleted or fc.binary or fc.symlink or ctx.ignored(fc.path):
             continue
         kind = manifest_kind(fc.path)
+        if kind == "gomod":
+            out += go_manifest(ctx, fc, pending)
+            continue
         if kind and kind != "setup.py":
             new_text = ctx.new_text(fc)
             new_deps, new_sources = parse_manifest(kind, new_text, fc.path)
@@ -2750,14 +3897,21 @@ def check_deps(ctx) -> list:
     js_find, js_cand = js_imports(ctx)
     out += py_find + js_find
     imports = py_cand + js_cand
-    squats = [(dep, fc, p) for dep, old, fc in pending if old is None
+    go_cand = go_imports(ctx)
+    squats = [(dep, fc, p) for dep, old, fc in pending if old is None and dep.eco != "go"
               for p in [typosquat_of(dep.eco, dep.alias or dep.name)] if p]
 
-    reg.prefetch([("info", d.eco, d.alias or d.name) for d, _, _ in pending]
+    reg.prefetch([("info", d.eco, d.alias or d.name) for d, _, _ in pending if not d.indirect]
+                 + [("vtime", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go"]
                  + [("exists", i.eco, i.lookup) for i in imports]
+                 + [("exists", "go", c) for g in go_cand for c in g.cands]
                  + [("downloads", d.eco, d.alias or d.name) for d, _, _ in squats])
-    osv = []
+    osv = [("osv", "go", d.name, d.spec) for d, _, _ in pending if d.eco == "go"]
     for dep, old, _fc in pending:
+        if dep.eco == "go":
+            if old is not None and not old.indirect:
+                osv.append(("osv", "go", dep.name, old.spec))
+            continue
         info = reg.info(dep.eco, dep.alias or dep.name)
         if isinstance(info, dict):
             for spec in (dep.spec, old.spec if old else None):
@@ -2768,7 +3922,7 @@ def check_deps(ctx) -> list:
     reg.prefetch(osv)
 
     for dep, old, fc in pending:
-        out += evaluate_dep(ctx, dep, old, fc.path)
+        out += (go_evaluate if dep.eco == "go" else evaluate_dep)(ctx, dep, old, fc.path)
     for dep, fc, popular in squats:
         downloads = reg.downloads(dep.eco, dep.alias or dep.name)
         if downloads is not None and downloads >= dcfg["typosquat_min_weekly_downloads"]:
@@ -2793,6 +3947,22 @@ def check_deps(ctx) -> list:
                             f"{label}: '{imp.lookup}' is not installed here and not declared"
                             + ("" if imp.manifest else " (the project has no manifest)"),
                             action=None if imp.manifest else "warn", key=imp.lookup))
+    for g in go_cand:
+        found = [reg.exists("go", c) for c in g.cands]
+        if any(f is True for f in found):
+            mod = g.cands[found.index(True)]
+            out.append(make("deps.undeclared", g.path, g.line,
+                            f"'{g.spec}': module {mod} is not required by go.mod (run go get or go mod tidy)", key=mod))
+        elif all(f is False for f in found) and go_layout_known(g.spec):
+            out.append(make("deps.hallucinated", g.path, g.line,
+                            f"'{g.spec}': no such module on the Go module proxy, and it is not in go.mod "
+                            "(if it is private, set GOPRIVATE or [deps] private)", key=g.cands[0]))
+        elif all(f is False for f in found):
+            out += [make("deps.unverified", g.path, g.line,
+                         f"'{g.spec}': no module found for this import path on the Go module proxy and it is not "
+                         "in go.mod (if it is private, set GOPRIVATE or [deps] private)", key=g.cands[0])]
+        else:
+            out += unverified(ctx, g.path, g.line, f"'{g.spec}': could not reach the Go module proxy", g.cands[0])
     return out
 
 
@@ -3019,18 +4189,26 @@ def check_tests(ctx) -> list:
                                 f"`{ast.unparse(node)[:60]}` can never fail", key=ast.dump(node)))
 
     for fc in tests:
+        spec = language_for(fc.path)
+        if spec is not None and spec.test_case:
+            continue                                       # a language with its own test spec: see _lang_tests
         if fc.ext not in PY_EXTS and not fc.deleted:
-            removed = "\n".join(t for _, t in fc.removed)
-            added = "\n".join(fc.added.values())
+            lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
             for line, text in fc.added.items():
-                if JS_FOCUS.search(text):
+                if hit(lx, JS_FOCUS, line, text):
                     out.append(make("tests.focused", fc.path, line, text.strip()[:80], key=text.strip()))
-                elif JS_SKIP.search(text) or OTHER_SKIP.search(text):
+                elif hit(lx, JS_SKIP, line, text) or hit(lx, OTHER_SKIP, line, text):
                     out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
-                if JS_TRIVIAL.search(text):
+                if hit(lx, JS_TRIVIAL, line, text):
                     out.append(make("tests.trivial_assert", fc.path, line, text.strip()[:80], key=text.strip()))
-            lost_asserts = len(JS_ASSERT.findall(removed)) - len(JS_ASSERT.findall(added))
-            lost_tests = len(JS_TEST.findall(removed)) - len(JS_TEST.findall(added))
+            if lx is None and old_lx is None:              # no lexer view: count over the joined text, as before
+                removed = "\n".join(t for _, t in fc.removed)
+                added = "\n".join(fc.added.values())
+                lost_asserts = len(JS_ASSERT.findall(removed)) - len(JS_ASSERT.findall(added))
+                lost_tests = len(JS_TEST.findall(removed)) - len(JS_TEST.findall(added))
+            else:
+                lost_asserts = _count(old_lx, JS_ASSERT, fc.removed) - _count(lx, JS_ASSERT, fc.added.items())
+                lost_tests = _count(old_lx, JS_TEST, fc.removed) - _count(lx, JS_TEST, fc.added.items())
             if lost_tests > 0:
                 out.append(make("tests.deleted", fc.path, None, f"net {lost_tests} test case(s) removed", key="js-tests"))
             if lost_asserts > 0:
@@ -3096,14 +4274,14 @@ def check_tests(ctx) -> list:
                         out.append(make("tests.internals_touched", fc.path, line,
                                         f"{dotted_name(node.func)}() can hide failures or skew coverage",
                                         action="warn", key=dotted_name(node.func)))
-    return out
+    return out + _lang_tests(ctx)
 
 
 # --------------------------------------------------------------------------- checks: suppressions
 
 SUPPRESSIONS = [
     ("suppress.security", re.compile(r"#\s*nosec\b|(?:#|//)\s*nosemgrep\b|gitleaks:(?:allow)|(?:#|//)\s*NOSONAR\b|"
-                                     r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d")),
+                                     r"pragma:\s*allowlist\s+secret|#\s*noqa:\s*S\d|//\s*nolint:[\w,\s-]*\bgosec\b")),
     ("suppress.blanket", re.compile(r"#\s*(?:flake8|ruff):\s*noqa\s*$|#\s*mypy:\s*ignore-errors|#\s*pylint:\s*skip-file|"
                                     r"//\s*@ts-nocheck|/\*\s*eslint-disable\s*\*/|^\s*//\s*eslint-disable\s*$|"
                                     r"#\s*pyright:\s*basic\b")),
@@ -3111,7 +4289,7 @@ SUPPRESSIONS = [
     ("suppress.coverage", re.compile(r"#\s*pragma:\s*no\s*(?:cover|branch)\b|(?:/\*|//)\s*(?:istanbul|c8|v8)\s+ignore\b")),
     ("suppress.lint", re.compile(r"#\s*noqa\b|#\s*pylint:\s*disable\b|//\s*eslint-disable-(?:next-)?line\b|"
                                  r"/\*\s*eslint-disable\b|//\s*@ts-expect-error\b|//\s*biome-ignore\b|//\s*nolint\b|"
-                                 r"@SuppressWarnings\b|#\s*rubocop:\s*disable\b")),
+                                 r"@SuppressWarnings\b|#\s*rubocop:\s*disable\b|//\s*lint:ignore\b")),
 ]
 TYPE_CAST = re.compile(r"\bas\s+any\b|:\s*any\b(?=\s*[,)=;\]>|])|<any>")
 
@@ -3123,17 +4301,32 @@ def check_suppressions(ctx) -> list:
     return out
 
 
+def _suppression_hit(lx, rx, line, text):
+    """A suppression marker counts only inside a comment (or, for an annotation such as @SuppressWarnings, in
+    code). Without a lexer view it is a plain search."""
+    if rx.search(text) is None:
+        return None
+    if lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
+        return rx.search(text)
+    for m in rx.finditer(text):
+        kind = lx.region(line, m)
+        if kind == COM or (kind == CODE and m.group(0).lstrip().startswith("@")):
+            return m
+    return None
+
+
 def _suppressions_file(ctx, fc) -> list:
     out = []
     before = Counter()
-    for _, text in fc.removed:
+    lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
+    for old_line, text in fc.removed:
         for rule, rx in SUPPRESSIONS:
-            if rx.search(text):
+            if _suppression_hit(old_lx, rx, old_line, text):
                 before[rule] += 1
                 break
     for line, text in fc.added.items():
         for rule, rx in SUPPRESSIONS:
-            m = rx.search(text)
+            m = _suppression_hit(lx, rx, line, text)
             if m:
                 if before[rule]:
                     before[rule] -= 1            # the same suppression existed on an edited line
@@ -3142,8 +4335,9 @@ def _suppressions_file(ctx, fc) -> list:
                     out.append(make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
                                     legacy_key=marker))
                 break
-        if fc.ext in TS_EXTS and TYPE_CAST.search(text) and not text.lstrip().startswith("//"):
-            out.append(make("suppress.type_cast", fc.path, line, f"`{TYPE_CAST.search(text).group(0).strip()}` added",
+        cast = hit(lx, TYPE_CAST, line, text, CODE) if fc.ext in TS_EXTS else None
+        if cast and not text.lstrip().startswith("//"):
+            out.append(make("suppress.type_cast", fc.path, line, f"`{cast.group(0).strip()}` added",
                             key=text.strip()))
     return out
 
@@ -3173,7 +4367,7 @@ WEAK_CRYPTO = re.compile(
 NON_PY_RULES = [
     ("security.verification_disabled", re.compile(
         r"rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED['\"]?\]?\s*=\s*['\"]?0|strictSSL\s*:\s*false|"
-        r"algorithms\s*:\s*\[\s*['\"]none['\"]|(?i:insecureSkipVerify)\s*:\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(?:false|0)"),
+        r"algorithms\s*:\s*\[\s*['\"]none['\"]|(?i:insecureSkipVerify)\s*[:=]\s*true|CURLOPT_SSL_VERIFYPEER\s*,\s*(?:false|0)"),
      "certificate or signature verification turned off"),
 ]
 JS_RULES = [
@@ -3211,37 +4405,54 @@ def check_code_lines(ctx) -> list:
     out = []
     for fc in ctx.code_changes(CODE_EXTS):
         out += ctx.results.run("code_lines", ctx, fc, lambda fc=fc: _code_lines_file(ctx, fc))
-    return out
+    return out + check_lang(ctx)
 
 
 def _code_lines_file(ctx, fc) -> list:
     out = []
     is_js, is_py = fc.ext in JS_EXTS, fc.ext in PY_EXTS
     test = ctx.is_test(fc.path)
+    lx = None if is_py else ctx.lexed(fc)           # code / string / comment view; None = line-based as before
     for line, text in fc.added.items():
         if len(text) > 2000:
             continue
-        m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
-        if m and c and c.start() <= m.start():
+        if lx is not None:
+            same = lx.line(line).rstrip("\r") == text.rstrip("\r")
+            placeholder = hit(lx, PLACEHOLDER_RE, line, text, COM)
+            js_placeholder = is_js and hit(lx, JS_PLACEHOLDER, line, text, CODE)
+            todo = hit(lx, TODO_RE, line, text, COM)
+            weak = WEAK_CRYPTO.search(lx.masked(line, (COM,)) if same else text)
+        else:
+            m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
+            placeholder = m and c and c.start() <= m.start()
+            js_placeholder = is_js and JS_PLACEHOLDER.search(text)
+            todo = TODO_RE.search(text)
+            weak = WEAK_CRYPTO.search(text)
+        if placeholder:
             out.append(make("code.placeholder", fc.path, line, text.strip()[:90], key=text.strip()))
-        elif is_js and JS_PLACEHOLDER.search(text):
+        elif js_placeholder:
             out.append(make("code.placeholder", fc.path, line, "throws 'not implemented'", key=text.strip()))
-        elif TODO_RE.search(text):
+        elif todo:
             out.append(make("code.todo", fc.path, line, text.strip()[:80], key=text.strip()))
-        if WEAK_CRYPTO.search(text):
+        if weak:
             out.append(make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip()))
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
-                if rx.search(text):
+                if hit(lx, rx, line, text, CODE):
                     out.append(make(rule, fc.path, line, what, key=text.strip()))
-        if is_js and not test and JS_CONSOLE.search(text) and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
+        if is_js and not test and hit(lx, JS_CONSOLE, line, text, CODE) \
+                and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
             out.append(make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip()))
     if is_js:
         for block in _blocks(fc.added):
-            joined = "\n".join(fc.added[ln] for ln in block)
+            rows = [(ln, fc.added[ln]) for ln in block]
+            joined = "\n".join(t for _, t in rows)         # raw text: `catch (e) { /* ignore */ }` says it is meant
             for m in JS_SWALLOW.finditer(joined):
-                out.append(make("code.swallowed_exception", fc.path, block[0] + joined[:m.start()].count("\n"),
-                                "empty catch", key=m.group(0)))
+                pre = joined[:m.start()]
+                line = block[0] + pre.count("\n")
+                if lx is not None and lx.kind_at(line, m.start() - (pre.rfind("\n") + 1)) != CODE:
+                    continue                                   # "catch {}" written inside a string
+                out.append(make("code.swallowed_exception", fc.path, line, "empty catch", key=m.group(0)))
     return out
 
 
@@ -4389,6 +5600,8 @@ def run_check(args, env, collect=False):
             except Exception as e:                     # one broken checker must not hide the others
                 findings.append(make("gate.error", "(gate)", None, f"{checker.name} failed: {type(e).__name__}: {e}",
                                      action=fail_action, key=checker.name))
+        if args.verbose:
+            notes += [n for n in ctx.lang_notes if n not in notes]
         if head is not None:
             if len(commits) > 300:
                 notes.append(f"{len(commits)} commits: secrets scanned in the first 300 only")
@@ -5400,6 +6613,13 @@ def cmd_trust(args) -> int:
     return 0
 
 
+HEURISTIC_RULES = {
+    "size.function_length": "[Go and JavaScript/TypeScript: function spans are estimated from brace structure, not parsed]",
+    "size.complexity": "[Go and JavaScript/TypeScript: estimated by counting decision points in the function body]",
+    "perf.nested_loops": "[Go and JavaScript/TypeScript: loop nesting is estimated from brace structure]",
+}
+
+
 def cmd_explain(args) -> int:
     if not args.rule:
         print(ATTRIBUTION)
@@ -5413,6 +6633,8 @@ def cmd_explain(args) -> int:
         return 2
     allow = (f'[[allow]]\nrule = "{r.id}"\npath = "<glob>"            # or fingerprint = "<from -v output>"\n'
              f'reason = "<why this is safe>"')
+    if r.id in HEURISTIC_RULES:
+        r = dataclasses.replace(r, hint=r.hint + " " + HEURISTIC_RULES[r.id])
     print(f"{r.id}: {r.title}\n  default action: {r.action}   severity: {r.severity}   confidence: {r.confidence}"
           f"{'   stricter in sensitive paths' if r.escalate else ''}\n  fix: {r.hint}\n\n"
           f"Change it for the whole repo in .aigate/lite.toml:\n  [rules]\n  \"{r.id}\" = \"warn\"   # or off\n\n"

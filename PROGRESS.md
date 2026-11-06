@@ -1428,3 +1428,194 @@ not gated and is +12.6% / +10.6%: the script is ~30% larger and a directly-run s
 - pyflakes clean on `aigate_lite.py`, `bench/bench.py`, `scripts/gen_docs.py`; `gen_docs.py --check` passes; self-scan `check --all --offline`: WARN, risk 25, 0 block, 0 fix.
 - WSL temp copy `~/aigate-cleanup-linux` removed. uv and the uv-managed Pythons stay installed (Windows and WSL) — remove with `uv python uninstall` if unwanted.
 - Local tag `v0.2.1` created; `v0.2.0` left untouched. Nothing pushed or merged.
+
+
+# Phase 3 — universal language support (branch `phase-3`, comparison ref 9f94631 for every bench)
+
+## P3A — framework, lexer, fallback, JS/TS migration, Go (local tag v0.3.0a1)
+
+### Step 0
+- `git log --oneline -3 main`: `9f94631 Make the commands easier ...`, `ecba882 Version 0.2.1`, `fb41477 ...` (phase-2 merged; `git branch --merged main` lists phase-2 and Version-1).
+- CI on main (9f94631): green on all 12 jobs, reported by the human (the repo is private: `gh` was not logged in and the unauthenticated API/page returned 404).
+- Comparison ref changed by the human from v0.2.1 to 9f94631 for every bench in Phase 3.
+- Baseline, same tree against itself (`py -3.12 bench/bench.py --against 9f94631`, 40 interleaved pairs), real output:
+```
+python 3.12.10 on Windows-11-10.0.26300-SP0; 9f94631 (9f94631) vs aigate_lite.py; 40 interleaved pairs per row
+
+attempt 1 (40 pairs):
+measure       9f94631 med   new med   change   9f94631 p95  new p95   change    git o/n  blobs o/n
+startup            113.3     112.8    -0.4%       119.3    120.6    +1.1%                      
+startup-direct      180.5     178.9    -0.9%       189.9    191.3    +0.7%                      
+A                  259.3     256.9    -0.9%       268.8    265.0    -1.4%        6/6        1/1
+B                  322.6     322.7    +0.0%       330.8    331.4    +0.2%        7/7      21/21
+C                  654.4     656.1    +0.3%       702.9    696.3    -0.9%        7/7    301/301
+D                  291.8     291.4    -0.1%       307.9    301.0    -2.2%        6/6        1/1
+E                  272.1     270.6    -0.6%       281.7    281.9    +0.1%        6/6        3/3
+Gates: PASS
+```
+  Noise band from that run: medians within ±1.1% (startup ±0.4, A ±0.9, B ±0.0, C ±0.3, D ±0.1, E ±0.6), p95 up to ±2.2%.
+  A change is called "within noise" below when its median is inside ±1.1% (and p95 inside ±2.2%); anything else is reported as a percentage.
+
+### Design (what exists now)
+- `LanguageSpec` registry (`language_for(path)` -> spec built on first use; JS/TS and Go have one). Specs hold the lexer config, test-file globs,
+  line rules, function/loop/branch regexes for the brace analysis, test regexes, and the registry ecosystem.
+- Generic lexer (`lex_text`, `_Scanner`, `Lexed`): classifies every character as code / string / comment, driven by `LexConfig`/`StrForm`.
+  Supports line comments, block comments (nested optional), quote strings with escapes/doubled terminators/single-line mode, raw strings with a
+  `{g1}` terminator (Rust `r#"`, C# `"""`), interpolation with nesting (`${}`, `#{}`, `{}` with `{{` escapes), JS regex literals with an
+  expression-start heuristic, heredocs (PHP/Ruby, chained on one line), percent literals (Ruby). Tests build Rust/Kotlin/C#/PHP/Ruby configs, so
+  3B/3C only add specs. Checks run on the original line and a match counts only if it STARTS in the right region (`hit`, `Lexed.search`).
+- Fallback: any `LexError` (unterminated string/comment/heredoc, nesting > 40, 2 s per file, structure analysis > 2 s or > 500 KB) makes `Context.lexed`
+  return None, the old line-based behaviour runs, and a `lang.fallback: <path>: <reason>` note is recorded (shown with `-v`). Secrets scanning never uses the lexer.
+- JS/TS migrated: focus/skip/trivial/assert/test counting, suppressions (comments only; `@Annotation` in code), TODO/placeholder (comments only),
+  weak-crypto (comments blanked), eval/shell/sql/xss/cors/console/debugger (code only), empty catch (start in code), TS `any` casts (code only).
+  `.vue` / `.svelte` stay line-based (HTML mixed with script). Every pre-existing JS/TS test passes unchanged.
+- Brace-structure analysis (`analyze_functions`): function spans, decision points, loop nesting from brace structure; WARN only, labelled heuristic in `explain`.
+  Reports a function only if the diff touches it and it got worse than the old version.
+- Go: tests (`t.Skip*`, removed `t.Error/Fatal/assert.*`, deleted `func Test*` with move/rename handling by package dir and file name),
+  `exec.Command("sh","-c",<non-literal>)`, Sprintf/concatenated SQL into Query/Exec*, `math/rand` for secrets (only if `crypto/rand` is not imported),
+  `_ = err` / empty `if err != nil {}` (also across lines), `panic("TODO"/"not implemented")`, `InsecureSkipVerify`, `//nolint`, `//lint:ignore`, `//nolint:gosec` (security), new `//go:generate`.
+- Go modules: `go.mod`/`go.work` parser (blocks, quotes, comments, CRLF, indirect, all replace forms; unparsed lines -> `deps.unverified`, never silent), proxy.golang.org
+  (`@v/list`, `.info`, `@latest`, case-encoded), OSV querybatch (also used for pypi/npm batches now), GOPRIVATE / GONOPROXY / GOPROXY (first entry decides) from the environment
+  or the `go env -w` file (`GOENV`), `[deps] private`, new imports vs go.mod (`deps.undeclared` / `deps.hallucinated`), requirements replaced locally or sibling modules are not looked up.
+- Agent hardening for Go: `go.work`, `go.work.sum` forbidden for agents; `go.mod`, `go.sum`, `go.work`, `go.work.sum` sensitive.
+- Scenario F in `bench/bench.py` (polyglot: Python + 4 Go packages with tests + 4 TypeScript files + go.mod; recorded, not gated), fixture version 4.
+- `bench.py --against` now runs rows the way hooks run them; `GOENV=off` is set in the test and bench environments.
+
+### Registry endpoints verified live (once, 2026-11-05)
+| Ecosystem | Request | Result |
+|---|---|---|
+| Go versions | `GET https://proxy.golang.org/github.com/pkg/errors/@v/list` | 200, newline-separated versions, **unsorted** |
+| Go version time | `GET .../@v/v0.9.1.info` | 200 `{"Version":"v0.9.1","Time":"2020-01-14T19:47:44Z"}` |
+| Go latest / pseudo | `GET .../@latest`, `golang.org/x/text/@v/v0.0.0-20170915032832-14c0d48ead0c.info` | 200 JSON with Version/Time (pseudo-versions are NOT in `@v/list`) |
+| Go missing module | `GET .../github.com/definitely-not-real-zz/nothing/@v/list` | **404** with a plain-text body (the proxy tries `git ls-remote`); 410 is also treated as missing |
+| Case encoding | `.../github.com/!burnt!sushi/toml/@v/list` | 200 |
+| OSV | `POST https://api.osv.dev/v1/querybatch` `{"queries":[{"package":{"name":..,"ecosystem":"Go"},"version":..}]}` | 200 `{"results":[{"vulns":[{"id":..,"modified":..}]},{}]}` in query order; both `0.3.0` and `v0.3.0` returned the same vulns for golang.org/x/text |
+Differences from the prompt: none for Go. Rust/Maven/Ruby/PHP/.NET are not verified in 3A (later sub-phases).
+Not verified live: `pip`-style rate limits of the proxy (not needed), registries of other ecosystems.
+
+### Bench vs 9f94631 (interleaved, 40 pairs; `py -3.12 bench/bench.py --against 9f94631`)
+First measurement after the framework landed (before optimisation), real output, attempt 1 FAILED the gate on startup (+6.0%) and passed only on the 80-pair re-run; B/C/F were also slower than noise:
+```
+python 3.12.10 on Windows-11-10.0.26300-SP0; 9f94631 (9f94631) vs aigate_lite.py; 40 interleaved pairs per row
+
+attempt 1 (40 pairs):
+measure       9f94631 med   new med   change   9f94631 p95  new p95   change    git o/n  blobs o/n
+startup            119.6     126.8    +6.0%       132.7    137.5    +3.6%                      
+startup-direct      196.5     225.1   +14.6%       219.8    259.0   +17.8%                      
+A                  310.1     314.8    +1.5%       353.5    345.4    -2.3%        6/6        1/1
+B                  359.9     368.9    +2.5%       401.4    399.4    -0.5%        7/7      21/21
+C                  693.1     741.0    +6.9%       944.0   1032.0    +9.3%        7/7    301/301
+D                  311.0     313.6    +0.8%       346.7    345.2    -0.4%        6/6        1/1
+E                  282.1     287.9    +2.1%       292.0    296.8    +1.6%        6/6        3/3
+F                  336.1     348.7    +3.7%       367.5    367.3    -0.1%        7/7      14/15
+Gates: FAIL
+  startup: median 119.6 -> 126.8 ms (+6.0%, limit +5%)
+
+re-running once with 2x pairs; both results are recorded
+
+attempt 2 (80 pairs):
+measure       9f94631 med   new med   change   9f94631 p95  new p95   change    git o/n  blobs o/n
+startup            115.8     120.6    +4.1%       122.6    129.1    +5.3%                      
+startup-direct      186.4     206.9   +11.0%       201.8    236.0   +16.9%                      
+A                  282.4     288.2    +2.1%       316.3    306.5    -3.1%        6/6        1/1
+B                  412.8     446.0    +8.0%       549.1    560.1    +2.0%        7/7      21/21
+C                  672.7     728.4    +8.3%       696.9    748.6    +7.4%        7/7    301/301
+D                  308.9     315.0    +2.0%       322.3    335.5    +4.1%        6/6        1/1
+E                  280.3     284.7    +1.6%       372.7    404.0    +8.4%        6/6        3/3
+F                  363.3     406.6   +11.9%       589.2    558.6    -5.2%        7/7      14/15
+Gates: PASS
+```
+Cause found with `import aigate_lite` timing (script `importtime.py`, 60 alternating runs): +4.15 ms (+6.6%) at import, from six `@dataclass` definitions (~0.63 ms each).
+Fixes: lightweight record classes (`_record`, no code generation), no module-level regexes that are only used by Go, run-based masking instead of per-character loops,
+a single C-level `search` before any region logic, `is_test` only when a spec has rules, and a cheap guard that skips the structure analysis when a file is smaller than every limit.
+Final measurement (same command), real output:
+```
+python 3.12.10 on Windows-11-10.0.26300-SP0; 9f94631 (9f94631) vs aigate_lite.py; 40 interleaved pairs per row
+
+attempt 1 (40 pairs):
+measure       9f94631 med   new med   change   9f94631 p95  new p95   change    git o/n  blobs o/n
+startup            117.7     116.9    -0.7%       122.8    132.2    +7.7%                      
+startup-direct      181.0     198.2    +9.5%       188.0    205.1    +9.1%                      
+A                  274.1     275.3    +0.4%       284.0    291.6    +2.7%        6/6        1/1
+B                  343.1     346.1    +0.9%       360.2    357.4    -0.8%        7/7      21/21
+C                  665.6     691.5    +3.9%       676.7    711.7    +5.2%        7/7    301/301
+D                  304.7     306.8    +0.7%       316.5    317.1    +0.2%        6/6        1/1
+E                  280.8     279.9    -0.3%       298.4    304.6    +2.1%        6/6        3/3
+F                  328.1     314.9    -4.0%       346.2    328.6    -5.1%        7/6      14/15
+Gates: PASS
+```
+Verdicts against the ±1.1% / ±2.2% noise band: startup within noise (median -0.7%; its p95 moved +7.7% in this run and -0.6% / +3.6% in the others, i.e. noisy), A within noise (+0.4%), B within noise (+0.9%),
+D within noise (+0.7%), E within noise (-0.3%), **C slower: +3.9% median / +5.2% p95** (150 JS files are now lexed; real, kept), F faster in this run (-4.0%; old code ignores the Go files, so F is only a record: 328.1 -> 314.9 ms median),
+startup-direct (`python aigate_lite.py --version`, informational) +9.5%: the script is ~1,500 lines larger and a directly-run script is compiled every run (hooks use the cached loader).
+Git calls and blobs read for A-E: identical (6/6, 7/7, 7/7, 6/6, 6/6 git calls; 1/1, 21/21, 301/301, 1/1, 3/3 blobs). F: 7 -> 6 git calls, 14 -> 15 blobs (go.mod read for the module list).
+Import-time proof of lazy loading (`py -3.12 .../importtime.py 60`, `import aigate_lite` alone, old vs new): old median 63.16 ms, new 62.86 ms: -0.29 ms (-0.5%), i.e. unchanged.
+Specs are built only for extensions present in the change: `language_for("x.py")` builds nothing, `.go` builds only Go, `.ts` only JS/TS.
+
+### Tests actually run (final state of 3A: `uv run --no-project --python X --with pytest --with pyflakes python -W error::DeprecationWarning -m pytest -q -W error::DeprecationWarning`)
+| OS | 3.11 | 3.12 | 3.13 | 3.14 |
+|---|---|---|---|---|
+| Windows 11 | 489 passed, 11 skipped | 489 passed, 11 skipped | 489 passed, 11 skipped | 489 passed, 11 skipped |
+| Ubuntu (WSL2) | 499 passed, 1 skipped | 499 passed, 1 skipped | 499 passed, 1 skipped | 499 passed, 1 skipped |
+Not run: macOS. The GitHub Actions matrix for this branch has not run (nothing is pushed). Earlier runs of this stage showed one self-scan failure (JS fixtures containing markers) which was fixed by splitting the markers; the final runs above are after that fix.
+pyflakes clean; `scripts/gen_docs.py --check` clean; self-scan `check --all`: WARN, 0 block, 0 fix.
+
+### New rules
+| id | default | severity |
+|---|---|---|
+| `code.generate_directive` | warn | low |
+Rule count: 66 -> 67. (`lang.fallback` is a note, not a rule.)
+
+### Real-world false-positive check (Go)
+Repo https://github.com/go-chi/chi (pushed 2026-10-18), HEAD `9f8adb1aabaa8a91180a821111d3f8e668d1c0bf`, `git clone --depth 80`.
+Command: `py -3.12 aigate_lite.py check --range 9f8adb1aabaa8a91180a821111d3f8e668d1c0bf~50..9f8adb1aabaa8a91180a821111d3f8e668d1c0bf --format json --offline` (55 files, +3433 -229, 3.75 s).
+Findings by rule (25): size.function_length 11, size.complexity 8, scope.forbidden_path 1 (the commands ran inside an AI-agent shell, `$CLAUDECODE`; it is the existing agent rule for `.github/workflows/ci.yml`),
+tests.assertions_removed 1, size.diff_budget 1, deps.unverified 1 (offline, by design), code.duplicate_block 1, size.file_length 1. No security, placeholder, skip or suppression findings.
+Hand review of 10 findings drawn with `random.Random(20261105).sample(range(25), 10)` (indices 3,4,5,9,13,18,19,21,23,24):
+- 10 of 10 measured correctly (0 false positives): function lengths verified against the files (112, 90, 148 lines; Mount 60 lines so no length finding), complexities re-counted
+  independently (Mount 19, findRoute 39, routes 16, walk 11, TestSunset 12 - an independent regex undercounted that one because it mishandled `//` inside strings, the gate's count matched a manual count: 9 line-start `if` + `||` x2 + 1),
+  duplicate block confirmed identical, `deps.unverified` is the intended offline note, `client_ip_test.go` is 860 lines.
+- The `tests.assertions_removed` finding (not in the sample, checked separately) is real: two `t.Fatal(...)` lines were removed from `wrap_writer_test.go` with none added (commit "record response status when flushing").
+- Judgement: 7 of the 10 are WARN-level size findings on long table-driven tests or the router core; accurate, but many teams will consider them noise. No rule was tuned or downgraded (they are accurate); the Python rules behave the same way on test functions.
+Not run for JS/TS (no language added in this sub-phase).
+
+### Independent reviews (sub-agents that did not write the code)
+1. Lexer, JS/TS migration, Go line rules (`git show cc7c9b5`). Fixed: ReDoS in the JS method-header regex (two adjacent `\s*`), quadratic loop-depth, no time/size budget in the structure analysis
+   (now 2 s / 500 KB -> LexError -> skipped with a note), indented `// eslint-disable` not matching (region is now taken at the first non-blank character), `lost_tests` counted per line instead of across the
+   joined text (restored), `catch (e) { /* ignore */ }` newly flagged (restored to the old behaviour: comments are not masked for that rule), `n++ / 2` and `x.in / y` mistaken for regex starts, Go: `import mrand "math/rand"` with `crypto/rand`,
+   constant SQL concatenation, `assert.New(`, `TestMain`/`TestHelper` counted as tests, same-named tests in other packages hiding deletions, testify suite methods. Self-scan fixtures were reworded.
+   Accepted and documented: a JSX text apostrophe turns the rest of its line into a string (hides, never invents, findings on that line); the Go rename heuristic is count-based.
+2. Go manifests/registry (`git diff cc7c9b5..HEAD`). Fixed: required modules that are replaced locally or are sibling modules were looked up and BLOCKED; wrong module-root guesses for gopkg.in / gitlab subgroups / unknown hosts
+   (now every plausible root, and an unknown-layout import with no module is `deps.unverified`, not a block); GOPRIVATE/GOPROXY from `go env -w`; GOPROXY first-entry semantics; `replace` key collisions (version in the key);
+   `// indirect` as a bypass (indirect versions must still exist; no age rules, no noise); `//indirect` glued to the version; AttributeError/shape handling for proxy and OSV answers (unknown, never a crash); `testdata/` imports.
+   Not changed: a proxy 410 is still treated as "gone" (MISSING, cached 1 h); response size is not bounded (pre-existing in `_http`). The reviewer's doubt about the OSV version format was checked live: `v0.3.0` and `0.3.0` return identical results.
+
+### Existing tests touched (no assertion weakened)
+- `tests/test_trust.py`: `len(aigate.RULES) == 66` -> `67` (the brief allows new rules and asks for the new total).
+- `tests/test_attribution.py`: the text comparison now ignores the elapsed time ("0.2s" vs "0.3s"), a flake of my own earlier test under load.
+- `tests/test_lang_go_deps.py` (new in this phase): one of my own tests was changed after review (`indirect` requirements must exist) and one candidate-order expectation was updated; both are annotated in the file.
+- `tests/conftest.py`: `GOENV=off` in the child environment so a developer's `go env` file cannot influence tests.
+`tests/test_checkers.py` still pins 11 checkers: the Go rules run inside `check_code_lines` / `check_tests`, no new Checker was added.
+
+### Behaviour changes users will notice
+- JS/TS and Go: markers and dangerous calls inside strings, template literals, regex literals and comments no longer count; TODO/placeholder/suppression markers count only in comments.
+- Commenting out a JS/TS test is now reported as a deleted test and removed assertions (before it looked like the test was still there).
+- New size / complexity / nested-loop warnings for JS/TS and Go functions (heuristic, WARN only).
+- Go: all rules above; `go.mod` requirements are verified against proxy.golang.org and OSV; `go.work` is forbidden for agents.
+- OSV vulnerability lookups for pypi/npm/go are batched into one `querybatch` request per 1000 packages when several are needed.
+- `-v` shows `lang.fallback` notes.
+
+### BLOCKED / unsure / decisions for the human
+- Go `replace` of a local path is `deps.local_source` (warn), not `deps.untrusted_source` (the brief lists both under untrusted_source; local replaces are common in monorepos). A replace by another module is `deps.untrusted_source` (BLOCK). Say if local replaces should also block.
+- Go `deps.outdated` is not produced (major versions are different module paths) and typosquat is not produced (no sourced popular-module list). Go `deps.deprecated` / retractions are not read.
+- `tests.deleted` for Go treats `TestA -> TestB` in one file as a rename by count only.
+- C scenario (+3.9%) is the price of lexing 150 JS files; if that is too much the lexer can be made opt-out per language in `[gate]`, but I have not added a config key.
+- 3B/3C will need the registry/OSV pieces verified live for Rust, Maven, Ruby, PHP and NuGet.
+
+### Review commands for the human
+```
+git switch phase-3
+git log --oneline main..phase-3
+git diff --stat main..phase-3
+py -3.12 -m pytest -q
+py -3.12 bench/bench.py --against 9f94631
+```

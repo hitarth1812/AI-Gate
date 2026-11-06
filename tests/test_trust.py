@@ -138,7 +138,7 @@ def test_files_cannot_inject_shell_syntax(repo):
 def test_untrusted_notice_has_its_own_rule_that_repo_rules_cannot_change(repo):
     from conftest import aigate
     rule = aigate.RULES["commands.untrusted"]
-    assert (rule.action, rule.severity) == ("warn", "low") and len(aigate.RULES) == 66
+    assert (rule.action, rule.severity) == ("warn", "low") and len(aigate.RULES) == 67
     for override in ('"commands.untrusted" = "off"', '"commands.untrusted" = "block"', '"commands.*" = "block"'):
         repo.write(".aigate/lite.toml", config() + f"[rules]\n{override}\n")
         staged_change(repo)
