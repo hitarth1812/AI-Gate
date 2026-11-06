@@ -1,5 +1,6 @@
 """`check --all` for an existing repository: --summary, --group-by, --max-findings and the pointer to a baseline."""
 import json
+import re
 
 import pytest
 
@@ -64,7 +65,9 @@ def test_max_findings_cuts_the_list_but_not_the_verdict(audit_repo):
     shown = [ln for ln in cut.stdout.splitlines() if ln.startswith("  ") and ln.split()[1:2] and ln.split()[1] in ("BLOCK", "FIX", "WARN")]
     assert len(shown) == 3 and "more" in cut.stdout and "--max-findings" in cut.stdout
     assert cut.returncode == full.returncode
-    assert cut.stdout.splitlines()[-2] == full.stdout.splitlines()[-2]          # the same one-line verdict
+    def verdict(out):                                                           # the one-line verdict, minus the elapsed time
+        return re.sub(r"\d+(?:\.\d+)?s\b", "Ns", out.splitlines()[-2])
+    assert verdict(cut.stdout) == verdict(full.stdout)
 
 
 def test_max_findings_in_json_says_how_many_were_left_out(audit_repo):
