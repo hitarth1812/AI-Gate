@@ -26,12 +26,19 @@ AGENT = {"CLAUDECODE": "1"}
     (">=0.4,<0.5", "0.5.0", "new"), (">=0.4,<0.5", "1.0", "new"), (">=0.4", "0.4", "ok"), (">0.4", "0.4.0", "old"),
     ("<=0.4.2", "0.4.3", "new"), ("==0.4.*", "0.4.9", "ok"), ("==0.4.*", "0.5.0", "new"), ("==0.4.1", "0.4.0", "old"),
     ("~=0.4.1", "0.4.9", "ok"), ("~=0.4.1", "0.5.0", "new"), ("~=0.4.1", "0.4.0", "old"), (">=1,<2", "1.9.9", "ok"),
-    (">= 0.4 , < 0.5", "0.4.2", "ok"), ("!=0.4.1", "0.4.1", "odd"), ("!=0.4.1", "0.4.2", "ok"),
-    (">=0.4.0", "0.4.0a1", "ok"),        # pre-release text is ignored: 0.4.0a1 compares as 0.4.0
+    (">= 0.4 , < 0.5", "0.4.2", "ok"), ("!=0.4.1", "0.4.1", "old"), ("!=0.4.1", "0.4.2", "ok"),
+    (">=0.4.0", "0.4.0a1", "old"), (">=0.4.0", "0.4.0.dev1", "old"), ("<0.5", "0.5.0rc1", "ok"),   # a pre-release is below its release
+    ("!=0.4.0,>=0.5", "0.4.0", "old"), (">=0.5,!=0.4.0", "0.4.0", "old"), ("<0.4,!=0.9", "0.9", "old"),   # clause order never matters
     (">=0.4,<0.5", "weird", "odd"),
 ])
 def test_requires_status(text, version, status):
     assert aigate.requires_status(text, version)[0] == status
+
+
+def test_a_number_with_thousands_of_digits_is_rejected_not_a_crash(repo):
+    assert aigate.parse_requires(">=" + "9" * 5000) is None and aigate.release_numbers("9" * 5000) is None
+    res = stage(repo, {".aigate/lite.toml": '[gate]\nrequires = ">=' + "9" * 5000 + '"\n', "ok.py": "x = 1\n"})
+    assert any("gate.requires" in f["message"] for f in find(res, "gate.config_invalid"))
 
 
 @pytest.mark.parametrize("text", ["", "0.4", ">=", ">=0.4a1", ">=0.4.dev1", "~=0.4.*", ">=0.4;<0.5", "latest", ">=0.4,", ">=0.x"])
@@ -123,7 +130,13 @@ def test_the_installed_hook_records_no_package_location():
         assert "site-packages" not in text and "SCRIPT" not in text and "-c \"$LOADER\"" not in text and "LOADER" not in text
         assert "# aigate-lite mode: installed" in text and aigate.hook_mode(text) == "installed"
         assert "aigate-lite is not installed; run: pipx install aigate-lite" in text and "--no-verify" in text
-        assert "AIGATE_BIN" in text and "command -v aigate-lite" in text and "-P -m aigate_lite" in text
+        assert "AIGATE_BIN" in text and "command -v aigate-lite" in text and "$PYOPT -m aigate_lite" in text and "PYOPT=-P" in text and "PYOPT=-I" in text
+
+
+def test_the_hook_agent_test_covers_every_builtin_agent_variable():
+    text = hook_text()
+    assert all("$" + v in text for v in aigate.BUILTIN_AGENT_ENV)
+    assert aigate.HOOK_AGENT_TEST in text
 
 
 def test_hook_modes_are_told_apart():
@@ -251,6 +264,23 @@ def test_aigate_bin_is_used_for_people_and_ignored_for_agents(repo, tmp_path):
                           env={"AIGATE_BIN": str(exe).replace("\\", "/"), **AGENT})
     assert "AIGATE_BIN is ignored while an AI agent runs the commit" in agent.stderr
     assert calls(log) == ["bin check --staged"] and agent.returncode == 1        # never ran it; nothing else was found
+
+
+@needs_sh
+def test_an_agent_never_runs_a_command_found_by_name_and_runs_python_isolated(repo, tmp_path):
+    install_installed(repo, pinned=sys.executable.replace("\\", "/"))
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    shim = f"echo \"shim $*\" >> '{log.as_posix()}'\nexit 0"                    # a planted aigate-lite that passes everything
+    person_bin, agent_bin = tmp_path / "person", tmp_path / "agent"
+    for d in (person_bin, agent_bin):
+        d.mkdir()
+    person = run_installed(repo, "pre-commit", fake_bin(person_bin, {"aigate-lite": shim}), env=module_env())
+    assert person.returncode == 0 and calls(log) == ["shim check --staged"]
+    agent = run_installed(repo, "pre-commit", fake_bin(agent_bin, {"aigate-lite": shim}), env={**module_env(), **AGENT})
+    # the shim is never run for an agent, and PYTHONPATH is ignored (-I): the module is not found, so nothing passes
+    assert agent.returncode == 1 and "aigate-lite is not installed" in agent.stderr
+    assert calls(log) == ["shim check --staged"]
 
 
 @needs_sh
@@ -470,6 +500,31 @@ def test_the_hook_runs_through_the_pinned_python_when_the_command_is_not_on_path
     staged_clean(repo)
     proc = run_installed(repo, "pre-commit", fake_bin(tmp_path, {}))            # PATH has no aigate-lite
     assert proc.returncode == 0, proc.stdout + proc.stderr
+
+
+@needs_sh
+def test_an_agent_commit_runs_the_installed_package_through_the_pinned_python(venv, repo, tmp_path):
+    assert in_venv(venv, repo, "setup").returncode == 0
+    repo.commit("gate config")                               # an agent may not change .aigate/ itself
+    staged_clean(repo)
+    shim = "exit 0"                                       # a planted `aigate-lite` that would pass everything
+    proc = run_installed(repo, "pre-commit", fake_bin(tmp_path, {"aigate-lite": shim}), env=AGENT)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    repo.write("leak.py", 'KEY = "' + "AKIA" + 'QWERTYUIOPASDFGH"\n')
+    repo.add()
+    other = tmp_path / "other"
+    other.mkdir()
+    blocked = run_installed(repo, "pre-commit", fake_bin(other, {"aigate-lite": shim}), env=AGENT)
+    assert blocked.returncode == 1, "the real gate ran, not the shim"
+
+
+def test_unvendor_warns_when_the_installed_gate_is_older_than_the_copy(repo):
+    assert repo.run("install", "--vendor").returncode == 0
+    copy = repo.path / ".aigate" / "aigate_lite.py"
+    copy.write_text(copy.read_text(encoding="utf-8").replace(f'__version__ = "{aigate.__version__}"', '__version__ = "9.9.9"'),
+                    encoding="utf-8")
+    proc = repo.run("unvendor", "--force")
+    assert "the vendored copy is 9.9.9" in proc.stderr
 
 
 @needs_sh

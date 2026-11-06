@@ -880,13 +880,14 @@ def merge_config(raw: dict, problems: list) -> dict:
     return cfg
 
 
-REQUIRES_CLAUSE = re.compile(r"\s*(>=|<=|==|!=|~=|>|<)\s*(\d+(?:\.\d+)*)(\.\*)?\s*")
+REQUIRES_CLAUSE = re.compile(r"\s*(>=|<=|==|!=|~=|>|<)\s*(\d{1,9}(?:\.\d{1,9})*)(\.\*)?\s*")
+PRE_RELEASE = re.compile(r"\s*\d{1,9}(?:\.\d{1,9})*[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview|dev)\d*", re.I)
 
 
 def parse_requires(text):
     """[(operator, release tuple, wildcard)] for a range like ">=0.4,<0.5", or None when it is not one. A small subset of
-    PEP 440: comma-separated clauses of >=, <=, >, <, ==, != and ~= over release numbers (1, 1.2, 1.2.3); `==1.2.*`
-    is allowed. Pre-release, post-release, dev and local parts are not understood and make the range invalid."""
+    PEP 440: comma-separated clauses of >=, <=, >, <, ==, != and ~= over release numbers (1, 1.2, 1.2.3; at most 9 digits each);
+    `==1.2.*` is allowed. Pre-release, post-release, dev and local parts in the range are not understood and make it invalid."""
     clauses = []
     for part in text.split(","):
         m = REQUIRES_CLAUSE.fullmatch(part)
@@ -898,40 +899,47 @@ def parse_requires(text):
 
 def release_numbers(version):
     """The leading release numbers of a version string ("0.4.0" -> (0, 4, 0); "0.4.0a1" -> (0, 4, 0)), or None."""
-    m = re.match(r"\s*(\d+(?:\.\d+)*)", str(version or ""))
+    m = re.match(r"\s*(\d{1,9}(?:\.\d{1,9})*)(?!\d)", str(version or ""))
     return tuple(int(n) for n in m.group(1).split(".")) if m else None
 
 
 def requires_status(text, version):
-    """("ok" | "old" | "new" | "odd", why): where `version` stands against a `requires` range. "old" means below the
-    minimum, "new" above the maximum, "odd" excluded by a != clause or unparseable."""
+    """("ok" | "old" | "new" | "odd", why): where `version` stands against a `requires` range. Every clause is judged: "old" (below
+    a minimum, or excluded by !=) wins over "new" (above a maximum), so the answer does not depend on clause order. A pre-release
+    (0.4.0rc1, 0.4.0.dev1) is below its release. "odd" means the range or the version could not be read."""
     clauses, have = parse_requires(text or ""), release_numbers(version)
     if clauses is None or have is None:
         return "odd", f"cannot compare {version!r} with {text!r}"
+    pre = PRE_RELEASE.match(str(version)) is not None
 
     def cmp(a, b):
         n = max(len(a), len(b))
         a, b = a + (0,) * (n - len(a)), b + (0,) * (n - len(b))
-        return (a > b) - (a < b)
+        c = (a > b) - (a < b)
+        return -1 if c == 0 and pre else c
+    show = lambda t: ".".join(map(str, t))                     # noqa: E731
+    found = {}
     for op, want, wild in clauses:
         c = cmp(have, want)
         if op == "~=":
-            lower_ok, upper = c >= 0, want[:-1] if len(want) > 1 else want
-            if not lower_ok:
-                return "old", f"{version} is below {op}{'.'.join(map(str, want))}"
-            if have[:len(upper)] != upper:
-                return "new", f"{version} is outside {op}{'.'.join(map(str, want))}"
+            upper = want[:-1] if len(want) > 1 else want
+            if c < 0:
+                found.setdefault("old", f"{version} is below ~={show(want)}")
+            elif have[:len(upper)] != upper:
+                found.setdefault("new", f"{version} is outside ~={show(want)}")
         elif op == "==":
-            ok = have[:len(want)] == want if wild else c == 0
-            if not ok:
-                return ("old" if c < 0 else "new"), f"{version} does not match =={'.'.join(map(str, want))}{'.*' if wild else ''}"
+            if not (have[:len(want)] == want if wild else c == 0):
+                found.setdefault("old" if c < 0 else "new", f"{version} does not match =={show(want)}{'.*' if wild else ''}")
         elif op == "!=":
-            if (have[:len(want)] == want) if wild else c == 0:
-                return "odd", f"{version} is excluded by !={'.'.join(map(str, want))}"
+            if (have[:len(want)] == want) if wild else (c == 0 and not pre):
+                found.setdefault("old", f"{version} is excluded by !={show(want)}{'.*' if wild else ''}")
         elif (op == ">=" and c < 0) or (op == ">" and c <= 0):
-            return "old", f"{version} is below {op}{'.'.join(map(str, want))}"
+            found.setdefault("old", f"{version} is below {op}{show(want)}")
         elif (op == "<=" and c > 0) or (op == "<" and c >= 0):
-            return "new", f"{version} is above {op}{'.'.join(map(str, want))}"
+            found.setdefault("new", f"{version} is above {op}{show(want)}")
+    for kind in ("old", "new"):
+        if kind in found:
+            return kind, found[kind]
     return "ok", ""
 
 
@@ -6360,7 +6368,7 @@ def hook_script(kind: str, vendored: bool, py: str, script: str, mode=None) -> s
 
 
 HOOK_MODE_RE = re.compile(r"^# aigate-lite mode: (\w+)", re.M)
-HOOK_AGENT_TEST = ('[ -n "$CLAUDECODE$AI_AGENT$GEMINI_CLI$AIGATE_AGENT" ] || [ "$(printf %s "$AIGATE_PROVENANCE" | '
+HOOK_AGENT_TEST = ('[ -n "' + "".join("$" + v for v in BUILTIN_AGENT_ENV) + '" ] || [ "$(printf %s "$AIGATE_PROVENANCE" | '
                    "tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')\" = agent ]")
 
 
@@ -6374,8 +6382,8 @@ def hook_mode(text: str) -> str:
 
 def installed_hook_script(kind: str, py: str) -> str:
     """Hook for the installed mode: nothing about where the package lives is written into it. It runs, in order,
-    $AIGATE_BIN (ignored for AI agents, like AIGATE_PYTHON), `aigate-lite` on PATH, the Python pinned at install with
-    `-m aigate_lite`, then any Python 3.11+ that can import it, and otherwise stops with the install command. A
+    $AIGATE_BIN (ignored for AI agents, like AIGATE_PYTHON), `aigate-lite` on PATH (also skipped for agents), the Python
+    pinned at install with `-m aigate_lite` (`-I` for agents), then any Python 3.11+ that can import it, and otherwise stops with the install command. A
     candidate that cannot be executed (exit 126/127: a venv that was moved or removed) falls through to the next."""
     what = "push" if kind == "pre-push" else "commit"
     local = f'"$HOOK_DIR/{kind}.local"'
@@ -6390,6 +6398,11 @@ def installed_hook_script(kind: str, py: str) -> str:
     generic = " ".join(_sh_quote(" ".join(c)) if len(c) > 1 else c[0] for c in PY_GENERIC)
     lines += [f"PINNED={_sh_quote(py.replace(chr(92), '/'))}",
               'TRIED=""',
+              'AGENT=""',
+              f'if {HOOK_AGENT_TEST}; then AGENT=1; fi',
+              # an AI agent's commit: no lookup by name (a shim earlier on PATH could replace the gate) and an isolated
+              # interpreter (-I ignores PYTHONPATH and the user site); a person's uses -P (no current directory on sys.path)
+              'PYOPT=-P; [ -n "$AGENT" ] && PYOPT=-I',
               "attempt() {",
               '  label=$1; shift',
               '  run_with "$@"; rc=$?',
@@ -6401,19 +6414,19 @@ def installed_hook_script(kind: str, py: str) -> str:
               '  exit "$rc"',
               "}",
               "mod_try() {",
-              '  "$@" -P -c "import aigate_lite" </dev/null >/dev/null 2>&1 || {',
+              '  "$@" $PYOPT -c "import aigate_lite" </dev/null >/dev/null 2>&1 || {',
               '    TRIED="$TRIED',
               '  $*: no aigate_lite module"; return 1; }',
-              '  attempt "$* -m aigate_lite" "$@" -P -m aigate_lite',
+              '  attempt "$* -m aigate_lite" "$@" $PYOPT -m aigate_lite',
               "}",
               'if [ -n "$AIGATE_BIN" ]; then',
-              f'  if {HOOK_AGENT_TEST}; then',
+              '  if [ -n "$AGENT" ]; then',
               f'    echo "aigate-lite: AIGATE_BIN is ignored while an AI agent runs the {what}" >&2',
               '  elif [ -x "$AIGATE_BIN" ]; then attempt "AIGATE_BIN" "$AIGATE_BIN"',
               '  else TRIED="$TRIED',
               '  AIGATE_BIN: not an executable file"; fi',
               "fi",
-              'if command -v aigate-lite >/dev/null 2>&1; then attempt "aigate-lite on PATH" aigate-lite; fi',
+              'if [ -z "$AGENT" ] && command -v aigate-lite >/dev/null 2>&1; then attempt "aigate-lite on PATH" aigate-lite; fi',
               'if [ -x "$PINNED" ]; then mod_try "$PINNED"; fi',
               f"for c in {generic}; do mod_try $c; done",
               f'printf "aigate-lite is not installed; run: pipx install aigate-lite (bypass once with git {what} '
@@ -6890,6 +6903,16 @@ def cmd_unvendor(args) -> int:
     if rc:
         return rc
     if copy:
+        try:
+            with open(os.path.join(repo.root, ".aigate", "aigate_lite.py"), encoding="utf-8", errors="replace") as fh:
+                m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+            old, new = release_numbers(m.group(1) if m else ""), release_numbers(__version__)
+            if old and new and old > new:
+                print(f"warning: the vendored copy is {m.group(1)} but the installed aigate-lite is {__version__}; "
+                      "upgrade it first (pipx upgrade aigate-lite) or the repository gets an older gate",
+                      file=sys.stderr)
+        except OSError:
+            pass
         print("The vendored copy is no longer used. Remove it and commit:\n  git rm " + " ".join(copy) +
               "\n  git commit -m 'use the installed aigate-lite'\n(aigate-lite did not run this)")
     else:
@@ -7366,8 +7389,18 @@ def _doctor_installed_hook(text):
             ok = False
         if ok:
             return _check("python.hook", "ok", f"installed hook runs {pinned} -m aigate_lite (aigate-lite is not on PATH)")
-    return _check("python.hook", "fail", "installed hook cannot find aigate-lite: not on PATH, and the Python pinned at "
-                  "install cannot import it; commits are blocked", "run: pipx install aigate-lite (or: aigate-lite install --vendor)")
+    for cmd in PY_GENERIC:                       # the hook's last resort: any Python 3.11+ on PATH that has the module
+        if shutil.which(cmd[0]):
+            try:
+                if subprocess.run([*cmd, "-P", "-c", "import aigate_lite"], capture_output=True, timeout=15,
+                                  stdin=subprocess.DEVNULL).returncode == 0:
+                    return _check("python.hook", "ok", f"installed hook runs {' '.join(cmd)} -m aigate_lite "
+                                  "(aigate-lite is not on PATH and the pinned Python is gone)")
+            except (OSError, subprocess.SubprocessError):
+                continue
+    return _check("python.hook", "fail", "installed hook cannot find aigate-lite: not on PATH, and no Python on PATH (nor "
+                  "the one pinned at install) can import it; commits are blocked",
+                  "run: pipx install aigate-lite (or: aigate-lite install --vendor)")
 
 
 def _doctor_install(repo, cfg, hooks_dir):
