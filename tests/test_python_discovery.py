@@ -25,7 +25,9 @@ def write_hook(repo, py, vendored=False):
 
 def run_hook(repo, kind, bin_dir, env=None):
     hook = repo.path / ".git" / "hooks" / kind
-    keep = [os.path.dirname(shutil.which("git")), os.path.dirname(SH)]
+    # the hook also needs coreutils such as tr; on macOS they are not beside git or sh
+    keep = list(dict.fromkeys([os.path.dirname(shutil.which("git")), os.path.dirname(SH),
+                               os.path.dirname(shutil.which("tr") or SH)]))
     env = {**repo.env, "PATH": os.pathsep.join([str(bin_dir), *keep]), **(env or {})}
     return subprocess.run([SH, str(hook)], cwd=repo.path, env=env, text=True, capture_output=True)
 

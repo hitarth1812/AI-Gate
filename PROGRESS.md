@@ -1619,3 +1619,38 @@ git diff --stat main..phase-3
 py -3.12 -m pytest -q
 py -3.12 bench/bench.py --against 9f94631
 ```
+
+
+## Phase 4 -> P4A: precision (branch phase-4, from main e332152)
+
+Base: Phase 3A merged (e332152). Local commits: fb163c1 (macOS fixes), f1fbfd8 (4A), 51423e8 (review fixes), 6bb9122 (test flake).
+
+### Step 0
+- Phase 3 is merged in origin/main (merge commit e332152); the PR's macOS jobs had failed (see below); `gh` is not logged in here, so CI is what the human reported.
+- macOS failure: `tests/test_python_discovery.py` kept only git's and sh's directories on PATH and the hook calls `tr`. Fixed in the test helper (fb163c1) plus a real bug: the Go env file lives under `~/Library/Application Support/go/env` on macOS.
+- Baseline (same code vs itself, `py -3.12 bench/bench.py --against e332152`, 40 pairs): all rows within +-0.3% on the median.
+- Attribution present in `--version`, README, pyproject, NOTICE, LICENSE (Apache-2.0). `__version__` is still 0.2.1 (bump belongs to the release).
+
+### Fixture set (synthetic; nothing copied)
+`tests/precision_fixtures.py` (51 cases, each with a human and an agent expectation and the action the pre-Phase-4 gate gave), run by `bench/precision.py`.
+Before (e332152) vs after, same fixtures:
+- human: 44 findings (6 block, 23 fix, 15 warn), 28/51 expectations met  ->  30 findings (5 block, 12 fix, 13 warn), 51/51.
+- agent: 44 findings (6 block, 23 fix, 15 warn), 41/51 met  ->  41 findings (5 block, 23 fix, 13 warn), 51/51. The agent loses only the marker-only key and `$VAR` references; fix count is unchanged (a bare `//nolint` moved from warn to fix).
+Commands: `py -3.12 bench/precision.py [--agent] [--against e332152]`.
+
+### Design: how agents stay strict
+`Finding.human` (action for a human's change) is applied in `apply_policy`, after the per-file result cache, so a clean verdict cached for a person is never reused for an agent. Generated-file skipping is also there and is people-only (an agent could add the header itself).
+
+### Independent review (read-only sub-agent) and what changed
+Found: identifier-label and `$word` exemptions applied to agents; import/`.sql` duplicate relief applied to agents and an over-broad `use` regex; comment-prefixed PEM keys missed; doc placeholders softened on `.txt`/sensitive paths; test relief overrode a lowered limit; skip/SQL softening too eager; a failed fixed-version lookup cached as "no fix". All fixed with tests. Not changed (documented): `duplicate_lines = 6` set explicitly is indistinguishable from the default for people; `release_tuple` ignores pre-release text so "fixed in" can be imprecise; only the first 5 advisories are consulted for the fix.
+
+### Item 13 profile (check --all, scenario G, 508 files, cProfile)
+Before: 3.6 s profiled / 1.72 s wall. `path_matches` 35,394 calls = 1.55 s cumulative, called per added line from `secret_findings` (ignored/is_test depend only on the path). Memoized -> 1.37 s wall. Remaining time is diffuse (blob reads 0.2 s, AST parse 0.2 s, secret regexes); a literal prefilter in front of the 23 provider patterns was added (verified a superset by test). Registry/network was not involved (`--offline`).
+
+### Tests run (all after the final code change unless noted)
+- Windows 11: 3.13 and 3.14: 689 passed, 11 skipped. 3.11 and 3.12: 688 passed + 1 failed on the run made before the fix of my own timing-dependent test (`test_max_findings_cuts_the_list_but_not_the_verdict` compared a line containing elapsed seconds); fixed in 6bb9122, the test passes on 3.12 alone; the full 3.11/3.12 Windows runs were NOT repeated after the fix.
+- Ubuntu (WSL2): 3.11, 3.12, 3.13, 3.14: 699 passed, 1 skipped each (after the fix).
+- NOT run: macOS (no runner here), GitHub Actions for this branch.
+
+### Bench vs e332152 (`py -3.12 bench/bench.py --against e332152`, 40 pairs, gates PASS)
+startup +2.0% med; A +2.2%; B -3.2%; C -17.1%; D +0.7%; E +0.2%; F -1.8%; G -22.8% (G, F recorded only). Git calls and blobs equal for A-E. The machine was slower in this run than in the baseline run (A 291 ms vs 259 ms), so A/startup +2% is inside the run's own noise but above the +-0.3% self-vs-self band; first 4A bench (before review fixes) gave startup +2.4%, A +1.5%.

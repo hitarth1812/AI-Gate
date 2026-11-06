@@ -31,9 +31,11 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 WORK = os.path.join(HERE, ".work")
-FIXTURE_VERSION = "4"            # bump when generated content changes; forces a rebuild
-SCENARIOS = ("A", "B", "C", "D", "E", "F")
-INFO_SCENARIOS = ("F",)          # recorded, not gated: F is the polyglot commit (Go + TypeScript + Python)
+FIXTURE_VERSION = "5"            # bump when generated content changes; forces a rebuild
+SCENARIOS = ("A", "B", "C", "D", "E", "F", "G")
+# recorded, not gated: F is the polyglot commit (Go + TypeScript + Python), G is `check --all` over a 500-file polyglot repo
+INFO_SCENARIOS = ("F", "G")
+G_FILES = 500
 BASELINE_ENTRIES = 1000          # scenario E: the A change with a baseline of this size present
 COLD = ("A", "C")                # also measured with each EXTRA flag below, not gated
 EXTRA = {"cold": "--no-cache",   # result and lookup caches off
@@ -223,7 +225,28 @@ def init_large(repo, n):
     git(repo, "read-tree", "HEAD")          # index matches HEAD; the files are not checked out
 
 
+def init_polyglot(repo, n):
+    """Scenario G: a committed repository of n source files in four languages (an audit target, nothing staged)."""
+    init_small(repo)
+    write(repo, "svc/go.mod", "module example.com/svc\n\ngo 1.21\n\nrequire github.com/pkg/errors v0.9.1\n")
+    each = n // 5
+    for i in range(each):
+        write(repo, f"app/gen/m{i:03d}.py", py_module(i, 20))
+        write(repo, f"web/gen/m{i:03d}.js", js_module(i, 20))
+        write(repo, f"web/ts/m{i:03d}.ts", ts_module(i, 30))
+        write(repo, f"svc/pkg{i % 20:02d}/m{i:03d}.go", go_module(i, 30))
+        write(repo, f"svc/pkg{i % 20:02d}/m{i:03d}_test.go", go_test_module(i))
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "polyglot tree")
+
+
+def scenario_args(s):
+    return ["check", "--all", "--offline", "--no-commands", "--format", "json"] if s == "G" else         ["check", "--staged", "--offline", "--no-commands", "--format", "json"]
+
+
 def stage_change(repo, scenario):
+    if scenario == "G":
+        return
     if scenario in ("A", "D"):
         write(repo, "app/orders.py", py_module(0, 20))
     elif scenario == "B":
@@ -279,7 +302,7 @@ def build_fixtures(force=False) -> dict:
     os.makedirs(os.path.join(WORK, "home"))
     for s, repo in repos.items():
         t = time.monotonic()
-        (init_large(repo, D_FILES) if s == "D" else init_small(repo))
+        (init_large(repo, D_FILES) if s == "D" else init_polyglot(repo, G_FILES) if s == "G" else init_small(repo))
         if s == "E":
             write_baseline(repo, BASELINE_ENTRIES)        # committed first: staged checks read it from the index
         stage_change(repo, "A" if s == "E" else s)
@@ -342,7 +365,7 @@ def measure(script, runs, py) -> dict:
         run_once(hook, ROOT, env)                                      # fills the bytecode cache
         result["startup-hook"] = summarize([run_once(hook, ROOT, env)[0] for _ in range(runs)])
     for s in SCENARIOS:
-        cmd = [py, script, "check", "--staged", "--offline", "--no-commands", "--format", "json"]
+        cmd = [py, script, *scenario_args(s)]
         _, warm = run_once(cmd, repos[s], env)                         # warm the OS and registry caches
         verdict = json.loads(warm.stdout)["verdict"]
         _, prof = run_once(cmd, repos[s], {**env, "AIGATE_PROFILE": "1"})
@@ -483,7 +506,7 @@ def hook_style(script):
 def command_for(measure, py, script):
     """Commands run the way an installed hook runs them (through the bytecode loader where the build has one);
     `startup-direct` is `python script --version`, the way a person types it."""
-    args = ["--version"] if measure.startswith("startup") else         ["check", "--staged", "--offline", "--no-commands", "--format", "json"]
+    args = ["--version"] if measure.startswith("startup") else scenario_args(measure)
     loader = None if measure == "startup-direct" else hook_style(script)
     return [py, "-P", "-c", loader, script, *args] if loader else [py, script, *args]
 
