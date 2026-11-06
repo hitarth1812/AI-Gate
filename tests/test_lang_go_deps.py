@@ -448,3 +448,77 @@ def test_go_env_file_location_follows_the_platform_config_dir(tmp_path, monkeypa
     monkeypatch.setattr(aigate.sys, "platform", "darwin")
     monkeypatch.setattr(aigate, "_GO_ENV_FILE", {})
     assert aigate.go_setting("GOPRIVATE") == "corp.example/*"
+
+
+# ---------------------------------------------------------------- Phase 4A: vulnerable dependencies
+
+def test_a_vulnerable_direct_requirement_names_the_fix_and_the_reachability_tool(repo):
+    project(repo)
+    res = change(repo, {"go.mod": BASE_MOD + "require github.com/gin-gonic/gin v1.7.0\n"})
+    (f,) = find(res, "deps.vulnerable")
+    assert "fixed in v1.9.1" in f["message"] and "govulncheck ./..." in f["hint"] and "does not run it" in f["hint"]
+    assert f["action"] == "fix"
+
+
+def test_an_indirect_vulnerable_requirement_is_a_warning_for_people_and_a_fix_for_agents(repo):
+    project(repo)
+    mod = BASE_MOD + "require github.com/indirect/dep v1.0.0 // indirect\n"
+    res = change(repo, {"go.mod": mod})
+    assert [f["action"] for f in find(res, "deps.vulnerable")] == ["warn"]
+    agent = repo.check("--offline", env={"CLAUDECODE": "1"})
+    assert [f["action"] for f in find(agent, "deps.vulnerable")] == ["fix"]
+
+
+def test_incompatible_versions_are_judged_as_written_and_a_fixed_one_is_not_flagged(repo):
+    project(repo)
+    bad = change(repo, {"go.mod": BASE_MOD + "require github.com/old/jwt v3.2.0+incompatible\n"})
+    assert [f["message"] for f in find(bad, "deps.vulnerable")] and "fixed in v4.0.0+incompatible" in find(bad, "deps.vulnerable")[0]["message"]
+    good = change(repo, {"go.mod": BASE_MOD + "require github.com/old/jwt v4.0.0+incompatible\n"})
+    assert not find(good, "deps.vulnerable") and not find(good, "deps.hallucinated")
+
+
+def test_a_pseudo_version_at_or_after_the_fix_is_not_flagged(repo):
+    project(repo)
+    old = change(repo, {"go.mod": BASE_MOD + "require golang.org/x/fakecrypto v0.0.0-20200622213623-75b288015ac9\n"})
+    assert find(old, "deps.vulnerable")
+    new = change(repo, {"go.mod": BASE_MOD + "require golang.org/x/fakecrypto v0.0.0-20220315160706-3147a52a75dd\n"})
+    assert not find(new, "deps.vulnerable") and not find(new, "deps.hallucinated")
+
+
+def osv_record(*ranges, name="golang.org/x/crypto"):
+    return {"affected": [{"package": {"name": name, "ecosystem": "Go"}, "ranges": [{"type": t, "events": ev} for t, ev in ranges]}]}
+
+
+def test_osv_fixed_reads_the_lowest_fix_above_the_pinned_version():
+    fixed = aigate.osv_fixed
+    rec = osv_record(("SEMVER", [{"introduced": "0"}, {"fixed": "0.52.0"}]))
+    assert fixed(rec, "Go", "golang.org/x/crypto", "v0.31.0") == "v0.52.0"
+    assert fixed(rec, "Go", "golang.org/x/crypto", "v0.52.0") is None          # at the fix: nothing to upgrade to
+    assert fixed(rec, "Go", "golang.org/x/crypto", "v0.60.1") is None          # after it: never reported
+    two = osv_record(("SEMVER", [{"introduced": "0"}, {"fixed": "1.2.0"}, {"introduced": "2.0.0"}, {"fixed": "2.1.1"}]))
+    assert fixed(two, "Go", "golang.org/x/crypto", "v2.0.5") == "v2.1.1"
+    assert fixed(two, "Go", "golang.org/x/crypto", "v1.0.0") == "v1.2.0"
+
+
+def test_osv_fixed_ignores_records_it_cannot_use():
+    fixed = aigate.osv_fixed
+    assert fixed(osv_record(("SEMVER", [{"introduced": "0"}, {"last_affected": "3.2.0"}])), "Go", "golang.org/x/crypto", "v3.2.0") is None
+    assert fixed(osv_record(("GIT", [{"fixed": "abc123"}])), "Go", "golang.org/x/crypto", "v1.0.0") is None
+    assert fixed(osv_record(("SEMVER", [{"fixed": "9.0.0"}]), name="other/pkg"), "Go", "golang.org/x/crypto", "v1.0.0") is None
+    assert fixed({"affected": "nonsense"}, "Go", "x", "v1.0.0") is None and fixed(None, "Go", "x", "v1.0.0") is None
+    pseudo = osv_record(("ECOSYSTEM", [{"introduced": "0"}, {"fixed": "0.0.0-20220315160706-3147a52a75dd"}]))
+    assert fixed(pseudo, "Go", "golang.org/x/crypto", "v0.0.0-20200622213623-75b288015ac9") is None   # same release numbers
+
+
+def test_the_registry_asks_osv_for_the_advisories_and_takes_the_highest_fix(monkeypatch):
+    reg = aigate.Registry(offline=False, use_cache=False)
+    reg.mem[("osv", "go", "golang.org/x/crypto", "v0.17.0")] = ["GHSA-1", "GHSA-2"]
+    records = {"GHSA-1": osv_record(("SEMVER", [{"fixed": "0.20.0"}])), "GHSA-2": osv_record(("SEMVER", [{"fixed": "0.35.0"}]))}
+    asked = []
+
+    def http(url, method="GET", body=None):
+        asked.append(url)
+        return 200, json.dumps(records[url.rsplit("/", 1)[1]]).encode()
+    monkeypatch.setattr(reg, "_http", http)
+    assert reg.fixed_in("go", "golang.org/x/crypto", "v0.17.0") == "v0.35.0"
+    assert sorted(asked) == ["https://api.osv.dev/v1/vulns/GHSA-1", "https://api.osv.dev/v1/vulns/GHSA-2"]

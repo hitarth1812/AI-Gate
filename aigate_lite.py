@@ -331,6 +331,29 @@ def age_days(value):
     return None if t is None else (utcnow() - t).total_seconds() / 86400
 
 
+def osv_fixed(detail, ecosystem, name, current):
+    """The lowest `fixed` release above `current` that an OSV advisory lists for this package (SEMVER / ECOSYSTEM
+    ranges); None when it lists none or the versions cannot be compared. Pre-release and pseudo-version text is
+    ignored: only the release numbers are compared."""
+    cur, best = release_tuple(current), None
+    want = norm_py(name) if ecosystem == "PyPI" else name.lower()
+    for a in (detail.get("affected") or []) if isinstance(detail, dict) else []:
+        pkg = a.get("package") if isinstance(a, dict) else None
+        if not isinstance(pkg, dict) or pkg.get("ecosystem") != ecosystem or not isinstance(pkg.get("name"), str):
+            continue
+        if (norm_py(pkg["name"]) if ecosystem == "PyPI" else pkg["name"].lower()) != want:
+            continue
+        for r in a.get("ranges") or []:
+            for ev in (r.get("events") or []) if isinstance(r, dict) and r.get("type") in ("SEMVER", "ECOSYSTEM") else []:
+                fx = ev.get("fixed") if isinstance(ev, dict) else None
+                t = release_tuple(fx) if isinstance(fx, str) else None
+                if t and cur and _cmp(t, cur) > 0 and (best is None or _cmp(t, release_tuple(best)) < 0):
+                    best = fx
+    if best and ecosystem == "Go" and not best.startswith("v"):
+        best = "v" + best
+    return best
+
+
 def release_tuple(v):
     m = re.match(r"^\s*v?(\d+(?:\.\d+)*)", str(v or ""))
     return tuple(int(x) for x in m.group(1).split(".")) if m else None
@@ -750,7 +773,10 @@ DEFAULT_CONFIG = {
                                  "lefthook.yml", "go.work", "go.work.sum"],
     },
     "limits": {"function_lines": 60, "complexity": 10, "loop_depth": 3, "file_lines": 800,
-               "diff_added_lines": 400, "diff_files": 25, "duplicate_lines": 6},
+               "diff_added_lines": 400, "diff_files": 25, "duplicate_lines": 6,
+               # what a person's change to a test file may reach before size findings apply (an AI agent's change is
+               # always held to the limits above); a table-driven test's data rows count a quarter each
+               "tests": {"function_lines": 120, "complexity": 15, "file_lines": 1500}},
     "deps": {"new_package_days": 30, "cooldown_days": 5, "first_party": [], "private": [],
              "trusted_sources": [], "import_map": {}, "typosquat_min_weekly_downloads": 1000},
     "provenance": {"agent_env": [], "default": "human"},
@@ -916,8 +942,20 @@ def validate_config(cfg: dict, problems: list) -> None:
         for key, val in cfg[section].items():
             if isinstance(val, str) and key not in ("import_map",):
                 cfg[section][key] = [val]
+    tests = cfg["limits"].get("tests")
+    cfg["limits"]["tests"] = dict(DEFAULT_CONFIG["limits"]["tests"])
+    if isinstance(tests, dict):
+        for key, val in tests.items():
+            if key not in cfg["limits"]["tests"]:
+                problems.append(f"unknown key limits.tests.{key}")
+            elif not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                problems.append(f"limits.tests.{key} must be a positive integer")
+            else:
+                cfg["limits"]["tests"][key] = val
+    elif tests is not None:
+        problems.append("limits.tests must be a table")
     for key, val in cfg["limits"].items():
-        if not isinstance(val, int) or val <= 0:
+        if key != "tests" and (not isinstance(val, int) or val <= 0):
             problems.append(f"limits.{key} must be a positive integer")
             cfg["limits"][key] = DEFAULT_CONFIG["limits"][key]
 
@@ -1033,6 +1071,7 @@ class Finding:
     legacy_key: str | None = None  # the 0.1 key, when it differs (it used line numbers)
     base_key: str | None = None    # key before twin numbering (set by number_twins)
     twin: int = 1                  # 1 for the first finding with this rule, file and key; 2, 3, ... after it
+    human: str | None = None       # the action for a human's change, when softer than `action` (agents keep `action`)
 
     @property
     def meta(self) -> Rule:
@@ -1102,6 +1141,7 @@ class Context:
         self._texts: dict = {}
         self._asts: dict = {}
         self._lex: dict = {}
+        self._path_flags: dict = {}    # path -> (ignored, is_test): pure in the config, asked once per added line
         self.lang_notes: list = []     # "lang.fallback: ..." (shown with -v)
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
@@ -1174,13 +1214,21 @@ class Context:
         return self._lex[key]
 
     def ignored(self, path) -> bool:
-        return path_matches(path, self.cfg["paths"]["ignore"])
+        flags = self._path_flags.get(path)
+        if flags is None:
+            flags = self._path_flags[path] = [path_matches(path, self.cfg["paths"]["ignore"]), None]
+        return flags[0]
 
     def is_test(self, path) -> bool:
-        if path_matches(path, self.cfg["paths"]["tests"]):
-            return True
-        spec = language_for(path)
-        return bool(spec and spec.tests and path_matches(path, spec.tests))
+        self.ignored(path)
+        flags = self._path_flags[path]
+        if flags[1] is None:
+            if path_matches(path, self.cfg["paths"]["tests"]):
+                flags[1] = True
+            else:
+                spec = language_for(path)
+                flags[1] = bool(spec and spec.tests and path_matches(path, spec.tests))
+        return flags[1]
 
     def sensitive(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["sensitive"])
@@ -1388,7 +1436,7 @@ class Registry:
     """PyPI / npm / OSV lookups with a local cache. Every getter returns None when the answer is unknown."""
 
     TTL = {"exists": (86400, 3600), "info": (86400, 3600), "downloads": (7 * 86400, 3600), "osv": (86400, 3600),
-           "vtime": (7 * 86400, 3600)}
+           "vtime": (7 * 86400, 3600), "fixed": (86400, 3600)}
     OSV_ECOSYSTEM = {"pypi": "PyPI", "npm": "npm", "go": "Go"}
 
     def __init__(self, *, offline=False, timeout=6.0, budget=20.0, use_cache=True, fixture=None):
@@ -1423,6 +1471,10 @@ class Registry:
 
     def vulns(self, eco, name, version):
         return self.get(("osv", eco, name, version))
+
+    def fixed_in(self, eco, name, version):
+        """The lowest release above `version` that fixes the advisories OSV lists for it, "" when that cannot be told."""
+        return self.get(("fixed", eco, name, version)) or ""
 
     def version_time(self, eco, name, version):
         """Publish time of one version (Go: the proxy lists versions without times), MISSING, or None if unknown."""
@@ -1505,9 +1557,11 @@ class Registry:
         if kind == "exists":
             return entry not in (None, MISSING)
         if entry in (None, MISSING):
-            return {"info": MISSING, "downloads": 0, "osv": [], "vtime": MISSING}[kind]
+            return {"info": MISSING, "downloads": 0, "osv": [], "vtime": MISSING, "fixed": ""}[kind]
         if kind == "vtime":
             return (entry.get("versions") or {}).get(key[3]) or MISSING
+        if kind == "fixed":
+            return (entry.get("fixed") or {}).get(key[3], "")
         if kind == "info":
             return {"name": name, "created": entry.get("created"), "versions": entry.get("versions", {}),
                     "latest": entry.get("latest"), "yanked": entry.get("yanked", []),
@@ -1559,6 +1613,15 @@ class Registry:
                     return MISSING
                 when = json.loads(raw).get("Time")
                 return when if isinstance(when, str) and when else None
+            if kind == "fixed":
+                best = None
+                for vid in (self.vulns(eco, name, key[3]) or [])[:5]:        # a few advisories are enough to name a fix
+                    status, raw = self._http("https://api.osv.dev/v1/vulns/" + urllib.parse.quote(str(vid), safe=""))
+                    if status == 200:
+                        fx = osv_fixed(json.loads(raw), self.OSV_ECOSYSTEM[eco], name, key[3])
+                        if fx and (best is None or _cmp(release_tuple(fx), release_tuple(best)) > 0):
+                            best = fx           # the version that fixes all of them
+                return best or ""
             if kind == "downloads":
                 if eco == "npm":
                     status, raw = self._http("https://api.npmjs.org/downloads/point/last-week/"
@@ -2289,6 +2352,22 @@ def check_lang(ctx) -> list:
     return out
 
 
+SQL_DDL = re.compile(r"[\"'`]\s*(?:create|drop|alter|truncate|grant|revoke)\b", re.I)
+SQL_OPERAND = re.compile(r"(?:\+|,)\s*([A-Za-z_][\w.]*)\s*(?=[+,)]|$)")
+SQL_IDENT_NAME = re.compile(r"(?i)^(?:table|tbl|role|schema|db|database|column|col|idx|index|view|ident|identifier|"
+                            r"partition|tenant)s?$")
+
+
+def _sql_identifier_style(text) -> bool:
+    """A statement a test builds out of identifiers (DDL, GRANT, or variables named table/role/schema/db): they cannot be
+    bound as parameters. Judged for people only (see Finding.human); non-test code and plain values are unchanged."""
+    if SQL_DDL.search(text):
+        return True
+    names = [m.group(1).split(".")[-1] for m in SQL_OPERAND.finditer(text)]
+    names = [re.sub(r"(?i)name$", "", n) or n for n in names]
+    return bool(names) and all(SQL_IDENT_NAME.match(n) for n in names)
+
+
 def _lang_file(ctx, fc, spec) -> list:
     out, test = [], bool(spec.rules) and ctx.is_test(fc.path)
     lx = ctx.lexed(fc)
@@ -2305,7 +2384,11 @@ def _lang_file(ctx, fc, spec) -> list:
                 continue
             if rule.also is not None and not rule.also.search(lx.masked(line, (COM,))):
                 continue
-            out.append(make(rule.rule, fc.path, line, f"{rule.what}: {text.strip()[:70]}", key=text.strip()))
+            f = make(rule.rule, fc.path, line, f"{rule.what}: {text.strip()[:70]}", key=text.strip())
+            if test and rule.rule == "security.sql_injection" and _sql_identifier_style(text):
+                f.human = "warn"
+                f.hint = "identifiers can't be parameterised; quote with the driver's identifier helper"
+            out.append(f)
     if spec.swallow is not None:
         for line, text in fc.added.items():
             if hit(lx, spec.swallow, line, text, CODE) and re.fullmatch(r"\s*\}\s*", lx.masked(line + 1)):
@@ -2335,12 +2418,20 @@ def _structure_findings(ctx, fc, spec, lx) -> list:
             continue
         o = old.get(f.name)
         if f.length > lim["function_lines"] and (o is None or f.length > o.length):
-            out.append(make("size.function_length", fc.path, f.line,
-                            f"{f.name}() is {f.length} lines (limit {lim['function_lines']})", key=f.name))
+            made = make("size.function_length", fc.path, f.line,
+                        f"{f.name}() is {f.length} lines (limit {lim['function_lines']}"
+                        f"{_limit_note(ctx, fc, 'function_lines')})", key=f.name)
+            if ctx.is_test(fc.path):
+                made.human = test_relief(ctx, fc, "function_lines", f.length,
+                                         [lx.line(n) for n in range(f.line, f.end + 1)])
+            out.append(made)
         if f.complexity > lim["complexity"] and (o is None or f.complexity > o.complexity):
-            out.append(make("size.complexity", fc.path, f.line,
-                            f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}, estimated "
-                            "from brace structure)", key=f.name))
+            made = make("size.complexity", fc.path, f.line,
+                        f"{f.name}() has complexity {f.complexity} (limit {lim['complexity']}"
+                        f"{_limit_note(ctx, fc, 'complexity')}, estimated from brace structure)", key=f.name)
+            if ctx.is_test(fc.path):
+                made.human = test_relief(ctx, fc, "complexity", f.complexity)
+            out.append(made)
         if f.depth >= lim["loop_depth"] and (o is None or f.depth > o.depth):
             out.append(make("perf.nested_loops", fc.path, f.deepest,
                             f"{f.name}() nests {f.depth} loops (≈O(n^{f.depth}), estimated from brace structure)",
@@ -2383,7 +2474,7 @@ def _lang_tests(ctx) -> list:
             removed_names = _test_names(spec, old_lx, old_rows)
             for line, text in fc.added.items():
                 if spec.test_skip and hit(lx, spec.test_skip, line, text, CODE):
-                    out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
+                    out.append(skip_finding(fc, line, text, _before(lx, fc, line)))
             if spec.test_assert:
                 lost = _count(old_lx, spec.test_assert, old_rows) - _count(lx, spec.test_assert, fc.added.items())
                 if lost > 0:
@@ -2428,6 +2519,11 @@ PROVIDER_SECRETS = [(label, re.compile(rx)) for label, rx in [
     ("Azure storage key", r"(AccountKey=[A-Za-z0-9+/]{86}==)"),
     ("Private key", r"(-----BEGIN (?:[A-Z0-9]+ )*PRIVATE KEY(?: BLOCK)?-----)"),
 ]]
+# every provider pattern above needs one of these literals, so a line with none of them cannot match any of them
+# (case-insensitively, which only widens it); checked once per line before running the pattern list
+PROVIDER_LITERALS = re.compile(r"(?i)AKIA|ASIA|ABIA|ACCA|aws|gh[pousr]_|github_pat_|glpat-|xox|hooks\.slack\.com|discord|"
+                               r"_live_|AIza|GOCSPX-|sk-|hf_|npm_|pypi-|SG\.|:AA|shp(?:at|ss|ca|pa)_|do[opr]_v1_|AccountKey=|"
+                               r"-----BEGIN")
 DOC_PLACEHOLDER = re.compile(r"(?i)example|xxxx|0{8}|12345678|abcdefgh")
 CRED_WORD = (r"(?:pass(?:word|wd|phrase)?|pwd|secret|token|api[_.-]?key|apikey|access[_.-]?key|private[_.-]?key|"
              r"client[_.-]?secret|auth[_.-]?(?:key|token)|credentials?|bearer)")
@@ -2455,9 +2551,17 @@ DEFAULT_PASSWORDS = {"postgres", "password", "root", "admin", "secret", "example
                      "changeme", "mysql", "redis"}
 
 
+VAR_REF = re.compile(r"\$\$?(?:\{[A-Za-z_]\w*[^}]*\}|[A-Za-z_]\w*)|%[A-Za-z_]\w*%")      # $VAR ${VAR} $$VAR %VAR%
+LABEL_VALUE = re.compile(r"[a-z]{2,}(?:[_-][a-z]{2,})+")        # reset_password, missing-token: a name, not a secret
+DOC_PATH = re.compile(r"(?i)(?:^|/)(?:docs?|documentation)/|\.(?:md|markdown|rst|adoc|txt)$|(?:^|/)readme[^/]*$")
+DOC_DEV_VALUE = re.compile(r"(?i)^(?:dev|local|demo|sample|test)[_-]")
+
+
 def _looks_like_secret(name: str, val: str) -> bool:
     if NAME_EXCLUDE.search(name) or PLACEHOLDER_VALUE.search(val):
         return False
+    if VAR_REF.fullmatch(val) or (len(val) <= 40 and LABEL_VALUE.fullmatch(val)):
+        return False                                                  # a reference to a variable, or an identifier label
     if re.fullmatch(r"[A-Z][A-Z0-9_]{3,}", val):                    # the name of an env var, not its value
         return False
     if re.fullmatch(r"[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+", val):       # a dotted reference
@@ -2467,32 +2571,53 @@ def _looks_like_secret(name: str, val: str) -> bool:
     return entropy(val) >= 3.0
 
 
+def _pem_body(fc, line_no, rest) -> bool:
+    """Whether a private-key BEGIN marker is followed (on the same line or in the next added lines) by a base64 body of
+    plausible length: a marker inside a string that only talks about keys is not a key."""
+    window = [rest]
+    for k in range(1, 12):
+        more = fc.added.get(line_no + k)
+        if more is None:
+            break
+        window.append(more)
+    joined = "\n".join(window)
+    if re.search(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY", joined):         # the block is closed: a key, however short
+        return True
+    flat = re.sub(r"\\[nrt]|[\s\"'`+\\,;]", "", joined)
+    return re.search(r"[A-Za-z0-9+/=]{60,}", flat) is not None
+
+
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
     import hashlib
     found, seen = [], set()
 
-    def add(rule, val, what, action=None):
+    def add(rule, val, what, action=None, human=None):
         if val in seen:
             return
         seen.add(val)
-        found.append(make(rule, fc.path, line_no, f"{what}{where}", action=action,
-                          key=hashlib.sha1(val.encode("utf-8", "replace")).hexdigest()))
+        f = make(rule, fc.path, line_no, f"{what}{where}", action=action,
+                 key=hashlib.sha1(val.encode("utf-8", "replace")).hexdigest())
+        f.human = human
+        found.append(f)
 
-    for label, rx in PROVIDER_SECRETS:
+    for label, rx in PROVIDER_SECRETS if PROVIDER_LITERALS.search(text) else ():
         for m in rx.finditer(text):
             val = m.group(1)
             if label == "Private key":
-                add("secrets.hardcoded", val, "private key block")
+                if DOC_PATH.search(fc.path) or _pem_body(fc, line_no, text[m.end():]):   # docs: a pasted header counts
+                    add("secrets.hardcoded", val, "private key block")
             elif not DOC_PLACEHOLDER.search(val):
                 add("secrets.hardcoded", val, f"{label} ({redact(val)})")
     lname = fc.name.lower()
     if found or ctx.ignored(fc.path) or is_lockfile(fc.path) or lname == ".env" or lname.startswith(".env."):
         return found                                              # env files are judged as a whole by secrets.env_file
     soft = "warn" if ctx.is_test(fc.path) else None              # fixtures in tests are usually fake
+    docs = bool(DOC_PATH.search(fc.path))
     for m in GENERIC_ASSIGN.finditer(text):
         if _looks_like_secret(m.group("name"), m.group("val")):
-            add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft)
+            add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft,
+                "pass" if docs and DOC_DEV_VALUE.match(m.group("val")) else None)
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
@@ -3606,6 +3731,25 @@ def go_manifest(ctx, fc, pending) -> list:
     return out
 
 
+REACHABILITY = {"go": "govulncheck ./...", "npm": "npm audit", "pypi": "pip-audit", "cargo": "cargo audit"}
+
+
+def vulnerable_finding(ctx, dep_eco, name, label, pinned, version, path, line, vulns, indirect=False):
+    """deps.vulnerable with the fixed version in the message and a pointer to the ecosystem's reachability tool (a hint
+    only, nothing is run). A transitive requirement is a warning for people; a direct one stays a fix, and an AI agent's
+    change keeps the fix either way."""
+    fixed = ctx.registry.fixed_in(dep_eco, name, version)
+    shown = ", ".join(vulns[:4]) + ("…" if len(vulns) > 4 else "")
+    f = make("deps.vulnerable", path, line,
+             f"{label} {pinned} has known vulnerabilities: {shown}" + (f"; fixed in {fixed}" if fixed else ""),
+             key=f"{name}@{pinned}",
+             hint=RULES["deps.vulnerable"].hint + f" Check whether your code reaches it with `{REACHABILITY[dep_eco]}` "
+                  "(aigate-lite does not run it)." + (" Requirement marked // indirect." if indirect else ""))
+    if indirect:
+        f.human = "warn"
+    return f
+
+
 def go_evaluate(ctx, dep, old, path) -> list:
     """Registry findings for one go.mod requirement. Versions in go.mod are exact (minimum version selection)."""
     out, reg, dcfg, name = [], ctx.registry, ctx.cfg["deps"], dep.name
@@ -3615,8 +3759,7 @@ def go_evaluate(ctx, dep, old, path) -> list:
                             "proxy (marked // indirect)", key=f"{name}@{dep.spec}"))
         vulns = reg.vulns("go", name, dep.spec)
         if vulns:
-            out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
-                            f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+            out.append(vulnerable_finding(ctx, "go", name, name, dep.spec, dep.spec, path, dep.line, vulns, indirect=True))
         return out
     info = reg.info("go", name)
     if info is None:
@@ -3643,8 +3786,7 @@ def go_evaluate(ctx, dep, old, path) -> list:
                         key=f"{name}@{dep.spec}"))
     vulns = reg.vulns("go", name, dep.spec)
     if vulns:
-        out.append(make("deps.vulnerable", path, dep.line, f"{name} {dep.spec} has known vulnerabilities: "
-                        f"{', '.join(vulns[:4])}{'…' if len(vulns) > 4 else ''}", key=f"{name}@{dep.spec}"))
+        out.append(vulnerable_finding(ctx, "go", name, name, dep.spec, dep.spec, path, dep.line, vulns))
     return out
 
 
@@ -3832,9 +3974,7 @@ def evaluate_dep(ctx, dep, old, path) -> list:
                                 key=f"{name}@{pinned}"))
         vulns = reg.vulns(dep.eco, name, version)
         if vulns:
-            shown = ", ".join(vulns[:4]) + ("…" if len(vulns) > 4 else "")
-            out.append(make("deps.vulnerable", path, dep.line, f"{label} {pinned} has known vulnerabilities: {shown}",
-                            key=f"{name}@{pinned}"))
+            out.append(vulnerable_finding(ctx, dep.eco, name, label, pinned, version, path, dep.line, vulns))
         lt, pt = release_tuple(latest), release_tuple(pinned)
         if lt and pt and lt[0] > pt[0]:
             out.append(make("deps.outdated", path, dep.line, f"{label} is pinned to {pinned}; the latest is {latest}",
@@ -3974,6 +4114,28 @@ def check_deps(ctx) -> list:
 # --------------------------------------------------------------------------- checks: tests
 
 SKIP_MARKS = {"skip", "skipif", "xfail", "skipunless", "expectedfailure"}
+# A skip that depends on the environment (a service that is not reachable, short mode, another OS, a missing binary) is
+# a warning for people, with a hint to make CI fail when it fires. A skip with no condition, or one whose own message
+# says TODO / flaky / broken, stays a fix. An AI agent's change keeps the old action for every skip.
+SKIP_ENV = re.compile(r"(?i)not set|\bunset\b|no reachable|unreachable|unavailable|not available|short mode|-short\b|"
+                      r"\bGOOS\b|testing\.Short|not installed|missing (?:binary|executable|tool)|not found in \$?PATH|"
+                      r"\brequires? (?:docker|network|a database|an? env)|no (?:network|docker|database|internet)|"
+                      r"LookPath|os\.(?:Getenv|LookupEnv)|runtime\.GOOS|sys\.platform|skipif")
+SKIP_BAD = re.compile(r"(?i)\b(?:todo|fixme|flaky|broken|hack|xxx|disabled|temporarily|wip|fails?|failing)\b")
+SKIP_HINT = "make CI fail when this skip fires (e.g. an env var that turns the skip into a failure)"
+
+
+def _before(lx, fc, line) -> str:
+    """The two lines above `line` (the `if` that guards a skip)."""
+    get = lx.line if lx is not None else (lambda n: fc.added.get(n, ""))
+    return get(line - 2) + "\n" + get(line - 1)
+
+
+def skip_finding(fc, line, text, before="") -> Finding:
+    f = make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip())
+    if SKIP_ENV.search(before + "\n" + text) and not SKIP_BAD.search(text):
+        f.human, f.hint = "warn", SKIP_HINT
+    return f
 ASSERT_CALLS = {"pytest.raises", "pytest.warns", "pytest.deprecated_call", "pytest.fail", "self.fail"}
 HARNESS_HOOKS = {"pytest_runtest_makereport", "pytest_runtest_call", "pytest_runtest_protocol", "pytest_runtest_setup",
                  "pytest_runtest_teardown", "pytest_collection_modifyitems", "pytest_report_teststatus",
@@ -4172,7 +4334,10 @@ def check_tests(ctx) -> list:
             o = old.get(q)
             if o is None:
                 if n.marks:
-                    out.append(make("tests.skip_added", fc.path, n.line, f"new test {q} is marked {', '.join(sorted(n.marks))}", key=q))
+                    f = make("tests.skip_added", fc.path, n.line, f"new test {q} is marked {', '.join(sorted(n.marks))}", key=q)
+                    if n.marks <= {"skipif"}:
+                        f.human, f.hint = "warn", SKIP_HINT
+                    out.append(f)
                 elif n.asserts == 0:
                     out.append(make("tests.no_assertions", fc.path, n.line, f"new test {q} has no assertions", key=q))
                 continue
@@ -4182,7 +4347,10 @@ def check_tests(ctx) -> list:
                 out.append(make("tests.assertions_removed", fc.path, n.line,
                                 f"{q}: parametrized cases {o.cases} → {n.cases}", key=q + ":cases"))
             if n.marks - o.marks:
-                out.append(make("tests.skip_added", fc.path, n.line, f"{q}: now {', '.join(sorted(n.marks - o.marks))}", key=q))
+                f = make("tests.skip_added", fc.path, n.line, f"{q}: now {', '.join(sorted(n.marks - o.marks))}", key=q)
+                if (n.marks - o.marks) <= {"skipif"}:
+                    f.human, f.hint = "warn", SKIP_HINT
+                out.append(f)
             if src_changed and (o.consts - n.consts) and (n.consts - o.consts):
                 out.append(make("tests.expected_changed", fc.path, n.line,
                                 f"{q}: expected values changed ({_fmt_consts(o.consts - n.consts)} → "
@@ -4203,7 +4371,7 @@ def check_tests(ctx) -> list:
                 if hit(lx, JS_FOCUS, line, text):
                     out.append(make("tests.focused", fc.path, line, text.strip()[:80], key=text.strip()))
                 elif hit(lx, JS_SKIP, line, text) or hit(lx, OTHER_SKIP, line, text):
-                    out.append(make("tests.skip_added", fc.path, line, text.strip()[:80], key=text.strip()))
+                    out.append(skip_finding(fc, line, text, _before(lx, fc, line)))
                 if hit(lx, JS_TRIVIAL, line, text):
                     out.append(make("tests.trivial_assert", fc.path, line, text.strip()[:80], key=text.strip()))
             if lx is None and old_lx is None:              # no lexer view: count over the joined text, as before
@@ -4320,6 +4488,36 @@ def _suppression_hit(lx, rx, line, text):
     return None
 
 
+NOLINT_NAMED = re.compile(r":\s*[A-Za-z][\w-]*(?:\s*,\s*[A-Za-z][\w-]*)*")
+SUPPRESS_REASON = re.compile(r"(?:^|\s)(?://|#|--|—)\s*\S.{2,}")
+TYPE_NAMED = re.compile(r"\[[\w\- ,.]+\]")
+WORDS_AFTER = re.compile(r"\s*[:\-—]?\s*\S+(?:\s+\S+)+")
+
+
+def _refine_suppression(rule, fc, text, m, f) -> None:
+    """A suppression that names what it silences and says why is a smaller matter than a bare one. A Go
+    `//nolint` without a named linter and a reason becomes a fix (it was a warning), for everyone; a justified
+    `# type: ignore[code]  # why`, `// @ts-ignore why` or `# pragma: no cover - why` is a warning for people only
+    (an AI agent's change keeps the fix). Security suppressions are never softened."""
+    rest = text[m.end():]
+    if rule == "suppress.lint" and fc.ext == ".go" and m.group(0).replace(" ", "") == "//nolint":
+        named = NOLINT_NAMED.match(rest)
+        if not (named and SUPPRESS_REASON.search(rest[named.end():])):
+            f.action = "fix"
+            f.hint = "name the linter and say why: //nolint:<linter> // <reason>"
+    elif rule == "suppress.type":
+        marker = m.group(0)
+        if "ignore" in marker and marker.lstrip("# \t").startswith(("type", "pyright")):
+            ok = (n := TYPE_NAMED.match(rest)) is not None and SUPPRESS_REASON.search(rest[n.end():]) is not None
+        else:
+            ok = WORDS_AFTER.match(rest) is not None
+        if ok:
+            f.human = "warn"
+    elif rule == "suppress.coverage":
+        if SUPPRESS_REASON.search(rest) or re.match(r"\s*[:\-—]\s*\S.{2,}", rest):
+            f.human = "warn"
+
+
 def _suppressions_file(ctx, fc) -> list:
     out = []
     before = Counter()
@@ -4337,8 +4535,10 @@ def _suppressions_file(ctx, fc) -> list:
                     before[rule] -= 1            # the same suppression existed on an edited line
                 else:
                     marker = m.group(0).strip()                  # key: the whole line, so each one is distinct
-                    out.append(make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
-                                    legacy_key=marker))
+                    f = make(rule, fc.path, line, f"`{marker}` added", key=f"{marker}:{' '.join(text.split())}",
+                             legacy_key=marker)
+                    _refine_suppression(rule, fc, text, m, f)
+                    out.append(f)
                 break
         cast = hit(lx, TYPE_CAST, line, text, CODE) if fc.ext in TS_EXTS else None
         if cast and not text.lstrip().startswith("//"):
@@ -4663,6 +4863,29 @@ def check_python(ctx) -> list:
     return out
 
 
+ROW_LINE = re.compile(r"\s*(?:\{.*\}|\(.*\)|\[.*\]),?\s*(?:(?://|#).*)?")     # one data row of a table-driven test
+ROW_WEIGHT = 0.25
+
+
+def table_rows(lines) -> int:
+    return sum(1 for t in lines if ROW_LINE.fullmatch(t))
+
+
+def test_relief(ctx, fc, key, measured, lines=None) -> str | None:
+    """"off" when a person's change to a test file stays within [limits.tests] (table rows count a quarter each);
+    the finding itself is made against the general limit, so a cached clean verdict never depends on who commits."""
+    if not ctx.is_test(fc.path):
+        return None
+    lim = ctx.cfg["limits"]
+    if lines is not None:
+        measured -= table_rows(lines) * (1 - ROW_WEIGHT)
+    return "off" if measured <= max(lim[key], lim["tests"][key]) else None
+
+
+def _limit_note(ctx, fc, key) -> str:
+    return f"; {ctx.cfg['limits']['tests'][key]} for people in test files" if ctx.is_test(fc.path) else ""
+
+
 def _python_file(ctx, fc) -> list:
     out = []
     lim = ctx.cfg["limits"]
@@ -4699,11 +4922,18 @@ def _python_file(ctx, fc) -> list:
         length, cx, depth, scan = _fn_metrics(fn)
         old = old_metrics.get(qual)
         if length > lim["function_lines"] and (old is None or length > old[0]):
-            out.append(make("size.function_length", fc.path, fn.lineno,
-                            f"{qual}() is {length} lines (limit {lim['function_lines']})", key=qual))
+            f = make("size.function_length", fc.path, fn.lineno,
+                     f"{qual}() is {length} lines (limit {lim['function_lines']}{_limit_note(ctx, fc, 'function_lines')})",
+                     key=qual)
+            if test:
+                f.human = test_relief(ctx, fc, "function_lines", length, (ctx.new_text(fc) or "").split("\n")[fn.lineno - 1:end])
+            out.append(f)
         if cx > lim["complexity"] and (old is None or cx > old[1]):
-            out.append(make("size.complexity", fc.path, fn.lineno,
-                            f"{qual}() has complexity {cx} (limit {lim['complexity']})", key=qual))
+            f = make("size.complexity", fc.path, fn.lineno,
+                     f"{qual}() has complexity {cx} (limit {lim['complexity']}{_limit_note(ctx, fc, 'complexity')})", key=qual)
+            if test:
+                f.human = test_relief(ctx, fc, "complexity", cx)
+            out.append(f)
         if depth >= lim["loop_depth"] and (old is None or depth > old[2]):
             deepest = max(scan.loops, key=len)
             out.append(make("perf.nested_loops", fc.path, deepest[-1][0],
@@ -4924,7 +5154,10 @@ def check_files(ctx) -> list:
             old = ctx.old_text(fc)
             n_old = len(old.splitlines()) if old else 0
             if n_new > lim["file_lines"] and n_old <= lim["file_lines"]:
-                out.append(make("size.file_length", fc.path, None, f"{n_new} lines (limit {lim['file_lines']})", key=fc.path))
+                f = make("size.file_length", fc.path, None,
+                         f"{n_new} lines (limit {lim['file_lines']}{_limit_note(ctx, fc, 'file_lines')})", key=fc.path)
+                f.human = test_relief(ctx, fc, "file_lines", n_new, new.splitlines())
+                out.append(f)
     if not ctx.merge and not ctx.full and (total_added > lim["diff_added_lines"] or files > lim["diff_files"]):
         out.append(make("size.diff_budget", "(commit)", None,
                         f"+{total_added} lines across {files} files (limits: {lim['diff_added_lines']} lines, "
@@ -4932,19 +5165,35 @@ def check_files(ctx) -> list:
     return out
 
 
+# Copy-paste detection ignores import/use blocks (every file in a package lists similar ones), SQL files (migrations
+# repeat their column lists on purpose) and, for people, blocks shorter than DUP_HUMAN_MIN meaningful lines when the
+# limit was left at its default; an AI agent's change keeps the old, tighter default.
+DUP_HUMAN_MIN = 8
+IMPORT_OPEN = re.compile(r"(?:pub\s+)?(?:import|use|from\s+[\w.]+\s+import)\b[^;]*[({]\s*$")
+IMPORT_CLOSE = re.compile(r"[)}][^;]*;?\s*$")
+
+
 def check_duplicates(ctx) -> list:
     import hashlib
     n = ctx.cfg["limits"]["duplicate_lines"]
-    files = [fc for fc in ctx.code_changes(CODE_EXTS, tests=False) if fc.added]
+    if n == DEFAULT_CONFIG["limits"]["duplicate_lines"] and not ctx.agent:
+        n = DUP_HUMAN_MIN
+    files = [fc for fc in ctx.code_changes(CODE_EXTS, tests=False) if fc.added and fc.ext != ".sql"]
     rows_by, index = {}, defaultdict(list)
     skip = re.compile(r"[{}()\[\];,]+|(?:else|try|finally|pass|break|continue|return|end)\s*:?;?")
     for fc in files:
         text = ctx.new_text(fc)
         if text is None:
             continue
-        rows = []
+        rows, in_import = [], False
         for i, raw in enumerate(text.splitlines(), 1):
             s = re.sub(r"\s+", " ", raw.strip())
+            if in_import:
+                in_import = not IMPORT_CLOSE.match(s)
+                continue
+            if IMPORT_OPEN.match(s):
+                in_import = True
+                continue
             if len(s) >= 4 and not skip.fullmatch(s) and not s.startswith(("#", "//", "*", "/*", "import ", "from ", "@")):
                 rows.append((i, s))
         rows_by[fc.path] = rows
@@ -5066,6 +5315,27 @@ def _baseline_accepts(ctx, f, baseline, granted) -> bool:
     return True
 
 
+# Generated and vendored files: size, copy-paste, loop and placeholder findings are noise there. Secrets, dependency and
+# syntax checks still run. Only people get this: a header such as "Code generated ... DO NOT EDIT" is something an
+# AI agent could add to a file it wrote, so an agent's change is judged on every rule.
+GENERATED_SKIPS = frozenset({"size.function_length", "size.complexity", "size.file_length", "perf.nested_loops",
+                             "code.duplicate_block", "code.placeholder"})
+GENERATED_PATH = re.compile(r"(?i)(?:\.pb(?:\.gw)?\.go|_generated\.\w+|\.min\.(?:js|css)|(?:^|/)docs/docs\.go|"
+                            r"(?:^|/)(?:vendor|node_modules|third_party)/.*)$|(?:^|/)(?:vendor|node_modules)/")
+GENERATED_HEADER = re.compile(r"(?i)\bcode generated\b|@generated\b|\bdo not edit\b|\b(?:auto|automatically)[- ]?generated\b")
+
+
+def is_generated(ctx, path) -> bool:
+    memo = ctx.cache.setdefault("generated", {})
+    if path not in memo:
+        found = bool(GENERATED_PATH.search(path))
+        if not found:
+            head = "\n".join((ctx.read_new(path) or "")[:2000].split("\n")[:10])
+            found = bool(GENERATED_HEADER.search(head))
+        memo[path] = found
+    return memo[path]
+
+
 def apply_policy(findings, ctx, env) -> list:
     overrides, allows = ctx.cfg["rules"], ctx.cfg["allow"]
     env_allow = [r.strip() for r in env.get("AIGATE_ALLOW", "").split(",") if r.strip()]
@@ -5081,6 +5351,14 @@ def apply_policy(findings, ctx, env) -> list:
     legacy_used: set = set()       # a 0.1 fingerprint allows one finding per file (the first), never its copies
     out = []
     for f in sorted(unique, key=lambda f: (f.path, f.line or 0)):
+        if not ctx.agent:
+            # softer treatment that only humans get, decided here so the per-file result cache (which knows nothing
+            # about who commits) stays valid: a declared-generated file is not judged on size, copy-paste or
+            # placeholders, and some findings carry a softer action for people
+            if f.rule in GENERATED_SKIPS and is_generated(ctx, f.path):
+                continue
+            if f.human is not None:
+                f.action = f.human
         if f.rule in FIXED_RULES:
             pass
         elif f.rule in overrides:
@@ -5096,6 +5374,8 @@ def apply_policy(findings, ctx, env) -> list:
         if f.sensitive and f.meta.escalate:
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
         legacy_id = (f.rule, f.path, f.legacy_fingerprint)
+        if f.action == "pass":
+            f.allowed = "info only"                  # reported (JSON, -v) but never active: no verdict, no ranking
         for a in allows:
             if fnmatch.fnmatchcase(f.rule, a["rule"]) and (not a["paths"] or path_matches(f.path, a["paths"])) \
                     and (not a["fingerprint"] or a["fingerprint"] == f.fingerprint
@@ -5192,20 +5472,79 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
     fixes = [f for f in active if f.action == "fix"]
     if res.verdict == "block" and blocks:
         n = len(blocks)
+        if stage == "scan":
+            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then adopt " \
+                   f"a baseline so only new findings count: aigate-lite baseline{hidden}"
         return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
     if res.verdict in ("block", "fix"):
         n, rules = len(fixes), sorted({f.rule for f in fixes})
         if stage == "scan":
-            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or accept today's findings: " \
-                   f"aigate-lite baseline{hidden}"
+            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or adopt a baseline so only new " \
+                   f"findings count: aigate-lite baseline{hidden}"
         if len(rules) == 1 and res.provenance[0] != "agent" and not res.escalated:
             return f"next: fix it, or for this {act} only (humans): AIGATE_ALLOW={rules[0]} git {act} ...{hidden}"
         return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above (a false positive? aigate-lite explain " \
                f"<rule>){hidden}"
     if res.verdict == "warn":
-        return f"next: {act if stage != 'scan' else 'nothing'} {'allowed' if stage != 'scan' else 'blocks'}; " \
-               f"the warnings are worth a look{hidden}"
+        if stage == "scan":
+            return f"next: nothing blocks; adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+        return f"next: {act} allowed; the warnings are worth a look{hidden}"
     return f"next: nothing to do{hidden}" if baselined else None
+
+
+def top_dir(path: str) -> str:
+    return path.split("/", 1)[0] if "/" in path else "(root)"
+
+
+def build_summary(findings, top=10) -> dict:
+    """Counts of the active findings per rule (with the strictest action seen), per top directory, and the files with the
+    most findings."""
+    by_rule: dict = {}
+    for f in findings:
+        n, worst = by_rule.get(f.rule, (0, "warn"))
+        by_rule[f.rule] = (n + 1, f.action if ACTION_RANK[f.action] > ACTION_RANK[worst] else worst)
+    dirs, files = Counter(top_dir(f.path) for f in findings), Counter(f.path for f in findings)
+    return {"by_rule": [{"rule": r, "count": n, "action": a} for r, (n, a) in
+                        sorted(by_rule.items(), key=lambda kv: (-kv[1][0], kv[0]))],
+            "by_directory": [{"directory": d, "count": n} for d, n in sorted(dirs.items(), key=lambda kv: (-kv[1], kv[0]))],
+            "top_files": [{"path": p, "count": n} for p, n in sorted(files.items(), key=lambda kv: (-kv[1], kv[0]))[:top]]}
+
+
+def _summary_lines(active, s, sym, width) -> list:
+    data, out = build_summary(active), []
+    if not active:
+        return out
+    out.append(f"{s('dim')}by rule{s('reset')}")
+    out += [f"  {r['count']:>5}  {s(r['action'])}{r['action'].upper():<5}{s('reset')}  {r['rule']}" for r in data["by_rule"]]
+    out.append(f"{s('dim')}by directory{s('reset')}")
+    out += [f"  {d['count']:>5}  {_fit(d['directory'], width, sym)}" for d in data["by_directory"][:15]]
+    out.append(f"{s('dim')}files with the most findings{s('reset')}")
+    out += [f"  {d['count']:>5}  {_fit(d['path'], width, sym)}" for d in data["top_files"]]
+    return out
+
+
+def _rule_lines(active, s, sym, width, cap) -> list:
+    """Findings grouped by rule (strictest first), at most `cap` finding lines."""
+    out, shown = [], 0
+    by_rule: dict = defaultdict(list)
+    for f in active:
+        by_rule[f.rule].append(f)
+    order = sorted(by_rule, key=lambda r: (-max(ACTION_RANK[f.action] for f in by_rule[r]), -len(by_rule[r]), r))
+    for rule in order:
+        if cap is not None and shown >= cap:
+            break
+        out.append(f"{s('dim')}{rule} ({len(by_rule[rule])}){s('reset')}")
+        for f in sorted(by_rule[rule], key=lambda f: (-ACTION_RANK[f.action], f.path, f.line or 0)):
+            if cap is not None and shown >= cap:
+                break
+            out.append(_fit(f"  {s(f.action)}{f.action.upper():<5}{s('reset')}  {f.path}{':' + str(f.line) if f.line else ''}  "
+                            f"{f.message}", None if color_codes(s) else width, sym))
+            shown += 1
+    return out
+
+
+def color_codes(s) -> bool:
+    return bool(s("dim"))
 
 
 def _fit(text: str, width, sym) -> str:
@@ -5215,11 +5554,13 @@ def _fit(text: str, width, sym) -> str:
 
 
 def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="commit", mode="staged",
-                hook=False, width=None, sym=None) -> str:
+                hook=False, width=None, sym=None, view=None) -> str:
     """The text report. Default: compact, grouped by file. -v: the detailed view. -q: only what stops the commit.
     `width` truncates lines (only passed when stdout is a terminal, so CI logs stay complete)."""
     sym = sym or SYMBOLS_UTF
     s = (lambda k: STYLE[k]) if color else (lambda k: "")
+    view = view or {}
+    limit = view.get("max")
     active = [f for f in res.findings if not f.allowed]
     allowed = [f for f in res.findings if f.allowed and f.allowed != "baseline"]
     baselined = [f for f in res.findings if f.allowed == "baseline"]
@@ -5233,9 +5574,14 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                    f"file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']}) {sym['dot']} {prov} "
                    f"{sym['dot']} config: {res.config}{s('reset')}")
         out += [f"{s('dim')}  note: {note}{s('reset')}" for note in res.notes]
-        for f in active:
+        if view.get("summary"):
+            out += _summary_lines(active, s, sym, width)
+        for n, f in enumerate([] if view.get("summary") else active):
             if quiet and f.action == "warn":
                 continue
+            if limit is not None and n >= limit:
+                out.append(f"  +{len(active) - n} more {sym['dash']} raise --max-findings (now {limit}) or use --summary")
+                break
             out.append(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {f.path}"
                        f"{f':{f.line}' if f.line else ''}")
             out.append(f"        {f.message}")
@@ -5270,6 +5616,15 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             f"{'' if st['files'] == 1 else 's'} +{st['added']} {sym['minus']}{st['removed']} {sym['dot']} {who}")
     out.append(f"{s('dim')}{_fit(head, width, sym)}{s('reset')}")
     out += [f"{s('dim')}{_fit('  note: ' + note, width, sym)}{s('reset')}" for note in res.notes]
+    if view.get("summary") or view.get("group_by") == "rule":
+        out += _summary_lines(active, s, sym, width) if view.get("summary") else _rule_lines(active, s, sym, width, limit)
+        if limit is not None and not view.get("summary") and len(active) > limit:
+            out.append(f"  +{len(active) - limit} more {sym['dash']} raise --max-findings (now {limit}) or use --summary")
+        out.append(_summary(res, active, allowed, baselined, stage, sym, s))
+        nxt = _next_line(res, active, baselined, stage)
+        if nxt:
+            out.append(_fit(nxt, width, sym))
+        return "\n".join(out) + "\n"
     rank = {"block": 0, "fix": 1, "warn": 2}
     by_file: dict = defaultdict(list)
     for f in active:
@@ -5278,6 +5633,8 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
     lw = max((len(str(f.line or "-")) for f in active), default=1)
     rw = max((len(f.rule) for f in active), default=0)
     cap = HOOK_CAP if hook else None
+    if limit is not None:
+        cap = limit if cap is None else min(cap, limit)
     shown, hinted = 0, set()
     for path in files:
         if cap is not None and shown >= cap:
@@ -5298,7 +5655,8 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                 out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
                            f"{s('reset')}")
     if cap is not None and len(active) > shown:
-        out.append(f"  +{len(active) - shown} more {sym['dash']} run: aigate-lite check")
+        out.append(f"  +{len(active) - shown} more {sym['dash']} "
+                   + ("run: aigate-lite check" if hook else f"raise --max-findings (now {limit}) or use --summary"))
     out.append(_summary(res, active, allowed, baselined, stage, sym, s))
     nxt = _next_line(res, active, baselined, stage)
     if nxt:
@@ -5307,11 +5665,11 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
 
 
 def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str, mode="staged",
-                hook=False) -> None:
+                hook=False, view=None) -> None:
     import shutil
     width = shutil.get_terminal_size().columns if sys.stdout.isatty() else None
     sys.stdout.write(render_text(res, color=color, verbose=verbose, quiet=quiet, stage=stage, mode=mode, hook=hook,
-                                 width=width, sym=symbols(sys.stdout)))
+                                 width=width, sym=symbols(sys.stdout), view=view))
 
 
 ASCII_MAP = {"→": "->", "…": "...", "·": "-", "−": "-", "—": "-", "–": "-", "✔": "OK", "✖": "X", "▲": "!", "≈": "~",
@@ -5347,8 +5705,16 @@ def render_agent(res: Result) -> str:
     return "\n".join(out) + "\n"
 
 
-def report_json(res: Result) -> None:
+def report_json(res: Result, view=None) -> None:
+    view = view or {}
+    shown = res.findings if view.get("max") is None else res.findings[:view["max"]]
+    extra = {}
+    if view.get("summary"):
+        extra["summary"] = build_summary([f for f in res.findings if not f.allowed])
+    if len(shown) < len(res.findings):
+        extra["truncated"] = len(res.findings) - len(shown)
     print(json.dumps({
+        **extra,
         "tool": "aigate-lite", "version": __version__, "schema": 1, "label": res.label,
         "tool_info": {"name": "aigate-lite", "version": __version__, "author": __author__, "license": __license__,
                       "url": __url__},
@@ -5359,7 +5725,7 @@ def report_json(res: Result) -> None:
                       "path": f.path, "line": f.line, "message": f.message, "hint": f.hint or f.meta.hint,
                       "fingerprint": f.fingerprint, "legacy_fingerprint": f.legacy_fingerprint,
                       "sensitive_path": f.sensitive, "allowed": f.allowed}
-                     for f in res.findings],
+                     for f in shown],
     }, indent=2))
 
 
@@ -5640,8 +6006,12 @@ def run_check(args, env, collect=False):
                   "seconds": stats["seconds"]}, cfg.origin, notes)
     if collect:
         return res
+    view = {"summary": getattr(args, "summary", False), "group_by": getattr(args, "group_by", "path"),
+            "max": getattr(args, "max_findings", None)}
+    if view["max"] is not None and view["max"] < 0:
+        view["max"] = 0
     if args.format == "json":
-        report_json(res)
+        report_json(res, view)
     elif args.format == "github":
         report_github(res)
     elif args.format == "sarif":
@@ -5651,7 +6021,7 @@ def run_check(args, env, collect=False):
     else:
         mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
         report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
-                    stage=stage, mode=mode, hook=bool(args.staged or args.push))
+                    stage=stage, mode=mode, hook=bool(args.staged or args.push), view=view)
     return 1 if verdict in ("fix", "block") else 0
 
 
@@ -7008,6 +7378,12 @@ def build_parser():
     c.add_argument("-q", "--quiet", action="store_true", help="print only problems that stop the commit")
     c.add_argument("-v", "--verbose", action="store_true", help="show hints, fingerprints and allowed findings")
     c.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    c.add_argument("--summary", action="store_true",
+                   help="counts per rule and per top directory and the biggest files, instead of every finding")
+    c.add_argument("--group-by", choices=("path", "rule"), default="path",
+                   help="how the text report groups findings (default: path)")
+    c.add_argument("--max-findings", type=int, metavar="N", default=None,
+                   help="show at most N findings (the verdict still counts all of them)")
     a = sub.add_parser("audit", help="check every tracked file (same as `check --all`)")
     a.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text")
     a.add_argument("--offline", action="store_true", help="skip registry lookups")
@@ -7017,6 +7393,12 @@ def build_parser():
     a.add_argument("-q", "--quiet", action="store_true", help="print only problems that stop the commit")
     a.add_argument("-v", "--verbose", action="store_true", help="show hints, fingerprints and allowed findings")
     a.add_argument("--color", choices=("auto", "always", "never"), default="auto")
+    a.add_argument("--summary", action="store_true",
+                   help="counts per rule and per top directory and the biggest files, instead of every finding")
+    a.add_argument("--group-by", choices=("path", "rule"), default="path",
+                   help="how the text report groups findings (default: path)")
+    a.add_argument("--max-findings", type=int, metavar="N", default=None,
+                   help="show at most N findings (the verdict still counts all of them)")
     a.set_defaults(cache=False, remote=None)
     u = sub.add_parser("setup", help="one step: install the hooks (vendored) and write a starter config")
     u.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
