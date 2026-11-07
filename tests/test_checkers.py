@@ -4,7 +4,7 @@ from test_perf import run_inproc, watch
 
 def test_checkers_are_described_by_the_plugin_interface():
     names = [c.name for c in aigate.CHECKERS]
-    assert len(names) == len(set(names)) == 11
+    assert len(names) == len(set(names)) == 12
     assert all(isinstance(c, aigate.Checker) and callable(c.run) for c in aigate.CHECKERS)
     by_name = {c.name: c for c in aigate.CHECKERS}
     assert by_name["check_deps"].needs_network and not by_name["check_secrets"].needs_network

@@ -1675,3 +1675,84 @@ Windows 11: 3.11, 3.12, 3.13, 3.14: 767 passed, 12 skipped each. Ubuntu (WSL2): 
 
 ### Bench (py -3.12 bench/bench.py --against dabbba6, 40 pairs, gates PASS)
 startup +1.4%, A +0.1%, B -0.4%, C -0.1%, D -0.1%, E +0.4%, F +0.9%, G +0.3% (medians); git/blobs equal. Startup mode comparison (`py -3.12 bench/installed.py --pairs 40`, Windows): startup median vendored 116.5 ms, installed console script 140.2 ms (+20.4%, the .exe launcher starts a second process), installed `python -P -m aigate_lite` 123.8 ms (+6.3%), loose file 203.2 ms (+74.5%). Scenario A: vendored 264.5, installed 292.6 (+10.6%), `-m` 274.9 (+3.9%), loose 354.4. Baseline (self vs self) for this phase was not re-measured; earlier self-vs-self bands were +-0.3%.
+
+
+## Phase 6 -> P6A: the reviewer core (branch phase-6, from phase-5 tip 203121e)
+
+Decisions from the human at Step 0: base = phase-5 (local `main` and `origin/main` lack Phases 3-5); main CI reported green by the human
+(`gh` is not logged in here, not read); name and tagline stay "aigate-lite", "the reviewer for AI-written code". `__version__` is still
+0.4.0 (the CHANGELOG heading says 0.5.0, the bump belongs to the release: a decision for the human).
+
+### Step 0
+- Baseline, the phase-5 tip against itself (`py -3.12 bench/bench.py --against 203121e --pairs 40`): startup -0.1%, A +0.7%, B +2.1%,
+  C +0.1%, D +0.2%, E -0.6%, F -0.6%, G -0.1%; gates PASS. That is the noise band of this machine for this phase.
+- The `setup` help said "(vendored)"; it now says what the default is (installed tool; a loose script or an existing `.aigate/` copy stays
+  vendored). The README paragraph that called `setup` "`install --vendor` plus `init`" is corrected too.
+
+### Built
+- Six rules, all behind `ctx.deep` (`aigate-lite review`, `check --deep`; never in the hook, not with `--all`): `api.unknown_symbol`,
+  `api.bad_call`, `api.broken_caller`, `tests.missing_for_change` (fix for agents, warn for people), `review.claim_mismatch` (warn for
+  both), `code.error_check_removed`. Rule count 69 -> 75, checkers 11 -> 12 (two old count pins updated: `test_trust.py`, `test_checkers.py`).
+- Symbol index: Python via `ast`; Go and JS/TS via the lexer. Cached by git blob id in `symbols-v1.json` next to the result cache, signed
+  with the same HMAC key; stale tool version, bad signature or read error means re-parse. Unparseable files and dynamic modules
+  (`__getattr__`, star import, `globals()`, `__dict__`, `exec`, `sys.modules[...]`, `__path__`, `getattr/hasattr` on the module) give no claim.
+- `review` command: text, md, json (`schema` 1, `kind` "review"), agent. `--staged` (default), `--range`, `--pr` (GITHUB_BASE_REF /
+  GitLab variables; title and text from GITHUB_EVENT_PATH / CI_MERGE_REQUEST_*), `--message`. `[review] test_map` in the config.
+- DEVIATIONS to decide: (1) `api.bad_call` covers functions only, not class constructors or methods (decorators and `*args/**kwargs` give no
+  claim); JS/TS arity is indexed but unused (the brief says "Python; Go arity"). (2) `tests.missing_for_change` counts a function as covered
+  when a related test file changed or a changed test mentions its name; private Python helpers (`_x`) are skipped.
+  (3) `review.claim_mismatch` needs a message: for `--staged` it comes from `--message`; ranges read their commits; `--pr` reads the event.
+
+### Found on the way (not in the brief)
+- Pre-existing crash, present at the phase-5 tip: `python_declared()` handed `go.mod` to the Python manifest parser (`KeyError: 'gomod'`), so a
+  repository with a `go.mod` plus a Python file importing a third-party package got `gate.error` (a block). Fixed (one word) with a
+  regression test (`test_a_python_third_party_import_in_a_repo_with_a_go_mod_is_not_a_gate_error`, failed before the fix).
+- Bugs my own tests caught in the new code: one-line Go funcs read as having a result type; Go string arguments invisible to the argument
+  counter (the lexer blanks strings, so `f("a")` looked like `f()`; `Lexed.call_text()` keeps them as `s`); a custom `test_map` location
+  not recognised as a test; set-ordered output (now sorted).
+
+### Precision fixtures (synthetic, written by hand; `py -3.12 bench/precision.py --review [--agent]`)
+51 cases (22 mistakes, 29 look-alikes including comment and string text). Before = the phase-5 tip (no reviewer): 0 of 22 found. After:
+| rule | true positives | missed | false positives | clean look-alikes |
+|---|---|---|---|---|
+| api.unknown_symbol | 6 | 0 | 0 | 12 |
+| api.bad_call | 4 | 0 | 0 | 8 |
+| api.broken_caller | 2 | 0 | 0 | 1 |
+| tests.missing_for_change | 2 | 0 | 0 | 3 |
+| review.claim_mismatch | 2 | 0 | 0 | 3 |
+| code.error_check_removed | 6 | 0 | 0 | 2 |
+All 51 match for a person and for an agent (an agent is never softer than a person on any case). These fixtures were written by me from the
+rules' design, so 51/51 shows the rules do what they say on those cases; it is NOT a measurement of precision on real repositories (the
+evaluation corpus is in ROADMAP "Later").
+
+### Tests
+Windows 11: 3.12 920 passed, 12 skipped (final code). 3.11, 3.13, 3.14: 919 passed, 12 skipped each, run one change earlier (before the single
+`go.mod` regression test was added). Before this phase: 772 passed. New: `tests/test_review_api.py`, `test_review_rest.py`,
+`test_review_precision.py`. NOT run: Ubuntu under WSL2, macOS, GitHub Actions, a real `--pr` run in a CI job (fixtures stand in).
+
+### Bench
+Hook path, `py -3.12 bench/bench.py --against 203121e --pairs 40` (gates PASS, git calls and blobs identical): startup +0.8%, A -0.4%,
+B -0.0%, C -0.3%, D +0.6%, E -0.3%, F -0.6%, G -0.1% (medians). A first run, before the reviewer's 27 module-level regexes were made lazy,
+showed startup +4.8% and A +2.3% / D +1.8% / F +1.6%: about 4.4 ms of import-time regex compiles the hook never needed. `startup-direct` (cold
+start without the bytecode cache) is +11.0%: compiling about 1,900 more lines; the hook uses the cache. The one-word `go.mod` fix came after
+the bench; it is outside the hot path.
+Reviewer cost (`py -3.12 bench/review_cost.py --rounds 15`, medians, ms; `hook` = `check --staged`):
+| scenario | hook | check --deep (warm) | check --deep (cold cache) | review |
+|---|---|---|---|---|
+| A | 392 | 444 (+51) | 451 (+59) | 443 |
+| B | 448 | 487 (+39) | 505 (+57) | 485 |
+| C | 695 | 764 (+69) | 776 (+81) | 760 |
+| D (50,000 files) | 417 | 595 (+178) | 606 (+188) | 592 |
+| F | 430 | 462 (+32) | 475 (+45) | 455 |
+Cold vs warm differs little here because the changed files reference few other files; the index is built only for files the change touches.
+
+### Review commands for the human
+```
+git switch phase-6
+git log --oneline phase-5..phase-6 ; git diff --stat phase-5..phase-6
+py -3.12 -m pytest -q
+py -3.12 bench/bench.py --against 203121e
+py -3.12 bench/precision.py --review ; py -3.12 bench/precision.py --review --agent
+py -3.12 bench/review_cost.py
+py -3.12 aigate_lite.py review --range phase-5..HEAD      # the reviewer reviewing this very phase
+```

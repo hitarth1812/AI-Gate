@@ -522,3 +522,12 @@ def test_the_registry_asks_osv_for_the_advisories_and_takes_the_highest_fix(monk
     monkeypatch.setattr(reg, "_http", http)
     assert reg.fixed_in("go", "golang.org/x/crypto", "v0.17.0") == "v0.35.0"
     assert sorted(asked) == ["https://api.osv.dev/v1/vulns/GHSA-1", "https://api.osv.dev/v1/vulns/GHSA-2"]
+
+
+def test_a_python_third_party_import_in_a_repo_with_a_go_mod_is_not_a_gate_error(repo):
+    # python_declared() walked every manifest and tried to parse go.mod as a Python manifest: KeyError, a blocked commit
+    project(repo)
+    repo.write("tools/job.py", "import requests\n")
+    repo.add()
+    res = repo.check("--offline")
+    assert not find(res, "gate.error")

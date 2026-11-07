@@ -196,6 +196,19 @@ _RULE_ROWS = [
      "Batch the calls, or fetch everything once before the loop."),
     ("perf.exponential_recursion", "warn", "medium", 0.6, "Recursion that branches without memoisation",
      "Add functools.cache or rewrite it iteratively."),
+    # reviewer (aigate-lite review, check --deep): resolved against the rest of the repository
+    ("api.unknown_symbol", "fix", "high", 0.8, "Import or call of a name that does not exist in this repository",
+     "Check the name against the module it comes from: AI tools invent plausible helpers."),
+    ("api.bad_call", "fix", "high", 0.8, "Call that does not fit the function's signature",
+     "Open the function and match the call to its parameters."),
+    ("api.broken_caller", "fix", "high", 0.8, "Caller of a function whose signature just changed was not updated",
+     "Update this call to the new signature (or keep the old parameters working with defaults)."),
+    ("tests.missing_for_change", "fix", "medium", 0.6, "Code changed but no related test changed",
+     "Add or update a test that exercises the changed function, or map your tests with [review] test_map."),
+    ("review.claim_mismatch", "warn", "low", 0.6, "The commit or PR text says something the diff does not show",
+     "Change the message to say what the diff does, or make the diff do what the message says."),
+    ("code.error_check_removed", "fix", "high", 0.6, "Error handling was removed or weakened",
+     "Put the error check back, or say in the commit why the failure can no longer happen."),
     # gate
     ("commands.failed", "fix", "high", 1.0, "Configured command failed", "See the command output above."),
     ("commands.untrusted", "warn", "low", 1.0, "Configured commands not approved yet, so they did not run",
@@ -785,6 +798,7 @@ DEFAULT_CONFIG = {
     "deps": {"new_package_days": 30, "cooldown_days": 5, "first_party": [], "private": [],
              "trusted_sources": [], "import_map": {}, "typosquat_min_weekly_downloads": 1000},
     "provenance": {"agent_env": [], "default": "human"},
+    "review": {"test_map": {}},          # source glob -> test glob ({stem}, {dir}, {ext}) for tests.missing_for_change
     "commands": [],
     "allow": [],
 }
@@ -1010,6 +1024,10 @@ def validate_config(cfg: dict, problems: list) -> None:
     if cfg["provenance"].get("default") not in ("human", "agent"):
         problems.append("provenance.default must be human or agent")
         cfg["provenance"]["default"] = "human"
+    test_map = cfg["review"].get("test_map")
+    if not isinstance(test_map, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in test_map.items()):
+        problems.append('review.test_map must be a table of glob = "test glob", e.g. "app/**/*.py" = "tests/test_{stem}.py"')
+        cfg["review"]["test_map"] = {}
     for section in ("paths", "deps"):
         for key, val in cfg[section].items():
             if isinstance(val, str) and key not in ("import_map",):
@@ -1202,8 +1220,11 @@ def _removed_keys(ctx, path) -> Counter:
 
 class Context:
     def __init__(self, repo, cfg, changes, *, mode, base, head, provenance, registry, merge=False, label="",
-                 results=None, full=False):
+                 results=None, full=False, messages=(), deep=False, no_cache=False):
         self.repo, self.cfg, self.changes = repo, cfg, changes
+        self.messages = list(messages)         # commit messages (and PR text) of the change, for review.claim_mismatch
+        self.deep = deep                       # `review` / `check --deep`: the reviewer checks run
+        self.no_cache = no_cache
         self.full = full                       # `check --all`: every tracked file, as if newly added
         self.results = results or ResultCache(enabled=False)
         self.mode, self.base, self.head = mode, base, head
@@ -2123,9 +2144,17 @@ class Lexed:
             got = self._code[hide] = _blank(self.text, self.kinds, hide)
         return got
 
+    def call_text(self):
+        """Code for counting call arguments: comments blanked, and every character of a string literal replaced by `s`
+        (so an argument that is a string still counts, and commas or parentheses inside it do not)."""
+        got = self._code.get("call")
+        if got is None:
+            got = self._code["call"] = _blank(_blank(self.text, self.kinds, (COM,)), self.kinds, (STR,), "s")
+        return got
 
-def _blank(text, kinds, hide):
-    """`text` with the characters whose kind is in `hide` replaced by spaces (newlines kept), by runs."""
+
+def _blank(text, kinds, hide, fill=" "):
+    """`text` with the characters whose kind is in `hide` replaced by `fill` (newlines kept), by runs."""
     key = ("hide", hide)
     rx = _LEX_RES.get(key)
     if rx is None:
@@ -2135,7 +2164,7 @@ def _blank(text, kinds, hide):
         a, b = m.span()
         out.append(text[pos:a])
         seg = text[a:b]
-        out.append(re.sub(r"[^\n]", " ", seg) if "\n" in seg else " " * (b - a))
+        out.append(re.sub(r"[^\n]", fill, seg) if "\n" in seg else fill * (b - a))
         pos = b
     if not out:
         return text
@@ -3440,7 +3469,7 @@ def python_declared(ctx):
     declared, has_manifest, req_py = set(), False, None
     for path in ctx.files:
         kind = manifest_kind(path)
-        if kind in (None, "npm") or ctx.ignored(path):
+        if kind in (None, "npm", "gomod") or ctx.ignored(path):       # go.mod is not a Python manifest
             continue
         text = ctx.read_new(path)
         if text is None:
@@ -5390,6 +5419,7 @@ class Result:
     stats: dict
     config: str
     notes: list
+    extra: dict = dataclasses.field(default_factory=dict)      # review: what the reviewer collected (see check_review)
 
 
 def _baseline_accepts(ctx, f, baseline, granted) -> bool:
@@ -5882,6 +5912,1639 @@ def report_sarif(res: Result) -> None:
     }, indent=2))
 
 
+# --------------------------------------------------------------------------- reviewer: symbol index (Phase 6A)
+
+# The reviewer checks (api.*, tests.missing_for_change, review.claim_mismatch, code.error_check_removed) read more
+# than the changed lines: they resolve names against the rest of the repository. They run in `aigate-lite review`
+# and `check --deep`, never in the commit hook. Rules for every claim they make:
+#   * source is read with ast (Python) or the lexer (Go, JS/TS) only; nothing is imported or executed;
+#   * a file that does not parse, or a module that is dynamic, produces NO claim about it (never guess).
+
+class _lazy:
+    """A regular expression compiled on first use: the reviewer's patterns would otherwise cost every commit-hook
+    run about 4 ms of import time for checks that hook never runs."""
+
+    def __init__(self, pattern, flags=0):
+        self._pattern, self._flags, self._rx = pattern, flags, None
+
+    def __getattr__(self, name):
+        if self._rx is None:
+            self._rx = re.compile(self._pattern, self._flags)
+        return getattr(self._rx, name)
+
+
+SYMBOL_INDEX_VERSION = 1
+PY_DYNAMIC = _lazy(r"\bglobals\s*\(|\bexec\s*\(|__dict__|sys\.modules\s*\[|\b__path__\b")
+JS_FAMILY = frozenset({".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts"})
+JS_RESOLVE = (".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts")
+JS_OTHER_MODULES = (".json", ".css", ".scss", ".sass", ".less", ".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp",
+                    ".vue", ".svelte", ".md", ".mdx", ".graphql", ".gql", ".html", ".txt", ".d.ts")
+CALLS_CAP = 3000
+
+
+def _py_sig(fn) -> dict:
+    a = fn.args
+    pos = a.posonlyargs + a.args
+    flags = [False] * (len(pos) - len(a.defaults)) + [True] * len(a.defaults)
+    return {"p": [[x.arg, d] for x, d in zip(pos, flags)], "po": len(a.posonlyargs),
+            "ko": [[x.arg, d is not None] for x, d in zip(a.kwonlyargs, a.kw_defaults)],
+            "va": a.vararg is not None, "kw": a.kwarg is not None, "dec": bool(fn.decorator_list)}
+
+
+def _py_scope_stmts(body):
+    """Statements that run at import time: the module body and the bodies of if/try/with/for/while inside it."""
+    for st in body:
+        yield st
+        if isinstance(st, (ast.If, ast.For, ast.AsyncFor, ast.While)):
+            yield from _py_scope_stmts(st.body)
+            yield from _py_scope_stmts(st.orelse)
+        elif isinstance(st, (ast.With, ast.AsyncWith)):
+            yield from _py_scope_stmts(st.body)
+        elif isinstance(st, ast.Try) or type(st).__name__ == "TryStar":
+            for part in (st.body, st.orelse, st.finalbody):
+                yield from _py_scope_stmts(part)
+            for h in st.handlers:
+                yield from _py_scope_stmts(h.body)
+        elif type(st).__name__ == "Match":
+            for case in st.cases:
+                yield from _py_scope_stmts(case.body)
+
+
+def py_symbols(text: str):
+    """Index entry for one Python file: every name bound at module level, with function signatures. None when
+    the file does not parse. `dyn` means the module can bind names this index cannot see (__getattr__, star
+    imports, globals(), __dict__, exec, sys.modules[...], __path__): nothing may be claimed about its names."""
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return None
+    names, dyn, all_names = {}, bool(PY_DYNAMIC.search(text)), None
+
+    def put(name, entry):
+        names[name] = {**entry, "dup": True} if name in names else entry
+    for st in _py_scope_stmts(tree.body):
+        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            dyn = dyn or st.name == "__getattr__"
+            put(st.name, {"t": "f", "sig": _py_sig(st), "line": st.lineno})
+        elif isinstance(st, ast.ClassDef):
+            put(st.name, {"t": "c", "line": st.lineno,
+                          "m": {m.name: _py_sig(m) for m in st.body if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))}})
+        elif isinstance(st, ast.Import):
+            for a in st.names:
+                put(a.asname or a.name.split(".")[0], {"t": "i", "mod": a.name if a.asname else a.name.split(".")[0],
+                                                       "lvl": 0, "from": None})
+        elif isinstance(st, ast.ImportFrom):
+            for a in st.names:
+                if a.name == "*":
+                    dyn = True
+                else:
+                    put(a.asname or a.name, {"t": "i", "mod": st.module or "", "lvl": st.level, "from": a.name})
+        else:
+            if isinstance(st, (ast.Assign, ast.AnnAssign, ast.AugAssign)):
+                targets = st.targets if isinstance(st, ast.Assign) else [st.target]
+                for t in targets:
+                    if isinstance(t, ast.Name):
+                        put(t.id, {"t": "v"})
+                        if t.id == "__all__":
+                            value = getattr(st, "value", None)
+                            if isinstance(value, (ast.List, ast.Tuple)) and all(
+                                    isinstance(e, ast.Constant) and isinstance(e.value, str) for e in value.elts):
+                                got = [e.value for e in value.elts]
+                                all_names = (all_names or []) + got if isinstance(st, ast.AugAssign) else got
+                            else:
+                                dyn = True
+            for n in ast.walk(st):
+                if isinstance(n, ast.Name) and isinstance(n.ctx, ast.Store):
+                    names.setdefault(n.id, {"t": "v"})
+                elif type(n).__name__ == "TypeAlias":
+                    names.setdefault(n.name.id, {"t": "v"})
+                elif isinstance(n, ast.ExceptHandler) and n.name:
+                    names.setdefault(n.name, {"t": "v"})
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Global):
+            for x in n.names:
+                names.setdefault(x, {"t": "v"})
+    calls = set()
+    for n in ast.walk(tree):
+        if isinstance(n, ast.Call):
+            f = n.func
+            if isinstance(f, ast.Name):
+                calls.add(f.id)
+            elif isinstance(f, ast.Attribute):
+                calls.add(f.attr)
+    return {"k": "py", "names": names, "dyn": dyn, "all": all_names, "calls": sorted(calls)[:CALLS_CAP]}
+
+
+def split_top(text: str, angles=False) -> list:
+    """`text` split at commas that are not inside (), [], {} (nor <> when angles); empty pieces dropped."""
+    opens, closes = "([{" + ("<" if angles else ""), ")]}" + (">" if angles else "")
+    out, depth, cur = [], 0, []
+    for ch in text:
+        if ch in opens:
+            depth += 1
+        elif ch in closes:
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return [p.strip() for p in out if p.strip()]
+
+
+GO_PACKAGE = _lazy(r"(?m)^package\s+(\w+)")
+GO_FUNC_DECL = _lazy(r"(?m)^func\s*(?:\(\s*(?:\w+\s+)?\*?\s*(?P<recv>\w+)(?:\[[^\]]*\])?\s*\)\s*)?(?P<name>\w+)\s*"
+                          r"(?:\[[^\]]*\]\s*)?\(")
+GO_TYPE_DECL = _lazy(r"(?m)^type\s+(\w+)")
+GO_GROUP = _lazy(r"(?m)^(const|var|type)\s*\(")
+GO_VALUE_DECL = _lazy(r"(?m)^(?:const|var)\s+(\w+(?:\s*,\s*\w+)*)")
+GO_GROUP_LINE = _lazy(r"(?m)^[ \t]*([A-Za-z_]\w*(?:[ \t]*,[ \t]*[A-Za-z_]\w*)*)")
+
+
+def _go_result_text(rest: str) -> str:
+    """The result types of a func declaration: what follows the parameters up to the body's `{` (an `interface{}` or
+    `struct{}` result type is part of the result, not the body)."""
+    depth, i = 0, 0
+    while i < len(rest):
+        c = rest[i]
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+        elif c == "{" and depth == 0:
+            if rest[:i].rstrip().endswith(("interface", "struct")):
+                level, i = 1, i + 1
+                while i < len(rest) and level:
+                    level += (rest[i] == "{") - (rest[i] == "}")
+                    i += 1
+                continue
+            return rest[:i].strip()
+        i += 1
+    return rest.strip()
+
+
+def go_symbols(text: str):
+    """Index entry for one Go file (package clause, every top-level func, type, const and var, methods by receiver
+    type, with arity and whether the last result is an error). None when the lexer gives up."""
+    try:
+        lx = lex_text(text, language_for("x.go").lex)
+    except LexError:
+        return None
+    ct = lx.code_text()
+    pkg = GO_PACKAGE.search(ct)
+    names, methods = {}, {}
+    for m in GO_FUNC_DECL.finditer(ct):
+        open_at = m.end() - 1
+        end = _paren_end(ct, open_at)
+        if end < 0:
+            continue
+        segs = split_top(ct[open_at + 1:end - 1])
+        nl = ct.find("\n", end)
+        rest = _go_result_text(ct[end:nl if nl >= 0 else len(ct)])
+        if rest.startswith("("):
+            stop = _paren_end(rest, 0)
+            res = split_top(rest[1:stop - 1]) if stop > 0 else []
+            err = bool(res) and bool(re.search(r"(?:^|\s)error$", res[-1]))
+            nres = len(res)
+        else:
+            nres, err = (1 if rest else 0), rest == "error"
+        info = {"t": "f", "n": len(segs), "va": bool(segs) and "..." in segs[-1], "r": nres, "err": err,
+                "line": ct.count("\n", 0, m.start()) + 1}
+        if m.group("recv"):
+            methods[f"{m.group('recv')}.{m.group('name')}"] = info
+        else:
+            names[m.group("name")] = {**info, "dup": True} if m.group("name") in names else info
+    for m in GO_TYPE_DECL.finditer(ct):
+        names.setdefault(m.group(1), {"t": "t"})
+    for m in GO_VALUE_DECL.finditer(ct):
+        for n in re.split(r"\s*,\s*", m.group(1)):
+            names.setdefault(n, {"t": "v"})
+    for m in GO_GROUP.finditer(ct):
+        open_at = m.end() - 1
+        end = _paren_end(ct, open_at)
+        if end < 0:
+            continue
+        for line in ct[open_at + 1:end - 1].split("\n"):
+            lm = GO_GROUP_LINE.match(line)
+            if lm:
+                for n in re.split(r"\s*,\s*", lm.group(1)):
+                    names.setdefault(n, {"t": "t" if m.group(1) == "type" else "v"})
+    calls = sorted(set(re.findall(r"([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\]\s*)?\(", ct)))[:CALLS_CAP]
+    return {"k": "go", "pkg": pkg.group(1) if pkg else "", "names": names, "methods": methods, "calls": calls}
+
+
+JS_EXPORT_FN = _lazy(r"\bexport\s+(?:declare\s+)?(?P<dflt>default\s+)?(?:async\s+)?function\b\s*\*?\s*(?P<n>[\w$]+)?\s*"
+                          r"(?:<[^>(]*>)?\s*\(")
+JS_EXPORT_VAR = _lazy(r"\bexport\s+(?:declare\s+)?(?:const|let|var)\s+(?!enum\b)(?P<d>\{[^}]*\}|\[[^\]]*\]|[\w$]+)")
+JS_EXPORT_TYPE = _lazy(r"\bexport\s+(?:declare\s+)?(?P<dflt>default\s+)?(?:abstract\s+)?(?:const\s+enum|class|interface|"
+                            r"type|enum|namespace|module)\s+(?P<n>[\w$]+)")
+JS_EXPORT_LIST = _lazy(r"\bexport\s+(?:type\s+)?\{(?P<b>[^}]*)\}")
+JS_EXPORT_STAR = _lazy(r"\bexport\s*\*\s*(?:as\s+(?P<n>[\w$]+)\s+)?from\b")
+JS_EXPORT_EQ = _lazy(r"\bexport\s*=")
+JS_CJS_WHOLE = _lazy(r"\bmodule\s*\.\s*exports\s*=(?!=)")
+JS_CJS_NAME = _lazy(r"\b(?:module\s*\.\s*)?exports\s*\.\s*(?P<n>[\w$]+)\s*=(?!=)")
+JS_ARROW = _lazy(r"\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\((?P<p>[^()]*)\)|(?P<s>[\w$]+))\s*(?::\s*[^=>{;]+)?=>")
+
+
+def js_symbols(text: str, path="x.ts"):
+    """Index entry for one JS/TS module: named exports (with the arity of plain functions), whether there is a
+    default export, and `dyn` for anything that makes the export list unknowable (export *, export =,
+    module.exports = ..., compiled CommonJS)."""
+    spec = language_for(path)
+    try:
+        lx = lex_text(text, spec.lex)
+    except LexError:
+        return None
+    ct = lx.code_text()
+    names, default, dyn = {}, False, False
+    for m in JS_EXPORT_FN.finditer(ct):
+        open_at = m.end() - 1
+        end = _paren_end(ct, open_at)
+        arity = len(split_top(ct[open_at + 1:end - 1], angles=True)) if end > 0 else None
+        if m.group("dflt"):
+            default = True
+        elif m.group("n"):
+            names[m.group("n")] = {"t": "f", "n": arity}
+    for m in JS_EXPORT_VAR.finditer(ct):
+        d = m.group("d")
+        if d[0] in "{[":
+            for part in split_top(d[1:-1]):
+                nm = re.split(r"[:=]", part)[-1 if ":" in part.split("=")[0] else 0].strip().lstrip(".")
+                if re.fullmatch(r"[\w$]+", nm or ""):
+                    names[nm] = {"t": "v"}
+        else:
+            arrow = JS_ARROW.match(ct, m.end())
+            arity = None
+            if arrow:
+                arity = len(split_top(arrow.group("p"), angles=True)) if arrow.group("p") is not None else 1
+            names[d] = {"t": "f", "n": arity} if arrow else {"t": "v"}
+    for m in JS_EXPORT_TYPE.finditer(ct):
+        if m.group("dflt"):
+            default = True
+        else:
+            names[m.group("n")] = {"t": "t"}
+    for m in JS_EXPORT_LIST.finditer(ct):
+        for part in split_top(m.group("b")):
+            part = re.sub(r"^type\s+", "", part)
+            exported = re.split(r"\s+as\s+", part)[-1].strip()
+            if exported == "default":
+                default = True
+            elif re.fullmatch(r"[\w$]+", exported):
+                names[exported] = {"t": "v"}
+    if re.search(r"\bexport\s+default\b", ct):
+        default = True
+    for m in JS_EXPORT_STAR.finditer(ct):
+        if m.group("n"):
+            names[m.group("n")] = {"t": "v"}
+        else:
+            dyn = True
+    if JS_EXPORT_EQ.search(ct) or JS_CJS_WHOLE.search(ct) or re.search(r"""Object\.defineProperty\(\s*exports\s*,\s*["']__esModule""", text) \
+            or "__exportStar" in text:
+        dyn = True
+    cjs = False
+    for m in JS_CJS_NAME.finditer(ct):
+        names.setdefault(m.group("n"), {"t": "v"})
+        cjs = True
+    for m in re.finditer(r"""Object\.defineProperty\(\s*exports\s*,\s*["']([\w$]+)["']""", text):
+        names.setdefault(m.group(1), {"t": "v"})
+        cjs = True
+    return {"k": "js", "names": names, "default": default, "dyn": dyn, "cjs": cjs}
+
+
+def _load_cache_secret(directory):
+    """The HMAC key shared with ResultCache (results.key, 32 random bytes, 0600); created when missing."""
+    key_path = os.path.join(directory, "results.key")
+    try:
+        with open(key_path, "rb") as fh:
+            secret = fh.read()
+        if len(secret) == 32:
+            return secret
+    except FileNotFoundError:
+        pass
+    os.makedirs(directory, exist_ok=True)
+    secret = os.urandom(32)
+    _write_private(key_path, secret)
+    return secret
+
+
+class SymbolIndex:
+    """Symbol entries keyed by git blob id, so an unchanged file is never parsed twice (incremental by blob hash, and
+    shared by every HEAD that contains the blob). Stored next to the result cache as symbols-v1.json, signed with the
+    same HMAC key: a bad signature, a version mismatch or any read error means the file is ignored, so tampering can
+    only cause a re-parse. Entries are structural facts (names, arities, call names), never file contents or secrets."""
+
+    MAX_BYTES = 12_000_000
+
+    def __init__(self, ctx, directory=None, enabled=True):
+        self.ctx, self.entries, self.dirty, self.secret = ctx, {}, False, None
+        self.path = os.path.join(directory, f"symbols-v{SYMBOL_INDEX_VERSION}.json") if directory else None
+        self._blobs = None
+        self.stats = Counter()
+        if not enabled or not directory:
+            return
+        try:
+            self.secret = _load_cache_secret(directory)
+            if os.path.getsize(self.path) > self.MAX_BYTES:
+                return
+            with open(self.path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            entries = doc["entries"]
+            if doc.get("v") == SYMBOL_INDEX_VERSION and doc.get("tool") == __version__ and isinstance(entries, dict) \
+                    and _hmac_ok(self.secret, _canonical(entries), doc.get("mac")):
+                self.entries = entries
+        except (OSError, ValueError, KeyError, TypeError, AttributeError, RecursionError, MemoryError):
+            return
+
+    def blobs(self) -> dict:
+        """path -> blob id for the tree being checked (the index when staged, the head commit otherwise)."""
+        if self._blobs is None:
+            ctx, out = self.ctx, {}
+            if ctx.head is None:
+                raw = ctx.repo.git("ls-files", "-s", "-z")
+                for rec in raw.split("\0"):
+                    meta, _, path = rec.partition("\t")
+                    parts = meta.split()
+                    if path and len(parts) == 3 and parts[2] == "0":
+                        out[path] = parts[1]
+            else:
+                raw = ctx.repo.git("ls-tree", "-r", "-z", ctx.head)
+                for rec in raw.split("\0"):
+                    meta, _, path = rec.partition("\t")
+                    parts = meta.split()
+                    if path and len(parts) == 3 and parts[1] == "blob":
+                        out[path] = parts[2]
+            self._blobs = out
+        return self._blobs
+
+    @staticmethod
+    def kind(path: str):
+        n = path.rsplit("/", 1)[-1].lower()
+        ext = n[n.rfind("."):] if "." in n else ""
+        if ext in PY_EXTS:
+            return "py"
+        if ext == ".go":
+            return "go"
+        if ext in JS_FAMILY and not n.endswith(".d.ts"):
+            return "js"
+        return None
+
+    def entry(self, path: str):
+        """The entry for `path` in the tree being checked, or None when it is unreadable, unparseable, or in a language
+        without an index. A returned entry is always trustworthy for what it records."""
+        kind = self.kind(path)
+        sha = self.blobs().get(path)
+        if kind is None or not sha:
+            return None
+        got = self.entries.get(sha)
+        if got is None:
+            text = self.ctx.read_new(path)
+            if text is not None and len(text) <= MAX_BYTES:
+                got = {"py": py_symbols, "go": go_symbols}.get(kind, lambda t: js_symbols(t, path))(text)
+            got = got or {"k": kind, "bad": True}
+            self.entries[sha] = got
+            self.dirty = True
+            self.stats["parsed"] += 1
+        else:
+            self.stats["cached"] += 1
+        return None if got.get("bad") else got
+
+    def save(self) -> None:
+        if not self.secret or not self.dirty:
+            return
+        entries = dict(self.entries)              # keyed by blob id, so entries of other repositories stay valid
+        doc_len = len(json.dumps(entries))
+        while doc_len > self.MAX_BYTES and entries:
+            for k in list(entries)[:max(1, len(entries) // 4)]:
+                del entries[k]
+            doc_len = len(json.dumps(entries))
+        doc = {"v": SYMBOL_INDEX_VERSION, "tool": __version__, "mac": _hmac(self.secret, _canonical(entries)),
+               "entries": entries}
+        try:
+            _write_private(self.path, json.dumps(doc).encode("utf-8"))
+        except OSError:
+            pass
+
+
+def symbol_index(ctx) -> SymbolIndex:
+    if "symbols" not in ctx.cache:
+        enabled = not getattr(ctx, "no_cache", False)
+        ctx.cache["symbols"] = SymbolIndex(ctx, default_cache_dir() if enabled else None, enabled)
+    return ctx.cache["symbols"]
+
+
+# --------------------------------------------------------------------------- reviewer: api.* checks (Phase 6A)
+
+def rv(rule, path, line, message, key, human="warn", hint=None):
+    """A reviewer finding. A person's change gets `human` (warn); an AI agent's keeps the rule's own action (fix)."""
+    f = make(rule, path, line, message, key=key, hint=hint)
+    if human and RULES[rule].action != human:
+        f.human = human
+    return f
+
+
+class RepoPaths:
+    """The tracked tree as sets, for module and package resolution."""
+
+    def __init__(self, files):
+        self.files = set(files)
+        self.dirs, self.children, self.go_files = set(), defaultdict(set), defaultdict(list)
+        for p in self.files:
+            d, _, base = p.rpartition("/")
+            if base.endswith(".py"):
+                self.children[d].add(base[:-3])
+            elif base.endswith(".go"):
+                self.go_files[d].append(p)
+            while d and d not in self.dirs:
+                self.dirs.add(d)
+                parent, _, leaf = d.rpartition("/")
+                self.children[parent].add(leaf)
+                d = parent
+
+
+def repo_paths(ctx) -> RepoPaths:
+    if "paths" not in ctx.cache:
+        ctx.cache["paths"] = RepoPaths(ctx.files)
+    return ctx.cache["paths"]
+
+
+def near(word, options):
+    import difflib
+    got = difflib.get_close_matches(word, sorted(options), n=1, cutoff=0.72)
+    return got[0] if got else None
+
+
+def py_find(rp, parts, start=""):
+    """Locate the dotted module `parts` below directory `start`. ('file', path) | ('pkg', __init__ path or None, dir)
+    | ('missing', depth, parent dir, parent __init__ or None) | None (the first part is not in this repository)."""
+    d = start
+    for i, part in enumerate(parts):
+        base = f"{d}/{part}" if d else part
+        init = base + "/__init__.py"
+        is_pkg, is_file = init in rp.files, base + ".py" in rp.files
+        if is_pkg or (base in rp.dirs and not is_file):
+            if i == len(parts) - 1:
+                return ("pkg", init if is_pkg else None, base)
+            d = base
+        elif is_file:
+            return ("file", base + ".py") if i == len(parts) - 1 else None
+        elif i == 0:
+            return None
+        else:
+            parent = d + "/__init__.py"
+            return ("missing", i, d, parent if parent in rp.files else None)
+    return None
+
+
+def py_resolve(rp, parts):
+    for root in ("", "src"):
+        found = py_find(rp, parts, root)
+        if found is not None:
+            return found
+    return None
+
+
+def py_resolve_relative(rp, path, level, parts):
+    base = path.rpartition("/")[0]
+    for _ in range(level - 1):
+        base = base.rpartition("/")[0]
+    if not parts:
+        init = (base + "/" if base else "") + "__init__.py"
+        return ("pkg", init if init in rp.files else None, base) if base or init in rp.files else None
+    return py_find(rp, parts, base)
+
+
+def py_import_target(rp, path, e):
+    parts = e["mod"].split(".") if e["mod"] else []
+    return py_resolve_relative(rp, path, e["lvl"], parts) if e.get("lvl") else (py_resolve(rp, parts) if parts else None)
+
+
+def py_submodule(rp, loc, name):
+    if loc[0] != "pkg":
+        return None
+    found = py_find(rp, [name], loc[2])
+    return found if found and found[0] in ("file", "pkg") else None
+
+
+def py_lookup(rp, idx, loc, name, hops=3):
+    """What `name` is inside the module or package at `loc`: ('def', path, entry) | ('var',) | ('sub', loc) |
+    ('none',) (provably absent) | ('unknown',) (cannot tell: dynamic, unparseable, namespace package)."""
+    path = loc[1] if loc[0] == "file" else loc[1]
+    entry = idx.entry(path) if path else None
+    if entry is not None and name in entry["names"]:
+        e = entry["names"][name]
+        if e["t"] == "i" and e.get("from") and hops > 0:
+            target = py_import_target(rp, path, e)
+            if target and target[0] in ("file", "pkg"):
+                return py_lookup(rp, idx, target, e["from"], hops - 1)
+            return ("var",)
+        if e["t"] in ("f", "c"):
+            return ("def", path, e)
+        return ("var",)
+    sub = py_submodule(rp, loc, name)
+    if sub:
+        return ("sub", sub)
+    if entry is None or entry["dyn"] or (entry["all"] and name in entry["all"]):
+        return ("unknown",)
+    return ("none",)
+
+
+def py_call_problem(sig, call):
+    """Why `call` cannot work with a function of signature `sig`, or None (also None whenever it cannot be sure)."""
+    if sig["dec"] or any(isinstance(a, ast.Starred) for a in call.args) or any(k.arg is None for k in call.keywords):
+        return None
+    pos, n = sig["p"], len(call.args)
+    names = [p[0] for p in pos]
+    given = [k.arg for k in call.keywords]
+    if n > len(pos) and not sig["va"]:
+        return f"passes {n} positional arguments but it takes at most {len(pos)}"
+    allowed = set(names[sig["po"]:]) | {k[0] for k in sig["ko"]}
+    for k in given:
+        if k not in allowed and not sig["kw"]:
+            return f"passes an unknown keyword argument `{k}`"
+        if k in names[:n]:
+            return f"passes `{k}` twice (by position and by keyword)"
+    missing = [nm for i, (nm, has_default) in enumerate(pos) if not has_default and i >= n and nm not in given]
+    missing += [nm for nm, has_default in sig["ko"] if not has_default and nm not in given]
+    if missing:
+        return "does not pass the required " + ", ".join(f"`{m}`" for m in missing)
+    return None
+
+
+def _touched(node, added) -> bool:
+    return any(n in added for n in range(node.lineno, (getattr(node, "end_lineno", None) or node.lineno) + 1))
+
+
+def py_file_model(tree):
+    """(bindings by alias, other-binding counts, aliases used with getattr/hasattr, ids of optional imports)."""
+    binds, other, dyn, optional = defaultdict(list), Counter(), set(), set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                binds[a.asname or a.name.split(".")[0]].append(("mod", a.name, bool(a.asname), node))
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name != "*":
+                    binds[a.asname or a.name].append(("from", node.module or "", node.level, a.name, node))
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            other[node.name] += 1
+        elif isinstance(node, ast.arg):
+            other[node.arg] += 1
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            other[node.id] += 1
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            other[node.name] += 1
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name) \
+                and node.func.id in ("getattr", "hasattr", "setattr", "delattr") and node.args \
+                and isinstance(node.args[0], ast.Name):
+            dyn.add(node.args[0].id)
+        if (isinstance(node, ast.Try) or type(node).__name__ == "TryStar") and _catches_import_error(node):
+            for st in node.body + [s for h in node.handlers for s in h.body]:
+                optional.update(id(n) for n in ast.walk(st) if isinstance(n, (ast.Import, ast.ImportFrom)))
+        elif isinstance(node, ast.If) and any(k in ast.dump(node.test) for k in ("platform", "version_info", "'name'")):
+            for st in node.body + node.orelse:
+                optional.update(id(n) for n in ast.walk(st) if isinstance(n, (ast.Import, ast.ImportFrom)))
+    return binds, other, dyn, optional
+
+
+def py_resolver(path, tree, rp, idx):
+    """(bindings, other-binding counts, optional import ids, module_loc, resolve_chain) for one parsed Python file."""
+    binds, other, alias_dyn, optional = py_file_model(tree)
+
+    def module_loc(mod, level):
+        parts = mod.split(".") if mod else []
+        return py_resolve_relative(rp, path, level, parts) if level else (py_resolve(rp, parts) if parts else None)
+
+    def resolve_chain(base, rest):
+        b = binds.get(base)
+        if not b or len(b) != 1 or other[base] or base in alias_dyn or id(b[0][-1]) in optional:
+            return None
+        if b[0][0] == "mod":
+            dotted, as_name = b[0][1], b[0][2]
+            loc = module_loc(dotted if as_name else dotted.split(".")[0], 0)
+        else:
+            mloc = module_loc(b[0][1], b[0][2])
+            if mloc is None or mloc[0] == "missing":
+                return None
+            res = py_lookup(rp, idx, mloc, b[0][3])
+            if res[0] == "def" and not rest:
+                return ("def", res[1], res[2], b[0][3])
+            if res[0] != "sub":
+                return None
+            loc = res[1]
+        if loc is None or loc[0] == "missing":
+            return None
+        shown = base
+        for i, attr in enumerate(rest):
+            res = py_lookup(rp, idx, loc, attr)
+            if res[0] == "sub":
+                loc, shown = res[1], f"{shown}.{attr}"
+            elif res[0] == "def":
+                return ("def", res[1], res[2], attr) if i == len(rest) - 1 else None
+            elif res[0] == "none":
+                return ("none", shown, attr, loc)
+            else:
+                return None
+        return ("module", loc)
+
+    return binds, other, optional, module_loc, resolve_chain
+
+
+def review_python_file(ctx, fc, rp, idx) -> list:
+    """api.unknown_symbol and api.bad_call for the added lines of one Python file."""
+    tree, _err = ctx.py_tree(fc)
+    if tree is None or not fc.added:
+        return []
+    binds, other, optional, module_loc, resolve_chain = py_resolver(fc.path, tree, rp, idx)
+    added, out, stats = fc.added, [], ctx.cache.setdefault("review_stats", Counter())
+
+    def missing_module(loc, parts, node, shown):
+        _, depth, parent_dir, parent_init = loc
+        if not parent_init:
+            return
+        pe = idx.entry(parent_init)
+        if pe is None or pe["dyn"] or parts[depth] in pe["names"]:
+            return
+        guess = near(parts[depth], rp.children.get(parent_dir, ()))
+        out.append(rv("api.unknown_symbol", fc.path, node.lineno,
+                      f"module `{shown}` does not exist: `{parent_dir}/` has no `{parts[depth]}.py` or `{parts[depth]}/`",
+                      f"module:{shown}", hint=f"did you mean `{guess}`?" if guess else None))
+
+    # imports on added lines
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Import, ast.ImportFrom)) or id(node) in optional or not _touched(node, added):
+            continue
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                parts = a.name.split(".")
+                loc = py_resolve(rp, parts)
+                stats["imports"] += loc is not None
+                if loc and loc[0] == "missing":
+                    missing_module(loc, parts, node, ".".join(parts[:loc[1] + 1]))
+            continue
+        loc = module_loc(node.module or "", node.level)
+        if loc is None:
+            continue
+        shown = "." * node.level + (node.module or "")
+        if loc[0] == "missing":
+            parts = node.module.split(".")
+            missing_module(loc, parts, node, "." * node.level + ".".join(parts[:loc[1] + 1]))
+            continue
+        for a in node.names:
+            if a.name == "*":
+                continue
+            stats["imports"] += 1
+            res = py_lookup(rp, idx, loc, a.name)
+            if res[0] == "none":
+                entry = idx.entry(loc[1]) if loc[1] else None
+                options = set((entry or {}).get("names", {})) | rp.children.get(loc[2] if loc[0] == "pkg" else "", set())
+                guess = near(a.name, options)
+                out.append(rv("api.unknown_symbol", fc.path, node.lineno, f"`{shown}` has no `{a.name}`",
+                              f"{shown}.{a.name}", hint=f"did you mean `{guess}`?" if guess else None))
+    # module attributes and calls on added lines
+    inner = {id(n.value) for n in ast.walk(tree) if isinstance(n, ast.Attribute) and isinstance(n.value, ast.Attribute)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and id(node) not in inner and isinstance(node.ctx, ast.Load) \
+                and node.lineno in added:
+            rest, cur = [], node
+            while isinstance(cur, ast.Attribute):
+                rest.append(cur.attr)
+                cur = cur.value
+            if isinstance(cur, ast.Name):
+                got = resolve_chain(cur.id, rest[::-1])
+                stats["attributes"] += got is not None
+                if got and got[0] == "none":
+                    entry = idx.entry(got[3][1]) if got[3][1] else None
+                    guess = near(got[2], set((entry or {}).get("names", {})))
+                    out.append(rv("api.unknown_symbol", fc.path, node.lineno, f"`{got[1]}` has no `{got[2]}`",
+                                  f"{got[1]}.{got[2]}", hint=f"did you mean `{guess}`?" if guess else None))
+        elif isinstance(node, ast.Call) and node.lineno in added:
+            target = None
+            if isinstance(node.func, ast.Name):
+                name = node.func.id
+                target = resolve_chain(name, [])
+                if target is None and not binds.get(name) and other[name] == 1:
+                    for st in tree.body:
+                        if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and st.name == name:
+                            target = ("def", fc.path, {"t": "f", "sig": _py_sig(st), "line": st.lineno}, name)
+            elif isinstance(node.func, ast.Attribute):
+                rest, cur = [], node.func
+                while isinstance(cur, ast.Attribute):
+                    rest.append(cur.attr)
+                    cur = cur.value
+                if isinstance(cur, ast.Name):
+                    target = resolve_chain(cur.id, rest[::-1])
+            if target and target[0] == "def" and target[2]["t"] == "f" and not target[2].get("dup"):
+                stats["calls"] += 1
+                why = py_call_problem(target[2]["sig"], node)
+                if why:
+                    out.append(rv("api.bad_call", fc.path, node.lineno,
+                                  f"`{ast.unparse(node.func)}(...)` {why} (defined at {target[1]}:{target[2]['line']})",
+                                  f"{ast.unparse(node.func)}:{why}"))
+    return out
+
+
+# --------------------------------------------------------------------------- reviewer: Go
+
+GO_QUAL = _lazy(r"(?<![\w.])([A-Za-z_]\w*)\.([A-Za-z_]\w*)")
+GO_BARE = _lazy(r"(?<![\w.])([A-Za-z_]\w*)\s*(?:\[[^\]\n]*\]\s*)?\(")
+GO_DECL_PREFIX = _lazy(r"^\s*func\s*(?:\([^)]*\)\s*)?$")
+
+
+def go_dir_for_import(ctx, ipath):
+    """The in-repo directory of an import path (via the go.mod `module` lines), or None for anything else."""
+    mods, _local = go_project(ctx)
+    best = None
+    for d, (module, _declared) in mods.items():
+        if module and (ipath == module or ipath.startswith(module + "/")) and (best is None or len(module) > len(best[1])):
+            best = (d, module)
+    if best is None:
+        return None
+    sub = ipath[len(best[1]):].strip("/")
+    return "/".join(x for x in (best[0], sub) if x)
+
+
+def go_package(ctx, rp, idx, pkgdir):
+    """Merged non-test index of a directory, or None when any file cannot be read (then nothing is claimed)."""
+    memo = ctx.cache.setdefault("go_pkgs", {})
+    if pkgdir not in memo:
+        files = [p for p in rp.go_files.get(pkgdir, []) if not p.endswith("_test.go")]
+        names, methods, pkgs, ok = {}, {}, set(), bool(files)
+        for p in files:
+            e = idx.entry(p)
+            if e is None:
+                ok = False
+                break
+            pkgs.add(e["pkg"])
+            for n, info in e["names"].items():
+                names[n] = {**info, "dup": True} if n in names else info
+            methods.update(e["methods"])
+        memo[pkgdir] = {"names": names, "methods": methods, "pkg": next(iter(pkgs))} if ok and len(pkgs) == 1 else None
+    return memo[pkgdir]
+
+
+def go_shadowed(ct, name) -> bool:
+    """A local variable, parameter or loop variable named like the package (so `name.X` may not be the package)."""
+    n = re.escape(name)
+    return bool(re.search(rf"\bvar\s+{n}\b|\b{n}\s*(?:,\s*\w+\s*)*:=|[(,]\s*{n}\s+[\w*\[.]|\bfor\s+(?:\w+\s*,\s*)?{n}\b", ct))
+
+
+def go_arity_problem(info, args):
+    n = len(args)
+    if (n == 1 and info["n"] != 1 and "(" in args[0]) or (args and args[-1].endswith("...")):
+        return None                                     # f(g()) can spread a multi-value call; xs... spreads a slice
+    if info["va"]:
+        return f"passes {n} arguments but needs at least {info['n'] - 1}" if n < info["n"] - 1 else None
+    return f"passes {n} arguments but takes {info['n']}" if n != info["n"] else None
+
+
+def go_call_args(ct, at):
+    m = re.compile(r"\s*(?:\[[^\]\n]*\]\s*)?\(").match(ct, at)
+    if not m:
+        return None
+    end = _paren_end(ct, m.end() - 1)
+    return None if end < 0 else split_top(ct[m.end():end - 1])
+
+
+def go_imports_of(ctx, rp, idx, lx):
+    """[(local name, import path, merged package)] for in-repo imports of one file."""
+    out = []
+    for line, ipath in go_import_paths(lx.text, lx.code_text()):
+        am = re.match(r"\s*(?:import\s+)?(?:(?P<a>[\w.]+)\s+)?[\"`]", lx.line(line))
+        alias = am.group("a") if am else None
+        d = go_dir_for_import(ctx, ipath)
+        pk = go_package(ctx, rp, idx, d) if d is not None and d in rp.dirs else None
+        if pk and (alias or pk["pkg"]) not in ("_", "."):
+            out.append((alias or pk["pkg"], ipath, pk))
+    return out
+
+
+def review_go_file(ctx, fc, rp, idx) -> list:
+    """api.unknown_symbol and api.bad_call for the added lines of one Go file."""
+    lx = ctx.lexed(fc)
+    if lx is None or not fc.added:
+        return []
+    ct, cc, out = lx.code_text(), lx.call_text(), []
+    lines, stats = ct.split("\n"), ctx.cache.setdefault("review_stats", Counter())
+    by_alias = {name: pk for name, _p, pk in go_imports_of(ctx, rp, idx, lx)}
+    own_dir = fc.path.rpartition("/")[0]
+    own = go_package(ctx, rp, idx, own_dir) if own_dir in rp.dirs or not own_dir else None
+    mine = go_symbols(lx.text)
+    if own is not None and mine is not None and mine["pkg"] != own["pkg"]:
+        own = None                                       # an external test package (foo_test) sees only exported names
+    shadow = {}
+    for n in sorted(fc.added):
+        if n > len(lines):
+            continue
+        code, base = lines[n - 1], lx.starts[n - 1]
+        for m in GO_QUAL.finditer(code):
+            alias, name = m.groups()
+            pk = by_alias.get(alias)
+            if pk is None or shadow.setdefault(alias, go_shadowed(ct, alias)):
+                continue
+            stats["go_refs"] += 1
+            info = pk["names"].get(name)
+            if info is None:
+                guess = near(name, pk["names"])
+                out.append(rv("api.unknown_symbol", fc.path, n, f"package `{alias}` has no `{name}`", f"{alias}.{name}",
+                              hint=f"did you mean `{guess}`?" if guess else None))
+            elif not name[0].isupper():
+                out.append(rv("api.unknown_symbol", fc.path, n, f"`{alias}.{name}` is not exported (lower-case names are "
+                              "private to their package)", f"{alias}.{name}"))
+            elif info["t"] == "f" and not info.get("dup"):
+                args = go_call_args(cc, base + m.end())
+                why = go_arity_problem(info, args) if args is not None else None
+                if why:
+                    out.append(rv("api.bad_call", fc.path, n, f"`{alias}.{name}(...)` {why} "
+                                  f"(defined at line {info['line']} of package `{alias}`)", f"{alias}.{name}:{why}"))
+        if own is None:
+            continue
+        for m in GO_BARE.finditer(code):
+            name = m.group(1)
+            info = own["names"].get(name)
+            if info is None or info["t"] != "f" or info.get("dup") or GO_DECL_PREFIX.match(code[:m.start()]) \
+                    or shadow.setdefault("." + name, go_shadowed(ct, name)):
+                continue
+            stats["go_calls"] += 1
+            args = go_call_args(cc, base + m.start() + len(name))
+            why = go_arity_problem(info, args) if args is not None else None
+            if why:
+                out.append(rv("api.bad_call", fc.path, n, f"`{name}(...)` {why} (defined at line {info['line']})",
+                              f"{name}:{why}"))
+    return out
+
+
+# --------------------------------------------------------------------------- reviewer: JS/TS
+
+JS_IMPORT = _lazy(r"""\bimport\s+(?:type\s+)?(?:(?P<d>[\w$]+)\s*,?\s*)?(?:\{(?P<n>[^}]*)\})?(?:\*\s*as\s+[\w$]+)?\s*"""
+                       r"""from\s*(?P<q>["'])(?P<s>\.{1,2}/[^"'\n]*|\.{1,2})(?P=q)""")
+
+
+def js_resolve(rp, base_dir, spec):
+    """('file', path) | ('other',) (a non-code file or a .d.ts exists) | ('missing',) for a relative import specifier."""
+    parts = []
+    for seg in ((base_dir + "/" if base_dir else "") + spec).split("/"):
+        if seg == "..":
+            if not parts:
+                return ("other",)
+            parts.pop()
+        elif seg not in (".", ""):
+            parts.append(seg)
+    target = "/".join(parts)
+    ext = target[target.rfind("."):].lower() if "." in target.rsplit("/", 1)[-1] else ""
+    if ext in JS_FAMILY and target in rp.files:
+        return ("file", target)
+    if ext and ext not in JS_FAMILY and ext not in (".d",):
+        return ("other",) if target in rp.files else ("missing",)
+    for e in JS_RESOLVE:
+        for cand in (target + e, f"{target}/index{e}"):
+            if cand in rp.files:
+                return ("file", cand)
+    if any(target + e in rp.files or f"{target}/index{e}" in rp.files for e in JS_OTHER_MODULES):
+        return ("other",)
+    return ("missing",)
+
+
+def review_js_file(ctx, fc, rp, idx) -> list:
+    """api.unknown_symbol for relative imports on added lines of a JS/TS file: a missing file, a missing named export
+    or a missing default export. Package imports and path aliases are never judged."""
+    lx = ctx.lexed(fc)
+    if lx is None or not fc.added:
+        return []
+    import bisect
+    out, base_dir = [], fc.path.rpartition("/")[0]
+    stats = ctx.cache.setdefault("review_stats", Counter())
+    for m in JS_IMPORT.finditer(lx.text):
+        first, last = bisect.bisect_right(lx.starts, m.start()), bisect.bisect_right(lx.starts, m.end() - 1)
+        if lx.kind_at(first, m.start() - lx.starts[first - 1]) != CODE or not any(n in fc.added for n in range(first, last + 1)):
+            continue
+        spec = m.group("s")
+        res = js_resolve(rp, base_dir, spec)
+        if res[0] == "other":
+            continue
+        if res[0] == "missing":
+            out.append(rv("api.unknown_symbol", fc.path, first, f"`{spec}` does not resolve to a file in this repository",
+                          f"module:{spec}"))
+            continue
+        entry = idx.entry(res[1])
+        stats["imports"] += 1
+        if entry is None or entry["dyn"] or (entry["cjs"] and not entry["names"]):
+            continue
+        wanted = []
+        for part in split_top(m.group("n") or ""):
+            part = re.sub(r"^type\s+", "", part)
+            wanted.append(re.split(r"\s+as\s+", part)[0].strip())
+        for name in wanted:
+            if name == "default":
+                if not entry["default"]:
+                    out.append(rv("api.unknown_symbol", fc.path, first, f"`{spec}` has no default export", f"{spec}:default"))
+            elif name and name not in entry["names"]:
+                guess = near(name, entry["names"])
+                out.append(rv("api.unknown_symbol", fc.path, first, f"`{spec}` has no export named `{name}`", f"{spec}:{name}",
+                              hint=f"did you mean `{guess}`?" if guess else None))
+        if m.group("d") and not entry["default"] and not entry["cjs"]:
+            out.append(rv("api.unknown_symbol", fc.path, first, f"`{spec}` has no default export", f"{spec}:default"))
+    return out
+
+
+# --------------------------------------------------------------------------- reviewer: changed signatures and their callers
+
+def top_level_sigs(tree) -> dict:
+    """name -> (signature, line) for module-level functions defined once and without decorators."""
+    count = Counter(st.name for st in tree.body if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)))
+    return {st.name: (_py_sig(st), st.lineno) for st in tree.body
+            if isinstance(st, (ast.FunctionDef, ast.AsyncFunctionDef)) and count[st.name] == 1 and not st.decorator_list}
+
+
+def signature_changes(ctx) -> list:
+    """Functions of changed files whose parameters differ between the old and the new version:
+    [{"path", "name", "lang", "old", "new", "line"}]. Python: module-level functions; Go: package-level functions."""
+    if "sigchanges" in ctx.cache:
+        return ctx.cache["sigchanges"]
+    out = []
+    for fc in ctx.code_changes(PY_EXTS | {".go"}):
+        if not (fc.old_spec and fc.new_spec):
+            continue
+        try:
+            if fc.ext in PY_EXTS:
+                old, new = ctx.py_tree(fc, "old")[0], ctx.py_tree(fc, "new")[0]
+                if old is None or new is None:
+                    continue
+                before, after = top_level_sigs(old), top_level_sigs(new)
+                for name in sorted(before.keys() & after.keys()):
+                    if before[name][0] != after[name][0]:
+                        out.append({"path": fc.path, "name": name, "lang": "py", "old": before[name][0],
+                                    "new": after[name][0], "line": after[name][1]})
+            else:
+                a, b = go_symbols(ctx.old_text(fc) or ""), go_symbols(ctx.new_text(fc) or "")
+                if a is None or b is None:
+                    continue
+                for name, info in b["names"].items():
+                    was = a["names"].get(name)
+                    if info["t"] == "f" and was and was["t"] == "f" and not info.get("dup") and not was.get("dup") \
+                            and (was["n"], was["va"]) != (info["n"], info["va"]):
+                        out.append({"path": fc.path, "name": name, "lang": "go", "old": was, "new": info,
+                                    "line": info["line"]})
+        except (RecursionError, MemoryError, LexError):
+            continue
+    ctx.cache["sigchanges"] = out
+    return out
+
+
+def describe_signature(change) -> str:
+    if change["lang"] == "py":
+        def fmt(s):
+            return "(" + ", ".join([p[0] + ("=..." if p[1] else "") for p in s["p"]] + (["*args"] if s["va"] else [])
+                                   + [k[0] + ("=..." if k[1] else "") for k in s["ko"]] + (["**kw"] if s["kw"] else [])) + ")"
+        return f"{change['name']}{fmt(change['old'])} -> {change['name']}{fmt(change['new'])}"
+    return f"{change['name']}: {change['old']['n']} -> {change['new']['n']} parameters"
+
+
+def py_callers(ctx, rp, idx, change, limit) -> list:
+    """Calls elsewhere in the repository that fit the old signature, do not fit the new one, and sit on lines the
+    change did not touch: [(path, line, call text)]."""
+    out, updated = [], {fc.path: fc.added for fc in ctx.changes}
+    for path in sorted(rp.files):
+        if idx.kind(path) != "py" or ctx.ignored(path):
+            continue
+        entry = idx.entry(path)
+        if entry is None or change["name"] not in entry["calls"]:
+            continue
+        try:
+            tree = ast.parse(ctx.read_new(path) or "")
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            continue
+        binds, other, _optional, _module_loc, resolve_chain = py_resolver(path, tree, rp, idx)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or node.lineno in updated.get(path, ()):
+                continue
+            target = None
+            if isinstance(node.func, ast.Name):
+                target = resolve_chain(node.func.id, [])
+                if target is None and path == change["path"] and node.func.id == change["name"] \
+                        and not binds.get(node.func.id) and other[node.func.id] == 1:
+                    target = ("def", path, {"line": change["line"], "t": "f"}, node.func.id)
+            elif isinstance(node.func, ast.Attribute):
+                rest, cur = [], node.func
+                while isinstance(cur, ast.Attribute):
+                    rest.append(cur.attr)
+                    cur = cur.value
+                if isinstance(cur, ast.Name):
+                    target = resolve_chain(cur.id, rest[::-1])
+            if target and target[0] == "def" and target[1] == change["path"] and target[2].get("line") == change["line"] \
+                    and py_call_problem(change["old"], node) is None and py_call_problem(change["new"], node):
+                out.append((path, node.lineno, ast.unparse(node.func)))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+def go_import_path_of(ctx, directory):
+    mods, _local = go_project(ctx)
+    best = None
+    for d, (module, _declared) in mods.items():
+        if module and (directory == d or directory.startswith(d + "/" if d else "")) and (best is None or len(d) > len(best[0])):
+            best = (d, module)
+    if best is None:
+        return None
+    rel = directory[len(best[0]):].strip("/")
+    return best[1] + ("/" + rel if rel else "")
+
+
+def go_callers(ctx, rp, idx, change, limit) -> list:
+    out, updated = [], {fc.path: fc.added for fc in ctx.changes}
+    directory = change["path"].rpartition("/")[0]
+    ipath, name = go_import_path_of(ctx, directory), change["name"]
+    for path in sorted(p for pl in rp.go_files.values() for p in pl):
+        if ctx.ignored(path):
+            continue
+        entry = idx.entry(path)
+        if entry is None or name not in entry["calls"]:
+            continue
+        try:
+            lx = lex_text(ctx.read_new(path) or "", language_for(path).lex)
+        except LexError:
+            continue
+        ct = lx.code_text()
+        if path.rpartition("/")[0] == directory:
+            rx, skip = re.compile(rf"(?<![\w.]){re.escape(name)}\s*(?:\[[^\]\n]*\]\s*)?\("), go_shadowed(ct, name)
+        else:
+            alias = next((a for a, p, _pk in go_imports_of(ctx, rp, idx, lx) if p == ipath), None)
+            if alias is None:
+                continue
+            rx, skip = re.compile(rf"(?<![\w.]){re.escape(alias)}\.{re.escape(name)}\s*(?:\[[^\]\n]*\]\s*)?\("), \
+                go_shadowed(ct, alias)
+        if skip or (entry["pkg"].endswith("_test") and path.rpartition("/")[0] == directory):
+            continue
+        for m in rx.finditer(ct):
+            line = ct.count("\n", 0, m.start()) + 1
+            if line in updated.get(path, ()) or GO_DECL_PREFIX.match(ct[ct.rfind("\n", 0, m.start()) + 1:m.start()]):
+                continue
+            cc = lx.call_text()
+            close = _paren_end(cc, m.end() - 1)
+            args = split_top(cc[m.end():close - 1]) if close > 0 else None
+            if args is not None and go_arity_problem(change["old"], args) is None and go_arity_problem(change["new"], args):
+                out.append((path, line, m.group(0).rstrip("(").strip()))
+                if len(out) >= limit:
+                    return out
+    return out
+
+
+CALLER_LIMIT = 15
+
+
+def broken_caller_findings(ctx, rp, idx) -> list:
+    out = []
+    for change in signature_changes(ctx):
+        found = (py_callers if change["lang"] == "py" else go_callers)(ctx, rp, idx, change, CALLER_LIMIT)
+        for path, line, call in found:
+            out.append(rv("api.broken_caller", path, line,
+                          f"`{call}(...)` was not updated, but `{change['name']}` changed ({describe_signature(change)}) "
+                          f"in {change['path']}", f"{change['path']}:{change['name']}:{call}"))
+    return out
+
+
+# --------------------------------------------------------------------------- reviewer: tests that should have changed
+
+SKIP_SOURCE = frozenset({"__init__.py", "conftest.py", "setup.py", "manage.py", "__main__.py", "wsgi.py", "asgi.py"})
+REVIEW_EXTS = PY_EXTS | JS_FAMILY | {".go"}
+COMMENT_LINE = _lazy(r"^\s*(?:#|//|/\*|\*)")
+
+
+def _docstring_lines(tree) -> set:
+    out = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Module)) and node.body:
+            first = node.body[0]
+            if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant) and isinstance(first.value.value, str):
+                out.update(range(first.lineno, first.end_lineno + 1))
+    return out
+
+
+def changed_functions(ctx, fc) -> list:
+    """[(name, line)] of the functions whose bodies or headers contain an added line of real code (not a comment,
+    a blank line or a docstring); each added line counts for the innermost function around it."""
+    code = {n for n, t in fc.added.items() if t.strip() and not COMMENT_LINE.match(t)}
+    if not code:
+        return []
+    if fc.ext in PY_EXTS:
+        tree, _err = ctx.py_tree(fc)
+        if tree is None:
+            return []
+        code -= _docstring_lines(tree)
+        spans = [(n.lineno, n.end_lineno, n.name) for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    else:
+        lx, spec = ctx.lexed(fc), language_for(fc.path)
+        if lx is None or spec is None:
+            return []
+        try:
+            spans = [(f.line, f.end, f.name) for f in analyze_functions(lx, spec)]
+        except LexError:
+            return []
+    found = {}
+    for n in code:
+        inside = [s for s in spans if s[0] <= n <= s[1]]
+        if inside:
+            best = min(inside, key=lambda s: s[1] - s[0])
+            found[(best[2], best[0])] = True
+    return sorted(((name, line) for name, line in found), key=lambda x: x[1])
+
+
+def related_test_paths(ctx, fc, tests) -> list:
+    """Changed test files that belong to `fc`: by name next to or mirroring it, or by [review] test_map (which may point
+    at files outside the usual test locations, so it matches every changed file, not only the recognised tests)."""
+    stem, directory = fc.name.rsplit(".", 1)[0], fc.path.rpartition("/")[0]
+    out = []
+    for t in tests:
+        tn = t.name
+        if fc.ext in PY_EXTS:
+            hit_ = tn in (f"test_{stem}.py", f"{stem}_test.py")
+        elif fc.ext == ".go":
+            hit_ = tn.endswith("_test.go") and t.path.rpartition("/")[0] == directory
+        else:
+            hit_ = bool(re.fullmatch(re.escape(stem) + r"\.(?:test|spec)\.\w+", tn))
+        if hit_:
+            out.append(t.path)
+    for key, template in (ctx.cfg["review"].get("test_map") or {}).items():
+        if path_matches(fc.path, [key]):
+            want = str(template).replace("{stem}", stem).replace("{dir}", directory).replace("{ext}", fc.ext)
+            out += [c.path for c in ctx.changes if not c.deleted and not c.binary and c.path != fc.path
+                    and path_matches(c.path, [want])]
+    return sorted(set(out))
+
+
+def check_tests_for_changes(ctx, summary) -> list:
+    tests = [fc for fc in ctx.changes if not fc.deleted and not fc.binary and ctx.is_test(fc.path)]
+    mentions = "\n".join(t for fc in tests for t in fc.added.values())
+    findings = []
+    for fc in ctx.code_changes(REVIEW_EXTS, tests=False):
+        if fc.name in SKIP_SOURCE or fc.name.endswith(".d.ts") or is_generated(ctx, fc.path):
+            continue
+        try:
+            funcs = [f for f in changed_functions(ctx, fc) if not (f[0].startswith("_") and fc.ext in PY_EXTS)]
+        except (RecursionError, MemoryError, LexError):
+            continue
+        if not funcs:
+            continue
+        related = related_test_paths(ctx, fc, tests)
+        rows = []
+        for name, line in funcs:
+            tested = bool(related) or bool(re.search(rf"(?<![\w$]){re.escape(name)}(?![\w$])", mentions))
+            rows.append({"path": fc.path, "name": name, "line": line, "tested": tested})
+        summary["functions"] += rows
+        loose = [r for r in rows if not r["tested"]]
+        if loose:
+            names = ", ".join(f"`{r['name']}`" for r in loose[:4]) + (f" and {len(loose) - 4} more" if len(loose) > 4 else "")
+            findings.append(rv("tests.missing_for_change", fc.path, loose[0]["line"],
+                               f"{names} changed, but no related test changed and no changed test mentions "
+                               f"{'it' if len(loose) == 1 else 'them'}", f"{fc.path}:" + ",".join(r["name"] for r in loose)))
+    return findings
+
+
+# --------------------------------------------------------------------------- reviewer: what the message claims
+
+TESTS_CLAIM = _lazy(r"\b(?:add(?:s|ed|ing)?|fix(?:es|ed)?|updat(?:e|es|ed|ing)|improv(?:e|es|ed)|extend(?:s|ed)?|"
+                         r"writ(?:e|es|ing)|wrote)\s+(?:the\s+|some\s+|new\s+|more\s+|missing\s+|unit\s+|integration\s+|e2e\s+|"
+                         r"regression\s+)*tests?\b", re.I)
+REFACTOR_CLAIM = _lazy(r"(?:^|[^\w])(?:no\s+(?:functional|behaviou?r(?:al)?|logic)\s+changes?|(?:pure\s+)?refactor(?:ing|ed)?"
+                            r"(?:\s+only)?|cleanup\s+only|rename\s+only|just\s+(?:a\s+)?refactor)", re.I)
+FIX_CLAIM = _lazy(r"\bfix(?:es|ed)?\s+(?:the\s+|a\s+)?(?:bug\s+in\s+|issue\s+(?:in|with)\s+)?"
+                       r"(?P<q>[`'\"])?(?P<x>[A-Za-z_][\w./:-]*(?:\(\))?)(?(q)(?P=q))", re.I)
+BRANCHES = _lazy(r"\b(?:if|elif|else\s+if|for|while|case|catch|except|raise|throw|panic)\b|&&|\|\|")
+
+
+def message_claims(text: str) -> str:
+    """The prose of a commit message or PR text: no fenced code, unchecked task-list items or trailers."""
+    out, fenced = [], False
+    for line in text.splitlines():
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+        elif not fenced and not re.match(r"\s*[-*]\s*\[ \]", line) \
+                and not re.match(r"(?i)\s*(?:co-authored-by|signed-off-by|reviewed-by)\s*:", line):
+            out.append(line)
+    return "\n".join(out)
+
+
+def identifier_like(token: str, quoted: bool) -> bool:
+    bare = token[:-2] if token.endswith("()") else token
+    return quoted or token.endswith("()") or any(c in bare for c in "_./:") or bool(re.search(r"[a-z][A-Z]", bare))
+
+
+def check_claims(ctx) -> list:
+    if not ctx.messages:
+        return []
+    tests_changed = any(not fc.deleted and ctx.is_test(fc.path) for fc in ctx.changes)
+    haystack = None
+    findings, seen = [], set()
+    for message in ctx.messages:
+        prose = message_claims(message)
+        for m in TESTS_CLAIM.finditer(prose):
+            claim = " ".join(m.group(0).lower().split())
+            if not tests_changed and ("tests", claim) not in seen:
+                seen.add(("tests", claim))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{claim}" but no test file changed in this diff', f"tests:{claim}",
+                                   human=None))
+        for m in FIX_CLAIM.finditer(prose):
+            token = m.group("x")
+            if not identifier_like(token, bool(m.group("q"))):
+                continue
+            if haystack is None:
+                haystack = "\n".join([fc.path for fc in ctx.changes] + [t for fc in ctx.changes for t in fc.added.values()]
+                                     + [t for fc in ctx.changes for _n, t in fc.removed]).lower()
+            bare = token[:-2] if token.endswith("()") else token
+            tail = re.split(r"[./:]", bare)[-1] or bare
+            if bare.lower() not in haystack and tail.lower() not in haystack and ("fix", bare.lower()) not in seen:
+                seen.add(("fix", bare.lower()))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "fix {token}" but nothing in the diff mentions `{bare}`', f"fix:{bare.lower()}",
+                                   human=None))
+        r = REFACTOR_CLAIM.search(prose)
+        if r and ("refactor", "") not in seen:
+            evidence = refactor_evidence(ctx)
+            if evidence:
+                seen.add(("refactor", ""))
+                claim = " ".join(r.group(0).lower().split())
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{claim}" but the diff {evidence}', "refactor", human=None))
+    return findings
+
+
+def refactor_evidence(ctx):
+    """Why a diff is not behaviour-neutral, or None: a changed function signature in non-test code, or at least three
+    more branch/error points added than removed across non-test source files."""
+    changes = [c for c in signature_changes(ctx) if not ctx.is_test(c["path"])]
+    if changes:
+        return f"changes the signature of `{changes[0]['name']}` ({describe_signature(changes[0])})"
+    net = 0
+    for fc in ctx.code_changes(REVIEW_EXTS, tests=False):
+        net += sum(len(BRANCHES.findall(t)) for t in fc.added.values() if not COMMENT_LINE.match(t)) \
+            - sum(len(BRANCHES.findall(t)) for _n, t in fc.removed if not COMMENT_LINE.match(t))
+    return f"adds {net} more branches or error paths than it removes" if net >= 3 else None
+
+
+# --------------------------------------------------------------------------- reviewer: error handling that disappeared
+
+def _swallows(body) -> bool:
+    return all(isinstance(s, (ast.Pass, ast.Continue)) or (isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
+                                                          and s.value.value is Ellipsis)
+               or (isinstance(s, ast.Return) and (s.value is None or (isinstance(s.value, ast.Constant) and s.value.value is None)))
+               for s in body)
+
+
+def _broad(type_text) -> bool:
+    return type_text is None or type_text.split(".")[-1] in ("Exception", "BaseException")
+
+
+def py_handlers(tree):
+    """({qualified function name: [(exception type text | None, ignores it, line)]}, {qualified name: def line})."""
+    out, lines = defaultdict(list), {}
+
+    def visit(node, stack):
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                name = ".".join(stack + [child.name])
+                lines[name] = child.lineno
+                visit(child, stack + [child.name])
+            else:
+                if isinstance(child, ast.ExceptHandler):
+                    out[".".join(stack)].append((ast.unparse(child.type) if child.type is not None else None,
+                                                 _swallows(child.body), child.lineno))
+                visit(child, stack)
+    visit(tree, [])
+    return out, lines
+
+
+GO_ERR_CHECK = _lazy(r"\berr\s*!=\s*nil\b")
+JS_CATCH = _lazy(r"\.catch\s*\(|\bcatch\b\s*[({]")
+GO_IGNORED = _lazy(r"^\s*(?P<lhs>(?:[\w.]+\s*,\s*)*_)\s*:?=\s*(?:(?P<q>[A-Za-z_]\w*)\.)?(?P<f>[A-Za-z_]\w*)\s*(?:\[[^\]\n]*\]\s*)?\(")
+
+
+def _function_counts(lx, spec, rx):
+    """{function name: (matches of rx in its body, first line)} from brace analysis of one file."""
+    counts, lines = Counter(), {}
+    ct = lx.code_text().split("\n")
+    for f in analyze_functions(lx, spec):
+        counts[f.name] += len(rx.findall("\n".join(ct[f.line - 1:f.end])))
+        lines.setdefault(f.name, f.line)
+    return counts, lines
+
+
+def error_check_findings(ctx, fc, rp, idx) -> list:
+    out = []
+    if fc.ext in PY_EXTS and fc.old_spec and fc.new_spec:
+        old, new = ctx.py_tree(fc, "old")[0], ctx.py_tree(fc, "new")[0]
+        if old is None or new is None:
+            return []
+        before, after, lines = py_handlers(old)[0], py_handlers(new)[0], py_handlers(new)[1]
+        removed_text = {n: t for n, t in fc.removed}
+        for qual in sorted(before.keys() & after.keys() | {q for q in before if q in lines}):
+            was, now = before.get(qual, []), after.get(qual, [])
+            if qual and qual not in lines:
+                continue
+            narrow_was = Counter(h[0] for h in was if not _broad(h[0]))
+            narrow_now = Counter(h[0] for h in now if not _broad(h[0]))
+            loose = [h for h in now if _broad(h[0]) and h[1] and h[2] in fc.added]
+            lost = narrow_was - narrow_now
+            where = qual or "module level"
+            if loose and lost:
+                kind = next(iter(lost))
+                out.append(rv("code.error_check_removed", fc.path, loose[0][2],
+                              f"`except {kind}` in `{where}` became `except{' ' + loose[0][0] if loose[0][0] else ''}` "
+                              "that ignores the error", f"{where}:narrowed:{kind}"))
+            elif len(now) < len(was) and any(t.strip().startswith("except") for t in removed_text.values()):
+                out.append(rv("code.error_check_removed", fc.path, lines.get(qual) or 1,
+                              f"an `except` handler was removed from `{where}` ({len(was)} before, {len(now)} now)",
+                              f"{where}:handler-removed"))
+    elif fc.ext == ".go" and fc.new_spec:
+        lx = ctx.lexed(fc)
+        if lx is None:
+            return []
+        spec = language_for(fc.path)
+        if fc.old_spec:
+            old_lx = ctx.lexed(fc, "old")
+            if old_lx is not None:
+                before, _ = _function_counts(old_lx, spec, GO_ERR_CHECK)
+                after, lines = _function_counts(lx, spec, GO_ERR_CHECK)
+                if sum(before.values()) > sum(after.values()):
+                    for name in sorted(before.keys() & after.keys()):
+                        if before[name] > after[name]:
+                            out.append(rv("code.error_check_removed", fc.path, lines[name],
+                                          f"`{name}` lost {before[name] - after[name]} `err != nil` check(s) "
+                                          f"({before[name]} before, {after[name]} now)", f"{name}:err-check"))
+        by_alias = {name: pk for name, _p, pk in go_imports_of(ctx, rp, idx, lx)}
+        own_dir = fc.path.rpartition("/")[0]
+        own = go_package(ctx, rp, idx, own_dir) if own_dir in rp.dirs or not own_dir else None
+        mine = go_symbols(lx.text)
+        if own is not None and mine is not None and mine["pkg"] != own["pkg"]:
+            own = None
+        lines_ = lx.code_text().split("\n")
+        for n in sorted(fc.added):
+            m = GO_IGNORED.match(lines_[n - 1]) if n <= len(lines_) else None
+            if not m:
+                continue
+            pk = by_alias.get(m.group("q")) if m.group("q") else own
+            info = pk["names"].get(m.group("f")) if pk else None
+            width = len(m.group("lhs").split(","))
+            if info and info["t"] == "f" and info["err"] and info["r"] == width:
+                call = (m.group("q") + "." if m.group("q") else "") + m.group("f")
+                out.append(rv("code.error_check_removed", fc.path, n,
+                              f"the error returned by `{call}` is assigned to `_` and dropped", f"{call}:ignored"))
+    elif fc.ext in JS_FAMILY and fc.old_spec and fc.new_spec:
+        lx, old_lx, spec = ctx.lexed(fc), ctx.lexed(fc, "old"), language_for(fc.path)
+        if lx is None or old_lx is None:
+            return []
+        before, _ = _function_counts(old_lx, spec, JS_CATCH)
+        after, lines = _function_counts(lx, spec, JS_CATCH)
+        if sum(before.values()) > sum(after.values()):
+            for name in sorted(before.keys() & after.keys()):
+                if before[name] > after[name]:
+                    out.append(rv("code.error_check_removed", fc.path, lines[name],
+                                  f"`{name}` lost {before[name] - after[name]} `catch` handler(s) "
+                                  f"({before[name]} before, {after[name]} now)", f"{name}:catch"))
+        added_at = {t.strip(): n for n, t in fc.added.items()}
+        for _n, t in fc.removed:
+            stripped = t.strip()
+            if re.search(r"\bawait\s", stripped) and not COMMENT_LINE.match(stripped):
+                plain = re.sub(r"\bawait\s+", "", stripped, count=1)
+                if plain != stripped and plain in added_at:
+                    out.append(rv("code.error_check_removed", fc.path, added_at[plain],
+                                  f"`await` was dropped from `{plain[:60]}`: failures now surface late or not at all",
+                                  f"await:{plain[:60]}"))
+    return out
+
+
+# --------------------------------------------------------------------------- reviewer: the checker and the summary
+
+def dependency_changes(ctx) -> tuple:
+    added, removed = [], []
+    for fc in ctx.changes:
+        kind = manifest_kind(fc.path)
+        if kind is None or kind == "gomod" or fc.binary:
+            continue
+        try:
+            old = parse_manifest(kind, ctx.old_text(fc), fc.path)[0] if fc.old_spec else {}
+            new = parse_manifest(kind, ctx.new_text(fc), fc.path)[0] if fc.new_spec and not fc.deleted else {}
+        except (KeyError, ValueError, TypeError, AttributeError, RecursionError):   # a manifest we cannot read: no claim
+            continue
+        names = lambda d: {f"{x.name}" for x in (d or {}).values()}      # noqa: E731
+        added += sorted(names(new) - names(old))
+        removed += sorted(names(old) - names(new))
+    return added, removed
+
+
+def check_review(ctx) -> list:
+    """Every reviewer rule. Runs only for `review` and `check --deep`; a file that cannot be parsed is skipped."""
+    if not getattr(ctx, "deep", False) or ctx.full:
+        return []
+    rp, idx = repo_paths(ctx), symbol_index(ctx)
+    summary = {"functions": [], "tests_changed": sorted(fc.path for fc in ctx.changes
+                                                         if not fc.deleted and not fc.binary and ctx.is_test(fc.path))}
+    ctx.cache["review"] = summary
+    findings = []
+    for fc in ctx.code_changes(REVIEW_EXTS):
+        runners = [error_check_findings]
+        if fc.ext in PY_EXTS:
+            runners.append(review_python_file)
+        elif fc.ext == ".go":
+            runners.append(review_go_file)
+        else:
+            runners.append(review_js_file)
+        for run in runners:
+            try:
+                findings += run(ctx, fc, rp, idx)
+            except (RecursionError, MemoryError, LexError):
+                continue
+    findings += broken_caller_findings(ctx, rp, idx)
+    findings += check_tests_for_changes(ctx, summary)
+    findings += check_claims(ctx)
+    summary["deps_added"], summary["deps_removed"] = dependency_changes(ctx)
+    summary["checked"] = dict(ctx.cache.get("review_stats", {}))
+    idx.save()
+    return findings
+
+
+# --------------------------------------------------------------------------- the review report
+
+REVIEW_SCHEMA = 1                        # bump when the JSON shape of `review --format json` changes incompatibly
+
+
+def first_sentence(text) -> str:
+    return " ".join(((text or "").splitlines() or [""])[0].split())
+
+
+def review_report(res: Result) -> dict:
+    """One structure behind every `review` format (text, markdown, json): what changed, what must be fixed, what to
+    check, what looks good. Allowed findings (allow entries, baseline) are counted, not listed."""
+    info = (res.extra or {}).get("review") or {}
+    active = [f for f in res.findings if not f.allowed]
+
+    def row(f):
+        return {"rule": f.rule, "action": f.action, "severity": f.meta.severity, "confidence": f.meta.confidence,
+                "path": f.path, "line": f.line, "message": f.message, "fix": first_sentence(f.hint or f.meta.hint),
+                "fingerprint": f.fingerprint}
+    funcs = info.get("functions") or []
+    good = []
+    tested = sum(1 for f in funcs if f["tested"])
+    if tested:
+        good.append(f"tests changed for {tested} of {len(funcs)} changed function{'s' if len(funcs) != 1 else ''}")
+    elif info.get("tests_changed") and not funcs:
+        good.append(f"{len(info['tests_changed'])} test file{'s' if len(info['tests_changed']) != 1 else ''} changed")
+    if res.stats.get("files") and not any(f.rule.startswith("secrets.") for f in active):
+        good.append("no secrets or credentials in the change")
+    checked = sum((info.get("checked") or {}).get(k, 0) for k in ("imports", "attributes", "calls", "go_refs", "go_calls"))
+    if checked and not any(f.rule.startswith("api.") for f in active):
+        good.append(f"{checked} in-repo imports, attributes and calls matched their definitions")
+    if info.get("deps_removed") and not info.get("deps_added"):
+        good.append("dependencies removed, none added: " + ", ".join(info["deps_removed"][:5]))
+    return {
+        "tool": "aigate-lite", "version": __version__, "schema": REVIEW_SCHEMA, "kind": "review", "label": res.label,
+        "provenance": {"kind": res.provenance[0], "source": res.provenance[1]}, "verdict": res.verdict, "risk": res.risk,
+        "summary": {"files": res.stats.get("files", 0), "added": res.stats.get("added", 0),
+                    "removed": res.stats.get("removed", 0), "functions_changed": len(funcs), "functions_with_tests": tested,
+                    "tests_changed": info.get("tests_changed") or [], "deps_added": info.get("deps_added") or [],
+                    "deps_removed": info.get("deps_removed") or [], "checked": info.get("checked") or {}},
+        "must_fix": [row(f) for f in active if f.action in ("block", "fix")],
+        "should_check": [row(f) for f in active if f.action == "warn"],
+        "looks_good": good, "allowed": len(res.findings) - len(active), "notes": list(res.notes),
+    }
+
+
+def _plural(n, word) -> str:
+    return f"{n} {word}{'' if n == 1 else 's'}"
+
+
+def _verdict_sentence(rep) -> str:
+    must, should = len(rep["must_fix"]), len(rep["should_check"])
+    return {"pass": "nothing to fix.",
+            "warn": f"{_plural(should, 'thing')} to check; nothing blocks the change.",
+            "fix": f"fix {_plural(must, 'thing')} before this goes in" + (f", then look at {should} more." if should else "."),
+            "block": f"blocked: {_plural(must, 'problem')} must be fixed" + (f", plus {should} to check." if should else ".")
+            }[rep["verdict"]]
+
+
+def _review_summary_lines(rep) -> list:
+    s = rep["summary"]
+    lines = [f"{_plural(s['files'], 'file')} changed (+{s['added']} -{s['removed']}); "
+             f"{_plural(s['functions_changed'], 'function')} changed"]
+    deps = [f"+{d}" for d in s["deps_added"]] + [f"-{d}" for d in s["deps_removed"]]
+    lines.append("dependencies: " + (", ".join(deps) if deps else "none added or removed"))
+    lines.append("tests touched: " + (_plural(len(s["tests_changed"]), "file") if s["tests_changed"] else "none"))
+    return lines
+
+
+def _where(f) -> str:
+    return f["path"] + (f":{f['line']}" if f["line"] else "")
+
+
+def render_review_text(rep) -> str:
+    out = [f"aigate-lite review - {rep['label']} - verdict {rep['verdict'].upper()} (risk {rep['risk']:g}, "
+           f"{rep['provenance']['kind']})", "", "Summary"]
+    out += ["  " + line for line in _review_summary_lines(rep)]
+    out += ["", f"Must fix ({len(rep['must_fix'])})"]
+    if not rep["must_fix"]:
+        out.append("  nothing")
+    for i, f in enumerate(rep["must_fix"], 1):
+        out += [f"  {i}. {f['rule']}  {_where(f)}", f"     {f['message']}"] + ([f"     fix: {f['fix']}"] if f["fix"] else [])
+    out += ["", f"Should check ({len(rep['should_check'])})"]
+    if not rep["should_check"]:
+        out.append("  nothing")
+    by_rule = defaultdict(list)
+    for f in rep["should_check"]:
+        by_rule[f["rule"]].append(f)
+    for rule, group in by_rule.items():
+        general = first_sentence(RULES[rule].hint)
+        out.append(f"  {rule} ({len(group)})" + (f"  fix: {general}" if general else ""))
+        out += [f"    - {_where(f)}  {f['message']}" + (f" ({f['fix']})" if f["fix"] and f["fix"] != general else "")
+                for f in group]
+    out += ["", "What looks good"]
+    out += ["  + " + g for g in rep["looks_good"]] or ["  nothing to single out"]
+    if rep["allowed"]:
+        out.append(f"  ({_plural(rep['allowed'], 'finding')} allowed by an allow entry or the baseline)")
+    out += [f"  note: {n}" for n in rep["notes"]]
+    out += ["", f"Verdict: {rep['verdict'].upper()} - {_verdict_sentence(rep)}"]
+    return to_ascii("\n".join(out)) + "\n"
+
+
+def render_review_md(rep) -> str:
+    out = [f"## aigate-lite review: {rep['verdict'].upper()}", "",
+           f"{rep['label']} - {rep['provenance']['kind']} change - risk {rep['risk']:g}/100", "", "### Summary", ""]
+    out += [f"- {line}" for line in _review_summary_lines(rep)]
+    out += ["", f"### Must fix ({len(rep['must_fix'])})", ""]
+    out += [f"- **`{f['rule']}`** `{_where(f)}` - {f['message']}" + (f"\n  - fix: {f['fix']}" if f["fix"] else "")
+            for f in rep["must_fix"]] or ["Nothing."]
+    out += ["", f"### Should check ({len(rep['should_check'])})", ""]
+    by_rule = defaultdict(list)
+    for f in rep["should_check"]:
+        by_rule[f["rule"]].append(f)
+    for rule, group in by_rule.items():
+        general = first_sentence(RULES[rule].hint)
+        out.append(f"- **`{rule}`** ({len(group)})" + (f" - fix: {general}" if general else ""))
+        out += [f"  - `{_where(f)}` - {f['message']}" + (f" ({f['fix']})" if f["fix"] and f["fix"] != general else "")
+                for f in group]
+    if not by_rule:
+        out.append("Nothing.")
+    out += ["", "### What looks good", ""]
+    out += [f"- {g}" for g in rep["looks_good"]] or ["Nothing to single out."]
+    if rep["allowed"]:
+        out.append(f"- ({_plural(rep['allowed'], 'finding')} allowed by an allow entry or the baseline)")
+    out += [f"> note: {n}" for n in rep["notes"]]
+    out += ["", f"**Verdict: {rep['verdict'].upper()}** - {_verdict_sentence(rep)}"]
+    return "\n".join(out) + "\n"
+
+
+def pr_range(repo, env) -> str:
+    """BASE..HEAD for the pull request being reviewed: the target branch GitHub/GitLab names, else the usual suspects."""
+    base = env.get("GITHUB_BASE_REF") or env.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
+    names = [f"origin/{base}", base] if base else ["origin/HEAD", "origin/main", "origin/master", "main", "master"]
+    for name in names:
+        if repo.commit(name):
+            return f"{name}..HEAD"
+    raise GitError("cannot tell which branch this pull request targets",
+                   "set GITHUB_BASE_REF, or name the range yourself: aigate-lite review --range origin/main..HEAD")
+
+
+def pr_texts(env) -> list:
+    """The pull/merge request title and description the CI provides, for review.claim_mismatch."""
+    out = []
+    path = env.get("GITHUB_EVENT_PATH")
+    if path:
+        try:
+            if os.path.getsize(path) <= 5_000_000:
+                with open(path, encoding="utf-8") as fh:
+                    pr = json.load(fh).get("pull_request") or {}
+                out += [str(pr.get("title") or ""), str(pr.get("body") or "")]
+        except (OSError, ValueError, AttributeError):
+            pass
+    out += [env.get("CI_MERGE_REQUEST_TITLE", ""), env.get("CI_MERGE_REQUEST_DESCRIPTION", "")]
+    return [t for t in out if t.strip()]
+
+
+def cmd_review(args) -> int:
+    """`aigate-lite review [--staged | --range A..B | --pr]`: the gate's checks plus the reviewer's, as a report."""
+    import argparse
+    env = dict(os.environ)
+    rng, extra = args.range, [m for m in (args.message or []) if m.strip()]
+    if args.pr:
+        rng = pr_range(Repo.discover(), env)
+        extra += pr_texts(env)
+    ns = argparse.Namespace(staged=not rng, range=rng, push=False, all=False, remote=None, format="review",
+                            offline=args.offline, cache=False, no_cache=args.no_cache, no_commands=True,
+                            config=args.config, quiet=False, verbose=False, color="never", summary=False,
+                            group_by="path", max_findings=None, deep=True, extra_messages=extra)
+    res = run_check(ns, env, collect=True)
+    if isinstance(res, int):                                     # nothing staged / no commits to look at
+        res = Result([], "pass", False, 0, ("human", "default"), "nothing to review",
+                     {"files": 0, "added": 0, "removed": 0, "seconds": 0}, "built-in defaults", [])
+    if args.format == "agent":
+        sys.stdout.write(render_agent(res))
+    else:
+        rep = review_report(res)
+        sys.stdout.write({"json": lambda r: json.dumps(r, indent=2) + "\n", "md": render_review_md,
+                          "text": render_review_text}[args.format](rep))
+    return 1 if res.verdict in ("fix", "block") else 0
+
+
 # --------------------------------------------------------------------------- running a check
 
 LANGUAGE_EXTS = {"python": PY_EXTS, "javascript": JS_EXTS, "code": CODE_EXTS}
@@ -5916,9 +7579,10 @@ CHECKERS = [
     Checker("check_python", ("python",), False, check_python),
     Checker("check_files", None, False, check_files),
     Checker("check_duplicates", ("code",), False, check_duplicates),
+    Checker("check_review", None, False, check_review),          # only with ctx.deep (review, check --deep)
 ]
 SECRET_CHECKERS = ("check_secrets", "check_env_files")
-FULL_SCAN_SKIP = ("check_paths",)       # forbidden/scope/config-changed rules judge changes, not existing files   # in ranges these run commit by commit instead
+FULL_SCAN_SKIP = ("check_paths",)     # forbidden/scope/config-changed rules judge changes, not existing files   # in ranges these run commit by commit instead
 
 
 def _commit_info(repo, shas) -> tuple:
@@ -6054,7 +7718,8 @@ def run_check(args, env, collect=False):
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
                       provenance=provenance, registry=registry, merge=merge, label=run_label, results=results,
-                      full=full)
+                      full=full, messages=[*messages, *(getattr(args, "extra_messages", None) or [])],
+                      deep=bool(getattr(args, "deep", False)), no_cache=bool(args.no_cache))
         if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
             bl_source = None                          # no git reads for repositories without a baseline
         ctx.baseline, bl_problems = load_baseline(repo, bl_source)
@@ -6113,6 +7778,10 @@ def run_check(args, env, collect=False):
     res = Result(findings, verdict, escalated, risk, provenance, label,
                  {"files": stats["files"], "added": stats["added"], "removed": stats["removed"],
                   "seconds": stats["seconds"]}, cfg.origin, notes)
+    if getattr(args, "deep", False):
+        res.extra["review"] = final_ctx.cache.get("review")
+        if full:
+            notes.append("--deep does not run with --all: the reviewer judges a change, not the whole tree")
     if collect:
         return res
     view = {"summary": getattr(args, "summary", False), "group_by": getattr(args, "group_by", "path"),
@@ -7299,6 +8968,16 @@ HEURISTIC_RULES = {
     "size.function_length": "[Go and JavaScript/TypeScript: function spans are estimated from brace structure, not parsed]",
     "size.complexity": "[Go and JavaScript/TypeScript: estimated by counting decision points in the function body]",
     "perf.nested_loops": "[Go and JavaScript/TypeScript: loop nesting is estimated from brace structure]",
+    "api.unknown_symbol": "[runs in `aigate-lite review` and `check --deep`; Python, Go and relative JS/TS imports, resolved "
+                          "against files in this repository only; nothing is claimed about dynamic modules: __getattr__, "
+                          "star imports, getattr/hasattr on the module, globals(), __dict__, metaclasses, files that do not parse]",
+    "api.bad_call": "[runs in `review` and `check --deep`; Python and Go, in-repo functions only; nothing is claimed for "
+                    "decorated functions or calls that use *args / **kwargs / xs...]",
+    "api.broken_caller": "[runs in `review` and `check --deep`; Python and Go functions whose parameters changed]",
+    "tests.missing_for_change": "[runs in `review` and `check --deep`; a function counts as covered when a related test file "
+                                "changed or a changed test mentions its name; see [review] test_map]",
+    "review.claim_mismatch": "[runs in `review` and `check --deep`; reads commit messages (ranges) or --message / PR text]",
+    "code.error_check_removed": "[runs in `review` and `check --deep`; Python, Go and JavaScript/TypeScript, heuristic]",
 }
 
 
@@ -7745,6 +9424,8 @@ def build_parser():
     target.add_argument("--all", action="store_true",
                         help="scan every tracked file in HEAD as if newly added (an audit; not for hooks)")
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
+    c.add_argument("--deep", action="store_true",
+                   help="also run the reviewer checks (api.*, tests.missing_for_change, ...): slower, never in hooks")
     c.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text",
                    help="agent: ASCII lines for AI coding agents (AIGATE ... / <ACTION> <rule> <path>:<line> ... / END)")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
@@ -7779,7 +9460,20 @@ def build_parser():
     a.add_argument("--max-findings", type=int, metavar="N", default=None,
                    help="show at most N findings (the verdict still counts all of them)")
     a.set_defaults(cache=False, remote=None)
-    u = sub.add_parser("setup", help="one step: install the hooks (vendored) and write a starter config")
+    r = sub.add_parser("review", help="review a change like a careful senior reviewer: what changed, what to fix, what looks good")
+    rt = r.add_mutually_exclusive_group()
+    rt.add_argument("--staged", action="store_true", help="review what `git commit` would record (default)")
+    rt.add_argument("--range", metavar="BASE..HEAD", help="review the commits in a range, e.g. origin/main..HEAD")
+    rt.add_argument("--pr", action="store_true",
+                    help="review this pull request: the range against its target branch (GITHUB_BASE_REF) plus its title/text")
+    r.add_argument("--format", choices=("text", "md", "json", "agent"), default="text")
+    r.add_argument("--message", action="append", metavar="TEXT",
+                   help="the commit message or PR text to check against the diff (repeatable; ranges read their commits)")
+    r.add_argument("--offline", action="store_true", help="skip registry lookups")
+    r.add_argument("--no-cache", action="store_true", help="ignore the local lookup, result and symbol caches")
+    r.add_argument("--config", help="use this config file instead of .aigate/lite.toml")
+    u = sub.add_parser("setup", help="one step: install the hooks and write a starter config (the hooks run the installed "
+                                     "aigate-lite; a loose script or an existing .aigate/ copy stays vendored)")
     u.add_argument("--preset", choices=PRESET_NAMES, default="balanced")
     u.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     u.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ (same as --mode vendored)")
@@ -7833,7 +9527,7 @@ def main(argv=None) -> int:
         command = args.command
         if args.command == "check":
             return run_check(args, dict(os.environ))
-        return {"setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "unvendor": cmd_unvendor, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
+        return {"review": cmd_review, "setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "unvendor": cmd_unvendor, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
                 "explain": cmd_explain, "trust": cmd_trust,
                 "doctor": cmd_doctor, "baseline": cmd_baseline,
                 "fix": cmd_fix}[args.command](args)
