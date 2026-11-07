@@ -24,6 +24,13 @@ session after a human review of the previous one. Do not start them early.
 - Fuzz the diff parser and tokenizers.
 - Install tests: pipx / uv tool / pre-commit / single-file on Linux, macOS, Windows × Python 3.11–3.14.
 
+## Later (after the reviewer, Phase 6)
+- Optional AI review layer for logic bugs: opt-in, bring your own API key or a local model (Ollama), sends only the
+  redacted diff and the findings, never blocks on its own, cost and privacy stated up front.
+- Evaluation corpus: real AI-agent commits (with permission) labelled per rule; publish precision and recall.
+- Reviewer follow-ups noted in 6A: class constructors and methods for `api.bad_call`; JS/TS call arity (the index already
+  records it); re-export chains through `export *`; Python `__all__` built from other modules.
+
 ## Ideas noted during Phase 1 (not done)
 <!-- appended by the Phase 1 loop -->
 - Bytecode reuse for Windows hooks (POSIX hooks have it since the Phase 1 cleanup; ~50 ms per hook run

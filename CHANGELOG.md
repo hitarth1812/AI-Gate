@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0 — unreleased: the reviewer (Phase 6A)
+
+`aigate-lite review` reads a change like a careful senior reviewer and checks it against the rest of the repository. The
+gate (block/fix/warn) is unchanged and the commit hook does not run any of this (it is not slower). The version number in
+the code is still 0.4.0 until the release.
+
+### Added
+- `aigate-lite review [--staged | --range A..B | --pr] [--format text|md|json|agent]`: Summary, Must fix, Should check,
+  What looks good, Verdict. JSON has a versioned schema (`"schema": 1, "kind": "review"`). `--pr` takes the target branch from
+  `GITHUB_BASE_REF` / GitLab variables and the title and text from the CI event; `--message` supplies a message for a staged review.
+- `check --deep`: the gate's normal report with the reviewer's findings added (not with `--all`).
+- Six rules, a warning for people and a fix for AI agents (`review.claim_mismatch` warns for both): `api.unknown_symbol`,
+  `api.bad_call`, `api.broken_caller`, `tests.missing_for_change`, `review.claim_mismatch`, `code.error_check_removed`.
+  Each needs a parsed file and says nothing about dynamic modules; see README, "The reviewer".
+- A symbol index (Python via `ast`, Go and JS/TS via the lexer) cached by git blob id in the cache directory
+  (`symbols-v1.json`, signed with the result cache's key). Nothing is imported or run.
+- `[review] test_map` maps source globs to test locations. `bench/precision.py --review`, `bench/review_cost.py`.
+
+### Changed
+- `aigate-lite setup --help` described hooks as "(vendored)"; it now states the real default (installed tool, or a vendored
+  copy for a loose script or an existing `.aigate/` copy). The README says the same.
+
 ## 0.4.0 — unreleased: precision (Phase 4A)
 
 Driven by an audit run of a 553-file Go repository (`check --all`: 4 block, 67 fix, 341 warn, about 70% judged noise).
