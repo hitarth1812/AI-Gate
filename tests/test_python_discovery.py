@@ -162,7 +162,9 @@ def program(tmp_path, name, body):
 
 @needs_sh
 def test_an_agent_cannot_swap_the_gate_through_aigate_python(repo, tmp_path):
-    install_vendored(repo)
+    # pinned: an unpinned agent now stops before discovery (test_the_vendored_hook_never_rediscovers_python_for_an_agent);
+    # this test is about AIGATE_PYTHON only
+    install_vendored(repo, pinned=True)
     repo.write("leak.py", f'K = "{AWS}"\n')
     repo.add()
     bin_dir = fake_bin(tmp_path, {"python3": REAL})

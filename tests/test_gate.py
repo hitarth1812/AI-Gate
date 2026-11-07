@@ -3,7 +3,7 @@ import os
 import subprocess
 import sys
 
-from conftest import SCRIPT, aigate, find, rules
+from conftest import aigate, find, rules
 
 AWS = "AKIA" + "QWERTYUIOPASDFGH"
 
@@ -208,3 +208,19 @@ def test_small_helpers():
     assert aigate.safe_url("https://user:pass@host/simple") == "https://***@host/simple"
     assert aigate.js_package("@scope/pkg/sub") == "@scope/pkg" and aigate.js_package("./x") is None
     assert aigate.js_package("npm:express@4") == "express"
+
+
+def test_deeply_nested_json_is_not_a_gate_error(repo):
+    deep = "[" * 100000 + "]" * 100000                       # valid JSON, deeper than the recursion limit
+    repo.write("data.json", deep)
+    repo.write("package.json", deep)
+    repo.write("app.js", "console.log(1)\n")
+    repo.add()
+    res = repo.check("--offline")
+    assert not find(res, "gate.error") and not find(res, "code.syntax_error")
+
+
+def test_broken_json_is_still_a_syntax_error(repo):
+    repo.write("data.json", '{"a": }\n')
+    repo.add()
+    assert [f["path"] for f in find(repo.check("--offline"), "code.syntax_error")] == ["data.json"]
