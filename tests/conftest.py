@@ -9,6 +9,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "aigate_lite.py"
+_STALE = sorted(p.name for p in ROOT.glob("*.egg-info"))
+if _STALE:      # left by `python -m build`: importlib.metadata would then call this checkout an installed package
+    raise pytest.UsageError(f"remove {', '.join(_STALE)} from {ROOT} (left by python -m build) before running the tests")
 FIXTURE = Path(__file__).with_name("registry_fixture.json")
 NOW = "2026-10-31T00:00:00+00:00"
 STRIP = {"CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "GIT_AUTHOR_NAME", "GIT_COMMITTER_NAME", "VIRTUAL_ENV",

@@ -3164,7 +3164,7 @@ def classify_npm(spec):
 def parse_package_json(text: str, path: str):
     try:
         d = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, []
     if not isinstance(d, dict):
         return None, []
@@ -3603,7 +3603,7 @@ def js_project(ctx):
         if base == "package.json":
             try:
                 d = json.loads(ctx.read_new(p) or "")
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(d, dict):
                 if isinstance(d.get("name"), str):
@@ -5233,6 +5233,8 @@ def check_files(ctx) -> list:
                     return None
                 except (ValueError, tomllib.TOMLDecodeError) as e:
                     return e
+                except RecursionError:              # legal but very deep: not a syntax error, and never a gate crash
+                    return None
             err = bad(new) if new is not None else None
             if err and (old is None or bad(old) is None):
                 out.append(make("code.syntax_error", fc.path, getattr(err, "lineno", None), str(err).split("\n")[0][:120],
@@ -6296,6 +6298,9 @@ PY_VERSIONS = ("3.14", "3.13", "3.12", "3.11")
 PY_GENERIC = (("python3",), ("python",), *((f"python{v}",) for v in PY_VERSIONS),
               *(("py", f"-{v}") for v in PY_VERSIONS), ("py", "-3"))
 AIGATE_PYTHON_IGNORED = "AIGATE_PYTHON is ignored while an AI agent runs the commit"
+# printf format (one %%s: the pinned interpreter); %s is "commit" or "push"
+AGENT_UNPINNED_MSG = ("the Python pinned at install (%%s) cannot run the gate, and an AI agent's %s does not look for "
+                      "another one on PATH. A person must re-run: aigate-lite install")
 HOOK_DISCOVERY = """\
 PROBE=%(probe)s
 TRIED=""
@@ -6341,6 +6346,10 @@ def hook_script(kind: str, vendored: bool, py: str, script: str, mode=None) -> s
                                 "agent_vars": "".join("$" + v for v in BUILTIN_AGENT_ENV),
                                 "candidates": candidates}).splitlines()
     lines += ['if [ -z "$PY" ] && [ -x "$PINNED" ]; then PY=$PINNED',                  # fast path: no probe
+              # an AI agent's commit never looks a Python up by name: a program earlier on PATH could stand in for it
+              f'elif [ -z "$PY" ] && {{ {HOOK_AGENT_TEST}; }}; then',          # braces: the test contains ||
+              f'  printf "aigate-lite: {AGENT_UNPINNED_MSG % ("push" if kind == "pre-push" else "commit")}\\n" '
+              '"$PINNED" >&2; exit 1',
               'elif [ -z "$PY" ]; then',
               '  TRIED="$TRIED',
               '  $PINNED: missing (pinned at install)"',
@@ -6382,9 +6391,11 @@ def hook_mode(text: str) -> str:
 
 def installed_hook_script(kind: str, py: str) -> str:
     """Hook for the installed mode: nothing about where the package lives is written into it. It runs, in order,
-    $AIGATE_BIN (ignored for AI agents, like AIGATE_PYTHON), `aigate-lite` on PATH (also skipped for agents), the Python
-    pinned at install with `-m aigate_lite` (`-I` for agents), then any Python 3.11+ that can import it, and otherwise stops with the install command. A
-    candidate that cannot be executed (exit 126/127: a venv that was moved or removed) falls through to the next."""
+    $AIGATE_BIN, `aigate-lite` on PATH, the Python pinned at install with `-m aigate_lite`, then any Python 3.11+ on PATH that
+    can import it, and otherwise stops with the install command. A candidate that cannot be executed (exit 126/127: a venv
+    that was moved or removed) falls through to the next. An AI agent's commit stops at the pinned interpreter: it never
+    uses $AIGATE_BIN, never looks `aigate-lite` or a Python up by name (a program earlier on PATH could stand in for the
+    gate), and runs the pinned Python isolated (-I)."""
     what = "push" if kind == "pre-push" else "commit"
     local = f'"$HOOK_DIR/{kind}.local"'
     lines = ["#!/bin/sh", f"{HOOK_MARK} ({kind}). Remove with: aigate-lite uninstall",
@@ -6427,7 +6438,11 @@ def installed_hook_script(kind: str, py: str) -> str:
               '  AIGATE_BIN: not an executable file"; fi',
               "fi",
               'if [ -z "$AGENT" ] && command -v aigate-lite >/dev/null 2>&1; then attempt "aigate-lite on PATH" aigate-lite; fi',
-              'if [ -x "$PINNED" ]; then mod_try "$PINNED"; fi',
+              'if [ -x "$PINNED" ]; then mod_try "$PINNED"; else TRIED="$TRIED',
+              '  $PINNED: missing (pinned at install)"; fi',
+              # an AI agent's commit stops here: any later candidate is found by name on PATH, which the agent controls
+              f'if [ -n "$AGENT" ]; then printf "aigate-lite: {AGENT_UNPINNED_MSG % what}\\nTried:%s\\n" '
+              '"$PINNED" "$TRIED" >&2; exit 1; fi',
               f"for c in {generic}; do mod_try $c; done",
               f'printf "aigate-lite is not installed; run: pipx install aigate-lite (bypass once with git {what} '
               f'--no-verify)\\nTried:%s\\n" "$TRIED" >&2',
@@ -6632,7 +6647,7 @@ def cmd_install(args) -> int:
         print(f"hook mode: {mode}" + ("" if mode == "vendored" else
               f" (pinned to {script}; `pipx install aigate-lite` then `aigate-lite install` removes that dependency)"))
         print(hook_python_line(args.vendor))
-    if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
+    if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)) and not getattr(args, "from_setup", False):
         print("optional: `aigate-lite init` writes .aigate/lite.toml to tune rules and add your test command")
     return 0
 
@@ -6765,7 +6780,7 @@ def detect_project(root, files) -> ProjectInfo:
     if "package.json" in files:
         try:
             pkg = json.loads(_read_small(root, "package.json") or "{}")
-        except ValueError:
+        except (ValueError, RecursionError):
             pkg = {}
         script = ((pkg.get("scripts") or {}) if isinstance(pkg, dict) else {}).get("test")
         deps = {**(pkg.get("dependencies") or {}), **(pkg.get("devDependencies") or {})} if isinstance(pkg, dict) else {}
@@ -6871,7 +6886,8 @@ def cmd_setup(args) -> int:
         else:
             mode, note = "vendored", ("running from a loose aigate_lite.py, so the gate is copied into .aigate/; "
                                       "pipx install aigate-lite makes `setup` use the installed tool instead")
-    rc = cmd_install(argparse.Namespace(force=args.force, vendor=mode == "vendored", mode=mode, no_pre_push=False))
+    rc = cmd_install(argparse.Namespace(force=args.force, vendor=mode == "vendored", mode=mode, no_pre_push=False,
+                                        from_setup=True))
     if rc:
         return rc
     if note:

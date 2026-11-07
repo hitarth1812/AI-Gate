@@ -39,7 +39,8 @@ session after a human review of the previous one. Do not start them early.
   y/N prompt on a TTY.
 - Pin the vendored `.aigate/aigate_lite.py` by hash at install time so a pulled change to the gate itself
   needs approval too.
-- A deeply nested JSON file in a change makes `check_files` raise RecursionError (reported as gate.error,
-  so the commit is blocked); parse it with a depth guard instead (found by the Phase 2 item 4 review).
+- ~~A deeply nested JSON file in a change makes `check_files` raise RecursionError (reported as gate.error,
+  so the commit is blocked); parse it with a depth guard instead (found by the Phase 2 item 4 review).~~
+  Done: RecursionError is caught where JSON is parsed (`test_deeply_nested_json_is_not_a_gate_error`).
 - Baseline: optionally salt fingerprints of `--include-secrets` entries so weak values cannot be guessed from
   `.aigate/baseline.json` (today the value is hashed without a salt; opt-in only).

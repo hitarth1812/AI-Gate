@@ -279,8 +279,62 @@ def test_an_agent_never_runs_a_command_found_by_name_and_runs_python_isolated(re
     assert person.returncode == 0 and calls(log) == ["shim check --staged"]
     agent = run_installed(repo, "pre-commit", fake_bin(agent_bin, {"aigate-lite": shim}), env={**module_env(), **AGENT})
     # the shim is never run for an agent, and PYTHONPATH is ignored (-I): the module is not found, so nothing passes
-    assert agent.returncode == 1 and "aigate-lite is not installed" in agent.stderr
+    assert agent.returncode == 1 and "an AI agent's commit does not look for another one on PATH" in agent.stderr
     assert calls(log) == ["shim check --staged"]
+
+
+@needs_sh
+def test_an_agent_with_the_pinned_python_gone_never_searches_path(repo, tmp_path):
+    install_installed(repo, pinned="/nonexistent/pinned/python")
+    repo.write("leak.py", 'KEY = "' + "AKIA" + 'QWERTYUIOPASDFGH"\n')                 # a commit that must be blocked
+    repo.add()
+    log = tmp_path / "calls.log"
+    fake = f"echo \"python3 $*\" >> '{log.as_posix()}'\nexit 0"                         # a stand-in that passes everything
+    proc = run_installed(repo, "pre-commit", fake_bin(tmp_path, {"python3": fake}), env={**module_env(), **AGENT})
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert "an AI agent's commit does not look for another one on PATH" in proc.stderr
+    assert "/nonexistent/pinned/python: missing (pinned at install)" in proc.stderr
+    assert "--no-verify" not in proc.stderr
+    assert calls(log) == []                                                            # the stand-in was never called
+
+
+@needs_sh
+def test_a_person_with_the_pinned_python_gone_still_falls_back_to_path(repo, tmp_path):
+    install_installed(repo, pinned="/nonexistent/pinned/python")
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    proc = run_installed(repo, "pre-commit", fake_bin(tmp_path, {"python3": logged(log, "python3")}), env=module_env())
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert any(c.startswith("python3") for c in calls(log))
+
+
+@needs_sh
+@pytest.mark.parametrize("kind,what", [("pre-commit", "commit"), ("pre-push", "push")])
+def test_the_vendored_hook_never_rediscovers_python_for_an_agent(repo, tmp_path, kind, what):
+    from test_hooks import install_vendored
+    install_vendored(repo)                                                             # the pin is removed again
+    staged_clean(repo)
+    log = tmp_path / "calls.log"
+    fake = f"echo \"python3 $*\" >> '{log.as_posix()}'\nexit 0"
+    stdin = "refs/heads/main 1 refs/heads/main 0\n" if kind == "pre-push" else ""
+    proc = run_installed(repo, kind, fake_bin(tmp_path, {"python3": fake, "python": fake}), env=AGENT, stdin=stdin)
+    assert proc.returncode == 1, proc.stdout + proc.stderr
+    assert f"an AI agent's {what} does not look for another one on PATH" in proc.stderr
+    assert "/nonexistent/pinned/python" in proc.stderr and "--no-verify" not in proc.stderr
+    assert calls(log) == []
+    (tmp_path / "p").mkdir()
+    real = logged(log, "python3")                                                      # answers the version probe, then runs for real
+    person = run_installed(repo, kind, fake_bin(tmp_path / "p", {"python3": real}), stdin=stdin)
+    assert calls(log) and person.returncode == 0                                       # people keep the PATH fallback
+
+
+def test_setup_does_not_suggest_init_right_before_running_it(repo):
+    proc = repo.run("setup")
+    assert proc.returncode == 0 and "optional: `aigate-lite init`" not in proc.stdout
+    assert (repo.path / ".aigate" / "lite.toml").is_file()
+    (repo.path / ".aigate" / "lite.toml").unlink()
+    plain = repo.run("install", "--force")                                              # install on its own still points at init
+    assert "optional: `aigate-lite init`" in plain.stdout
 
 
 @needs_sh
