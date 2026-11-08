@@ -211,6 +211,7 @@ def test_size_and_performance(repo):
                     for c in xs:
                         print(a, b, c)
     ''') + "\n\ndef long():\n" + long_body + "\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"size.*" = "warn"\n"perf.*" = "warn"\n')      # core rules are off for people unless named
     repo.add()
     found = rules(repo.check())
     for rule in ("perf.quadratic_pattern", "perf.call_in_loop", "perf.exponential_recursion", "size.complexity",
@@ -231,7 +232,7 @@ def test_duplicate_block_and_diff_budget(repo):
     block = "\n".join(f"    total = total + values[{i}] * weights[{i}]" for i in range(8))
     repo.write("dup.py", f"def a(values, weights):\n    total = 0\n{block}\n    return total\n\n\n"
                          f"def b(values, weights):\n    total = 0\n{block}\n    return total\n")
-    repo.write(".aigate/lite.toml", "[limits]\ndiff_added_lines = 10\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"size.*" = "warn"\n"code.duplicate_block" = "warn"\n\n[limits]\ndiff_added_lines = 10\n')
     repo.add()
     res = repo.check()
     assert len(find(res, "code.duplicate_block")) == 1 and find(res, "size.diff_budget")

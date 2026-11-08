@@ -52,7 +52,7 @@ def test_config_change_invalidates(repo):
     repo.write("app/long.py", f"def f():\n{body}    return 0\n")
     repo.add()
     assert not find(profiled(repo)[0], "size.function_length")
-    repo.write(".aigate/lite.toml", "[limits]\nfunction_lines = 5\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"size.*" = "warn"\n\n[limits]\nfunction_lines = 5\n')   # size.* is off for people unless named
     res, prof = profiled(repo)
     assert find(res, "size.function_length") and prof.get("cache_hits", 0) == 0
 

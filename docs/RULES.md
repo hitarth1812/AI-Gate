@@ -10,14 +10,16 @@ aigate-lite: 75 rules. Actions: block | fix | warn | off (block and fix stop the
 
 | setting | relaxed | balanced | strict |
 |---|---|---|---|
+| `code.duplicate_block` | warn | warn | warn |
 | `code.todo` | off | warn | warn |
 | `deps.typosquat` | warn | warn | fix |
 | `deps.undeclared` | warn | fix | fix |
 | `deps.version_cooldown` | warn | fix | fix |
+| `perf.*` | (each rule's default) | (each rule's default) | warn |
 | `security.insecure_default` | warn | warn | fix |
 | `security.weak_crypto` | warn | warn | fix |
 | `security.xss` | warn | warn | fix |
-| `size.*` | off | (each rule's default) | (each rule's default) |
+| `size.*` | off | (each rule's default) | warn |
 | `suppress.coverage` | warn | fix | fix |
 | `suppress.type` | warn | fix | fix |
 | `tests.expected_changed` | warn | warn | fix |

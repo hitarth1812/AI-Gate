@@ -1756,3 +1756,48 @@ py -3.12 bench/precision.py --review ; py -3.12 bench/precision.py --review --ag
 py -3.12 bench/review_cost.py
 py -3.12 aigate_lite.py review --range phase-5..HEAD      # the reviewer reviewing this very phase
 ```
+
+## Phase 6 -> ATLAS fix batch (branch phase-6, after 6A)
+
+Five fixes from the ATLAS trial. Same hard rules; nothing pushed.
+
+1. `secrets.hardcoded` private-key body (`_pem_body`): per-line words instead of one whitespace-stripped blob. A body is
+   consecutive lines whose words are all base64 (`[A-Za-z0-9+/]{16,}={0,2}`), one word 40+ characters with a digit, 60+
+   characters in all; the first line that is not body ends the search (blank lines, `Proc-Type:` / `DEK-Info:` header
+   lines of encrypted keys are skipped). An END marker still counts; docs paths unchanged.
+2. "Core" default for people: `size.*`, `perf.*`, `code.duplicate_block` are off for a person's change unless `[rules]`
+   names them (exact or glob; the strict preset names them). Agents always get them; `audit --strict` / `check --strict`
+   give a person the agent's set; `baseline` runs strict so it still records them. Naming a core rule at its default
+   action keeps the test-file relief people get (otherwise `"size.*" = "warn"` would flag table-driven tests).
+3. `tests.missing_for_change` skips Go `main()` / `init()` and functions under a Python `if __name__ == "__main__":`.
+4. `__version__` = 0.5.0. `doctor` compares the vendored copy's SHA-256 with the running file (line endings aside).
+5. README: 75 rules; language coverage for Go and JS/TS; the core default.
+
+### Tests
+New: `tests/test_atlas_batch.py` (46). Against the pre-batch code 24 of them fail (the rest pin behaviour that must not
+change: real keys block, an agent is never softer). Existing tests changed (assertions kept, precondition added): the
+list of `size.*` / `perf.*` / `code.duplicate_block` expectations for people in `test_cache`, `test_ci`, `test_code_tests`,
+`test_lang_go`, `test_lang_js`, `test_perf`, `test_precision` now name the rules in `[rules]`; `precision_fixtures.CASES`
+human column is None for `hand-size`, `dup-real`, `long-test` (with `CORE_ON_HUMAN` + a test that they come back when the
+rules are named); `pem-doc-comment` joins the false positives removed for everyone; two version pins in
+`test_installed_mode.py` (0.4.0 -> 0.5.0, `requires_for(__version__)`).
+- Windows 11: Python 3.11, 3.12, 3.13 and 3.14 each 992 passed, 12 skipped (final code). Not run: Ubuntu/WSL2, macOS, GitHub Actions.
+
+### Precision fixtures (`bench/precision.py [--agent] [--against 532a4b0]`, 56 cases now: 5 new PEM cases)
+| | before (532a4b0) | after |
+|---|---|---|
+| person | 52/56 match (4 DIFF: pem-doc-comment block, hand-size/dup-real/long-test warn) | 56/56 |
+| agent | 55/56 (pem-doc-comment block) | 56/56 |
+| person, findings | block 10, fix 12, warn 13 = 35 | block 9, fix 12, warn 8 = 29 |
+| agent, findings | block 10, fix 23, warn 13 = 46 | block 9, fix 23, warn 13 = 45 |
+Reviewer fixtures (`--review`): 51/51 for a person and an agent, unchanged. These fixtures are synthetic.
+
+### audit --summary on a generated Go repository (scratchpad `gen_go_audit.py`: 120 .go files, deterministic, no network)
+| | findings | core (size.*, perf.*, duplicate) | by rule |
+|---|---|---|---|
+| before (532a4b0) | 175 | 153 | duplicate_block 59, function_length 40, complexity 30, nested_loops 24, placeholder 11, todo 11 |
+| after | 22 | 0 | placeholder 11, todo 11 |
+| after, `audit --strict` | 175 | 153 | same as before |
+
+### Bench (py -3.12 bench/bench.py --against 532a4b0, 40 pairs, gates PASS)
+startup -0.9%, startup-direct +1.1%, A +0.4%, B 0.0%, C -0.1%, D -0.3%, E +0.3%, F +0.2%, G -0.1%; git calls and blob reads identical.

@@ -36,6 +36,33 @@ def results(tmp_path_factory):
     return {"human": repo.check("--offline"), "agent": repo.check("--offline", env={"CLAUDECODE": "1"})}
 
 
+@pytest.fixture(scope="module")
+def results_core_on(tmp_path_factory):
+    """The same tree for a person whose [rules] name the "core" rules (size.*, perf.*, code.duplicate_block)."""
+    base = tmp_path_factory.mktemp("precision_core")
+    (base / "repo").mkdir()
+    repo = GitRepo(base / "repo", base / "cache")
+    repo.write("README.md", "# demo\n")
+    repo.commit("init")
+    for rel, text in {**fx.FILES, ".aigate/lite.toml": '[rules]\n"size.*" = "warn"\n"perf.*" = "warn"\n'
+                                                       '"code.duplicate_block" = "warn"\n'}.items():
+        p = repo.path / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(text.encode())
+    repo.add()
+    return repo.check("--offline")
+
+
+CORE_CASES = [c for c in fx.CASES if c[1].startswith(("size.", "perf.")) or c[1] == "code.duplicate_block"]
+
+
+@pytest.mark.parametrize("case", CORE_CASES, ids=[c[0] for c in CORE_CASES])
+def test_core_rules_a_person_switched_on_behave_as_they_did_before(results_core_on, case):
+    cid, rule, path, needle, human, _agent = case
+    want = fx.CORE_ON_HUMAN.get(cid, human)
+    assert actions(results_core_on, rule, path, line_of(path, needle)) == ([want] if want else []), cid
+
+
 @pytest.mark.parametrize("case", fx.CASES, ids=[c[0] for c in fx.CASES])
 def test_case_for_a_human(results, case):
     cid, rule, path, needle, human, _agent = case
@@ -59,7 +86,7 @@ def test_an_agent_is_never_treated_more_leniently_than_before_phase_4(results, c
 
 
 # things that were never credentials, copy-paste or keys: removed for people and agents alike
-FALSE_POSITIVES_REMOVED_FOR_EVERYONE = {"ref-dollar", "ref-double", "pem-contains"}
+FALSE_POSITIVES_REMOVED_FOR_EVERYONE = {"ref-dollar", "ref-double", "pem-contains", "pem-doc-comment"}
 
 
 def test_the_fixture_set_reproduces_every_pattern_the_old_gate_got_wrong(results):
@@ -123,7 +150,7 @@ def test_duplicate_blocks_ignore_imports_and_short_blocks_for_people_only(repo):
 
 def test_the_duplicate_limit_a_user_sets_is_respected(repo):
     block = "".join(f"\tv{i} := step({i})\n" for i in range(7))
-    repo.write(".aigate/lite.toml", "[limits]\nduplicate_lines = 7\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"code.duplicate_block" = "warn"\n\n[limits]\nduplicate_lines = 7\n')   # core rules: on by name
     res = stage(repo, {"a.go": "package a\n\nfunc a() {\n" + block + "}\n", "b.go": "package a\n\nfunc b() {\n" + block + "}\n"})
     assert find(res, "code.duplicate_block")
 
@@ -235,6 +262,7 @@ def test_a_comment_prefixed_private_key_is_still_a_key(repo):
 def test_a_use_call_does_not_hide_the_duplicates_after_it(repo):
     block = "".join(f"\tv{i} := step({i})\n" for i in range(12))
     text = "package a\n\nfunc a() {\n\tuse(func() {\n" + block + "\t})\n}\n"
+    repo.write(".aigate/lite.toml", '[rules]\n"code.duplicate_block" = "warn"\n')            # core rules: on by name
     res = stage(repo, {"a.go": text, "b.go": text.replace("func a", "func b")})
     assert find(res, "code.duplicate_block")
 
@@ -250,7 +278,7 @@ def test_agents_keep_duplicate_detection_in_import_blocks_and_sql_files(repo):
 
 
 def test_a_limit_someone_lowered_is_not_relaxed_for_test_files(repo):
-    repo.write(".aigate/lite.toml", "[limits]\nfunction_lines = 30\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"size.*" = "warn"\n\n[limits]\nfunction_lines = 30\n')   # core rules: on by name
     body = "".join(f"    x{i} = {i}\n" for i in range(50))
     res = stage(repo, {"test_big.py": "def test_big():\n" + body + "    assert x0 == 0\n"})
     assert find(res, "size.function_length")

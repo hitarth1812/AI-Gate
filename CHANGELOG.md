@@ -3,8 +3,24 @@
 ## 0.5.0 — unreleased: the reviewer (Phase 6A)
 
 `aigate-lite review` reads a change like a careful senior reviewer and checks it against the rest of the repository. The
-gate (block/fix/warn) is unchanged and the commit hook does not run any of this (it is not slower). The version number in
-the code is still 0.4.0 until the release.
+gate (block/fix/warn) is unchanged and the commit hook does not run any of this (it is not slower). The version in the code
+is 0.5.0.
+
+### Fixed (after the ATLAS trial)
+- `secrets.hardcoded`: a private-key BEGIN marker quoted in a Go doc comment and followed by prose no longer blocks. The body check now reads whitespace-separated words per line: a body is consecutive lines made
+  only of base64 words (one of 40+ characters with a digit, 60+ in all); prose ends the search. Real keys in Go raw strings,
+  Python triple-quoted strings, JS template literals and comment-prefixed keys still block, and an END marker still counts.
+  An agent's change is never judged more softly.
+- `tests.missing_for_change` skips Go `main()` and `init()` and anything under a Python `if __name__ == "__main__":` guard.
+- `doctor` compares the SHA-256 of the vendored `.aigate/aigate_lite.py` with the running file (line endings aside), not only
+  the version: two builds with one version number no longer report "vendored copy matches".
+
+### Changed (behaviour you will notice)
+- **"Core" default for people.** `size.*`, `perf.*` and `code.duplicate_block` are off for a person's change unless `[rules]`
+  names them (exactly or by glob) or `preset = "strict"` is used; AI agents always get them. `audit --strict` and
+  `check --strict` give a person the agent's rule set; `baseline` records them so an agent's later change is not flooded.
+  `explain` and the `init` config say so. An explicit `[rules]` setting wins either way.
+- `__version__` is 0.5.0 (it was 0.4.0 while this changelog said 0.5.0). README: 75 rules, language coverage for Go and JS/TS.
 
 ### Added
 - `aigate-lite review [--staged | --range A..B | --pr] [--format text|md|json|agent]`: Summary, Must fix, Should check,
