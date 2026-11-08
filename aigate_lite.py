@@ -50,7 +50,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
@@ -839,7 +839,9 @@ def _presets() -> dict:
                     "limits": {"function_lines": 100, "complexity": 15}},
         "balanced": {},
         "strict": {"rules": {**strict_security, "deps.typosquat": "fix", "tests.no_assertions": "fix",
-                             "tests.expected_changed": "fix"},
+                             "tests.expected_changed": "fix",
+                             # size, copy-paste and loop advice is off for people by default (CORE_OFF_RULES); strict wants it
+                             "size.*": "warn", "perf.*": "warn", "code.duplicate_block": "warn"},
                    "gate": {"offline": "block"},
                    "limits": {"function_lines": 50, "complexity": 8}},
     }
@@ -1220,8 +1222,9 @@ def _removed_keys(ctx, path) -> Counter:
 
 class Context:
     def __init__(self, repo, cfg, changes, *, mode, base, head, provenance, registry, merge=False, label="",
-                 results=None, full=False, messages=(), deep=False, no_cache=False):
+                 results=None, full=False, messages=(), deep=False, no_cache=False, strict=False):
         self.repo, self.cfg, self.changes = repo, cfg, changes
+        self.strict = strict                   # `audit --strict`: judge a person's tree by the agent's rule set
         self.messages = list(messages)         # commit messages (and PR text) of the change, for review.claim_mismatch
         self.deep = deep                       # `review` / `check --deep`: the reviewer checks run
         self.no_cache = no_cache
@@ -2684,6 +2687,9 @@ def _soft_value(val, docs) -> str | None:
     return "pass" if docs and DOC_DEV_VALUE.match(val) else None
 
 
+_B64_WORD = re.compile(r"[A-Za-z0-9+/]{16,}={0,2}")
+
+
 def _pem_body(fc, line_no, rest) -> bool:
     """Whether a private-key BEGIN marker is followed (on the same line or in the next added lines) by a base64 body of
     plausible length: a marker inside a string that only talks about keys is not a key."""
@@ -2696,8 +2702,18 @@ def _pem_body(fc, line_no, rest) -> bool:
     joined = "\n".join(re.sub(r"^\s*(?:#|//|\*|;|--(?=\s))+\s?", "", ln) for ln in window)      # comment-prefixed keys too
     if re.search(r"-----END (?:[A-Z0-9]+ )*PRIVATE KEY", joined):         # the block is closed: a key, however short
         return True
-    flat = re.sub(r"\\[nrt]|[\s\"'`+\\,;]", "", joined)
-    return re.search(r"[A-Za-z0-9+/=]{60,}", flat) is not None
+    # a body is consecutive lines made only of base64 words (after quotes, `+`, commas and `\n` escapes are dropped);
+    # prose in a comment that follows a marker is never part of it
+    total, strong = 0, False
+    for line in re.sub(r"\\[nr]", "\n", joined.replace("\\t", " ")).split("\n"):
+        tokens = re.sub(r"[\"'`+\\,;]", " ", line).split()
+        if not tokens or re.match(r"(?:Proc-Type|DEK-Info):", tokens[0]):   # blank, or an encrypted key's header lines
+            continue
+        if not all(_B64_WORD.fullmatch(t) for t in tokens):
+            break
+        total += sum(len(t) for t in tokens)
+        strong = strong or any(len(t) >= 40 and any(c.isdigit() for c in t) for t in tokens)
+    return strong and total >= 60
 
 
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
@@ -5442,6 +5458,18 @@ def _baseline_accepts(ctx, f, baseline, granted) -> bool:
 # AI agent could add to a file it wrote, so an agent's change is judged on every rule.
 GENERATED_SKIPS = frozenset({"size.function_length", "size.complexity", "size.file_length", "perf.nested_loops",
                              "code.duplicate_block", "code.placeholder"})
+# The "core" default for people: style-and-size advice is off for a person's change unless [rules] enables it (any
+# entry that names the rule, exactly or by glob, including the strict preset's). AI agents and `audit --strict` keep it.
+# On a 553-file Go repository these rules were 150 of 229 audit findings.
+CORE_OFF_RULES = frozenset(r for r in RULES if r.startswith(("size.", "perf.")) or r == "code.duplicate_block")
+
+
+def core_off(ctx, rule) -> bool:
+    if ctx.agent or ctx.strict or rule not in CORE_OFF_RULES:
+        return False
+    return not any(k == rule or fnmatch.fnmatchcase(rule, k) for k in ctx.cfg["rules"])
+
+
 GENERATED_PATH = re.compile(r"(?i)(?:\.pb(?:\.gw)?\.go|_generated\.\w+|\.min\.(?:js|css)|(?:^|/)docs/docs\.go|"
                             r"(?:^|/)(?:vendor|node_modules|third_party)/.*)$|(?:^|/)(?:vendor|node_modules)/")
 GENERATED_HEADER = re.compile(r"(?i)\bcode generated\b|@generated\b|\bdo not edit\b|\b(?:auto|automatically)[- ]?generated\b")
@@ -5495,17 +5523,25 @@ def apply_policy(findings, ctx, env) -> list:
             # placeholders, and some findings carry a softer action for people
             if f.rule in GENERATED_SKIPS and is_generated(ctx, f.path):
                 continue
+            if core_off(ctx, f.rule):
+                continue
             if f.human is not None:
                 f.action = f.human
+        chosen = None
         if f.rule in FIXED_RULES:
             pass
         elif f.rule in overrides:
-            f.action = overrides[f.rule]
+            chosen = overrides[f.rule]
         else:
             for pattern, action in overrides.items():
                 if fnmatch.fnmatchcase(f.rule, pattern):
-                    f.action = action
+                    chosen = action
                     break
+        # naming a "core" rule at its own default action only switches it on for people: it does not undo the softer
+        # treatment they get for test files (table-driven tests, ...)
+        if chosen is not None and not (f.rule in CORE_OFF_RULES and chosen == f.meta.action and not ctx.agent
+                                       and f.human is not None):
+            f.action = chosen
         if f.action == "off":
             continue
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
@@ -7021,9 +7057,21 @@ def _docstring_lines(tree) -> set:
     return out
 
 
-def changed_functions(ctx, fc) -> list:
+def _is_main_guard(node) -> bool:
+    """`if __name__ == "__main__":`"""
+    if not isinstance(node, ast.If):
+        return False
+    t = node.test
+    return (isinstance(t, ast.Compare) and len(t.ops) == 1 and isinstance(t.ops[0], ast.Eq)
+            and isinstance(t.left, ast.Name) and t.left.id == "__name__" and len(t.comparators) == 1
+            and isinstance(t.comparators[0], ast.Constant) and t.comparators[0].value == "__main__")
+
+
+def changed_functions(ctx, fc, entry_points=True) -> list:
     """[(name, line)] of the functions whose bodies or headers contain an added line of real code (not a comment,
-    a blank line or a docstring); each added line counts for the innermost function around it."""
+    a blank line or a docstring); each added line counts for the innermost function around it. With entry_points=False,
+    program entry points are left out: Go `main` and `init`, and anything under a Python `if __name__ == "__main__":`
+    (nobody writes a unit test for those)."""
     code = {n for n, t in fc.added.items() if t.strip() and not COMMENT_LINE.match(t)}
     if not code:
         return []
@@ -7032,13 +7080,17 @@ def changed_functions(ctx, fc) -> list:
         if tree is None:
             return []
         code -= _docstring_lines(tree)
-        spans = [(n.lineno, n.end_lineno, n.name) for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+        guards = [] if entry_points else [(n.lineno, n.end_lineno) for n in ast.walk(tree) if _is_main_guard(n)]
+        spans = [(n.lineno, n.end_lineno, n.name) for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and not any(a <= n.lineno <= b for a, b in guards)]
+        code -= {n for n in code if any(a <= n <= b for a, b in guards)}
     else:
         lx, spec = ctx.lexed(fc), language_for(fc.path)
         if lx is None or spec is None:
             return []
         try:
-            spans = [(f.line, f.end, f.name) for f in analyze_functions(lx, spec)]
+            spans = [(f.line, f.end, f.name) for f in analyze_functions(lx, spec)
+                     if entry_points or fc.ext != ".go" or f.name not in ("main", "init")]
         except LexError:
             return []
     found = {}
@@ -7081,7 +7133,8 @@ def check_tests_for_changes(ctx, summary) -> list:
         if fc.name in SKIP_SOURCE or fc.name.endswith(".d.ts") or is_generated(ctx, fc.path):
             continue
         try:
-            funcs = [f for f in changed_functions(ctx, fc) if not (f[0].startswith("_") and fc.ext in PY_EXTS)]
+            funcs = [f for f in changed_functions(ctx, fc, entry_points=False)
+                     if not (f[0].startswith("_") and fc.ext in PY_EXTS)]
         except (RecursionError, MemoryError, LexError):
             continue
         if not funcs:
@@ -7719,7 +7772,8 @@ def run_check(args, env, collect=False):
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
                       provenance=provenance, registry=registry, merge=merge, label=run_label, results=results,
                       full=full, messages=[*messages, *(getattr(args, "extra_messages", None) or [])],
-                      deep=bool(getattr(args, "deep", False)), no_cache=bool(args.no_cache))
+                      deep=bool(getattr(args, "deep", False)), no_cache=bool(args.no_cache),
+                      strict=bool(getattr(args, "strict", False)))
         if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
             bl_source = None                          # no git reads for repositories without a baseline
         ctx.baseline, bl_problems = load_baseline(repo, bl_source)
@@ -8487,6 +8541,8 @@ def init_text(preset: str, info: ProjectInfo) -> str:
              "# examples/lite.toml for all of them. Rule ids: `aigate-lite explain`.",
              "version = 1",
              f'preset = "{preset}"            # relaxed | balanced | strict',
+             "# size.*, perf.* and code.duplicate_block are off for a person's change (AI agents always get them);",
+             '# to turn them on: [rules] "size.*" = "warn", or preset = "strict".',
              "", "[gate]",
              f'requires = "{requires_for(__version__)}"   # the aigate-lite versions this team uses (older blocks, newer warns)']
     if info.private or info.trusted_sources:
@@ -8622,7 +8678,8 @@ def cmd_baseline(args) -> int:
         print(f"aigate-lite: baseline refuses to run for an AI agent ({why.lstrip('$')}): accepting existing findings "
               "is a person's decision", file=sys.stderr)
         return 1
-    ns = build_parser().parse_args(["check", "--all", "--offline", "--no-commands", "--format", "json"])
+    # --strict: an agent's later change is judged on size and copy-paste findings too, so the baseline must cover them
+    ns = build_parser().parse_args(["check", "--all", "--strict", "--offline", "--no-commands", "--format", "json"])
     res = run_check(ns, env, collect=True)
     found = [] if isinstance(res, int) else [f for f in res.findings if f.allowed in (None, "baseline")
                                               and not f.rule.startswith(BASELINE_NEVER)]
@@ -8996,6 +9053,10 @@ def cmd_explain(args) -> int:
              f'reason = "<why this is safe>"')
     if r.id in HEURISTIC_RULES:
         r = dataclasses.replace(r, hint=r.hint + " " + HEURISTIC_RULES[r.id])
+    if r.id in CORE_OFF_RULES:
+        r = dataclasses.replace(r, hint=r.hint + " [off for a person's change by default (the \"core\" set); AI agents "
+                                "and `audit --strict` always get it; to turn it on for people, name it in [rules] "
+                                "or use preset = \"strict\"]")
     print(f"{r.id}: {r.title}\n  default action: {r.action}   severity: {r.severity}   confidence: {r.confidence}"
           f"{'   stricter in sensitive paths' if r.escalate else ''}\n  fix: {r.hint}\n\n"
           f"Change it for the whole repo in .aigate/lite.toml:\n  [rules]\n  \"{r.id}\" = \"warn\"   # or off\n\n"
@@ -9199,15 +9260,30 @@ def _doctor_hook_manager(repo):
 def _doctor_version(repo):
     path = os.path.join(repo.root, ".aigate", "aigate_lite.py")
     try:
-        with open(path, encoding="utf-8", errors="replace") as fh:
-            m = re.search(r'^__version__ = "([^"]+)"', fh.read(), re.M)
+        with open(path, "rb") as fh:
+            raw = fh.read()
     except OSError:
         return _check("version", "ok", f"aigate-lite {__version__} (not vendored)")
-    vendored = m.group(1) if m else "unknown"
+    m = re.search(rb'^__version__ = "([^"]+)"', raw, re.M)
+    vendored = m.group(1).decode("ascii", "replace") if m else "unknown"
     if vendored != __version__:
         return _check("version", "warn", f"vendored .aigate/aigate_lite.py is {vendored}, this is {__version__}",
                       "run: aigate-lite install --vendor (then commit .aigate/aigate_lite.py)")
-    return _check("version", "ok", f"aigate-lite {__version__}, vendored copy matches")
+    # the same version number says nothing about the code: compare the files themselves (line endings aside)
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            running = fh.read()
+    except OSError:
+        return _check("version", "ok", f"aigate-lite {__version__}, vendored copy has the same version")
+    import hashlib
+
+    def digest(data):
+        return hashlib.sha256(data.replace(b"\r\n", b"\n")).hexdigest()
+    if digest(raw) != digest(running):
+        return _check("version", "warn", f"vendored .aigate/aigate_lite.py is {vendored} like this one, but its contents "
+                      f"differ (sha256 {digest(raw)[:12]} vs {digest(running)[:12]})",
+                      "run: aigate-lite install --vendor (then commit .aigate/aigate_lite.py)")
+    return _check("version", "ok", f"aigate-lite {__version__}, vendored copy matches (sha256 {digest(raw)[:12]})")
 
 
 def _doctor_config(cfg):
@@ -9426,6 +9502,8 @@ def build_parser():
     c.add_argument("--remote", default=None, help=argparse.SUPPRESS)
     c.add_argument("--deep", action="store_true",
                    help="also run the reviewer checks (api.*, tests.missing_for_change, ...): slower, never in hooks")
+    c.add_argument("--strict", action="store_true",
+                   help="judge a person's change by the AI-agent rule set too (size, complexity, copy-paste and loop findings)")
     c.add_argument("--format", choices=("text", "json", "github", "sarif", "agent"), default="text",
                    help="agent: ASCII lines for AI coding agents (AIGATE ... / <ACTION> <rule> <path>:<line> ... / END)")
     c.add_argument("--json", dest="format", action="store_const", const="json", help="same as --format json")
@@ -9455,6 +9533,9 @@ def build_parser():
     a.add_argument("--color", choices=("auto", "always", "never"), default="auto")
     a.add_argument("--summary", action="store_true",
                    help="counts per rule and per top directory and the biggest files, instead of every finding")
+    a.add_argument("--strict", action="store_true",
+                   help="also report size, complexity, copy-paste and loop findings (off by default for people; "
+                        "AI agents always get them)")
     a.add_argument("--group-by", choices=("path", "rule"), default="path",
                    help="how the text report groups findings (default: path)")
     a.add_argument("--max-findings", type=int, metavar="N", default=None,

@@ -182,8 +182,11 @@ def long_func(n):
     return "func big() {\n" + "\tx := 1\n" * n + "\t_ = x\n}\n"
 
 
+CORE_ON = '[rules]\n"size.*" = "warn"\n"perf.*" = "warn"\n"code.duplicate_block" = "warn"\n'   # these are off for people unless named
+
+
 def test_long_functions_deep_loops_and_branchy_functions_warn(repo):
-    res = stage(repo, {}, {"a.go": go(long_func(70))})
+    res = stage(repo, {}, {"a.go": go(long_func(70)), ".aigate/lite.toml": CORE_ON})
     assert find(res, "size.function_length")
     loops = go("func f(a [][][]int) {\n\tfor _, x := range a {\n\t\tfor _, y := range x {\n\t\t\tfor _, z := range y {\n\t\t\t\t_ = z\n\t\t\t}\n\t\t}\n\t}\n}\n")
     assert find(stage(repo, {}, {"a.go": loops}), "perf.nested_loops")
@@ -199,7 +202,7 @@ def test_structure_ignores_braces_and_keywords_in_strings_and_comments(repo):
 
 def test_small_edits_to_an_already_long_function_are_not_new_findings(repo):
     base = go(long_func(70))
-    res = stage(repo, {"a.go": base}, {"a.go": go(long_func(70)).replace("_ = x", "_ = x // note")})
+    res = stage(repo, {"a.go": base}, {"a.go": go(long_func(70)).replace("_ = x", "_ = x // note"), ".aigate/lite.toml": CORE_ON})
     assert not find(res, "size.function_length")
     grown = stage(repo, {}, {"a.go": go(long_func(80))})
     assert find(grown, "size.function_length")

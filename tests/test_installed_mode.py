@@ -56,7 +56,7 @@ def test_version_is_single_sourced_and_pyproject_reads_it():
     meta = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text(encoding="utf-8"))
     assert "version" not in meta["project"] and "version" in meta["project"]["dynamic"]
     assert meta["tool"]["setuptools"]["dynamic"]["version"] == {"attr": "aigate_lite.__version__"}
-    assert aigate.__version__ == "0.4.0"
+    assert aigate.__version__ == "0.5.0"
 
 
 def stage(repo, files):
@@ -431,7 +431,7 @@ def test_doctor_reports_mode_version_copy_and_requires(repo):
     checks = {c["id"]: c for c in json.loads(repo.run("doctor", "--offline", "--format", "json").stdout)}
     detail = checks["install"]["detail"]
     assert "hook mode: vendored" in detail and f"running aigate-lite {aigate.__version__} (loose file)" in detail
-    assert f"vendored copy: {aigate.__version__}" in detail and "requires: >=0.4,<0.5" in detail
+    assert f"vendored copy: {aigate.__version__}" in detail and f"requires: {aigate.requires_for(aigate.__version__)}" in detail
 
 
 def test_doctor_fails_when_the_running_version_is_below_the_pin(repo):

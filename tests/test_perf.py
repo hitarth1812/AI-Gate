@@ -172,6 +172,7 @@ def test_range_git_calls_do_not_grow_per_commit_beyond_the_diffs(repo):
 
 def test_duplicate_blocks_across_many_new_files(repo):
     block = "".join(f"    total = total + item.value_{i}\n" for i in range(8))
+    repo.write(".aigate/lite.toml", '[rules]\n"code.duplicate_block" = "warn"\n')            # core rules are off for people unless named
     for i in range(40):
         repo.write(f"m{i}.py", f"def f{i}(item):\n    total = 0\n{block}    return total\n")
     repo.add()

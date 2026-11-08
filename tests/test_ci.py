@@ -84,7 +84,7 @@ def test_gitlab_example_exists():
 
 
 def test_sarif_repo_wide_findings_still_have_a_location(repo):
-    repo.write(".aigate/lite.toml", "[limits]\ndiff_files = 1\n")
+    repo.write(".aigate/lite.toml", '[rules]\n"size.*" = "warn"\n\n[limits]\ndiff_files = 1\n')   # size.* is off for people unless named
     repo.commit()
     repo.write("a.py", "x = 1\n")
     repo.write("b.py", "y = 2\n")

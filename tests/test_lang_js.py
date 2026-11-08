@@ -115,7 +115,8 @@ def test_functions_in_js_use_brace_structure_for_size_and_loops(repo):
     body = "".join(f"  x = {i}\n" for i in range(70))
     res = stage(repo, {}, {"a.ts": f"function big(a: number) {{\n{body}  return a\n}}\n"
                                    "const f = (a) => {\n  for (const x of a) {\n    for (const y of x) {\n      for (const z of y) {\n"
-                                   "        use(z)\n      }\n    }\n  }\n}\n"})
+                                   "        use(z)\n      }\n    }\n  }\n}\n",
+                           ".aigate/lite.toml": '[rules]\n"size.*" = "warn"\n"perf.*" = "warn"\n'})   # off for people unless named
     assert find(res, "size.function_length") and find(res, "perf.nested_loops")
     quiet = stage(repo, {}, {"a.ts": "const s = '} } for (a of b) { for (c of d) { for (e of f) {'\n"
                                      "function ok() {\n  // for (a of b) { for (c of d) { for (e of f) { x }}}\n  return 1\n}\n"})
