@@ -15,6 +15,18 @@ the mistakes AI coding tools make most often, and stops the commit if it finds a
 It is the lightweight, local version of the AI Code Trust Gate plan. It uses the same rule names,
 actions and risk score.
 
+## Install
+
+After the first release (not published to PyPI yet: until then use the file itself, as in the next section):
+
+```bash
+pip install aigate-lite          # adds the commands `aigate-lite` and `aigate`
+pipx install aigate-lite         # the same, in its own environment (recommended for a command-line tool)
+uvx aigate-lite review           # run once without installing
+```
+
+Maintainers: how a release is published (PyPI Trusted Publishing, no token) is in [docs/RELEASING.md](docs/RELEASING.md).
+
 ## First success in a few commands
 
 ```bash

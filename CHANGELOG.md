@@ -2,6 +2,12 @@
 
 ## 0.5.0 — unreleased: the reviewer (Phase 6A) and visible credit (Phase 7A)
 
+### Release workflow (PyPI Trusted Publishing)
+
+No change to the tool itself. `.github/workflows/release.yml` builds on a `vX.Y.Z` tag, tests the built wheel on three
+operating systems, and publishes with PyPI Trusted Publishing (OIDC; no token or secret). `scripts/release_check.py` holds
+the guards (tag equals `__version__`, built metadata, wheel contents). How to release: `docs/RELEASING.md`. Not published yet.
+
 ### Visible credit (Phase 7A)
 
 Additive only: no result, verdict, exit code or hook behaviour depends on any of this. Nothing is sent over the network.
