@@ -96,18 +96,23 @@ def test_json_adds_tool_info_without_touching_existing_keys(repo):
         assert key in data
 
 
-def test_normal_reports_stay_free_of_the_credit(repo):
+def test_the_credit_is_one_visible_line_in_a_text_report_with_findings_and_never_elsewhere(repo):
+    # Phase 7A replaced "normal reports stay free of the credit": one footer line when a finding is printed
     repo.write("a.py", f'KEY = "{AWS}"\n')
     repo.add()
-    for fmt in ("text", "agent"):
-        out = repo.run("check", "--format", fmt, "--offline").stdout
-        assert AUTHOR not in out and "github.com/hitarth1812" not in out, fmt
+    out = repo.run("check", "--offline", "--color", "never").stdout
+    assert out.count(AUTHOR) == 1 and out.rstrip().splitlines()[-1] in (aigate.ATTRIBUTION,
+                                                                       aigate.credit_line(aigate.SYMBOLS_ASCII))
+    for args in (("check", "--offline", "-q"), ("check", "--offline", "--format", "github")):
+        got = repo.run(*args).stdout
+        assert AUTHOR not in got and "github.com/hitarth1812" not in got, args
 
 
-def test_agent_format_is_unchanged():
+def test_agent_format_keeps_its_first_line_and_end_and_gains_one_tool_line():
     res = aigate.Result([], "pass", False, 0, ("human", "default"), "staged", {"files": 0, "added": 0, "removed": 0,
                                                                               "seconds": 0}, "defaults", [])
-    assert aigate.render_agent(res) == "AIGATE verdict=pass risk=0 exit=0\nEND\n"
+    assert aigate.render_agent(res) == (f"AIGATE verdict=pass risk=0 exit=0\n"
+                                        f"TOOL aigate-lite {aigate.__version__} {aigate.__url__}\nEND\n")
 
 
 # ---------------------------------------------------------------- vendored copy
@@ -157,7 +162,8 @@ def test_check_results_and_exit_codes_do_not_depend_on_the_attribution(repo, tmp
     real = run_copy(repo, SCRIPT, "check", "--format", "json", "--offline")
     copy = run_copy(repo, clean, "check", "--format", "json", "--offline")
     assert real[0] == copy[0] == 1
-    strip = lambda text: {k: v for k, v in json.loads(text).items() if k not in ("stats", "tool_info")}   # noqa: E731
+    strip = lambda text: {k: v for k, v in json.loads(text).items()                      # noqa: E731
+                          if k not in ("stats", "tool_info", "author")}                  # author: the credit itself
     left, right = strip(real[1]), strip(copy[1])
     left.pop("version", None), right.pop("version", None)
     assert left == right

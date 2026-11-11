@@ -52,3 +52,4 @@ src/f24.py
   +5 more — run: aigate-lite check
 ▲ WARN · risk 25/100 · 30 warn · 0.1s
 next: commit allowed; the warnings are worth a look
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

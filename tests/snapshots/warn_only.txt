@@ -3,3 +3,4 @@ app/a.py
   4  WARN   code.todo  # TODO later
 ▲ WARN · risk 3/100 · 1 warn · 0.1s
 next: commit allowed; the warnings are worth a look
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

@@ -74,7 +74,9 @@ def test_every_non_pass_result_ends_with_exactly_one_next_line(name):
     if res.verdict == "pass" and not any(f.allowed == "baseline" for f in res.findings):
         assert nexts == []
     else:
-        assert len(nexts) == 1 and lines[-1] == nexts[0]
+        # Phase 7A: the credit line comes after it, whenever a finding is printed
+        credit = [ln for ln in lines if ln.startswith("aigate-lite by ")]
+        assert len(nexts) == 1 and lines[-1] == credit[0] and lines[-2] == nexts[0] and len(credit) == 1
 
 
 def test_hints_are_shown_once_per_rule_and_files_ordered_by_severity():
@@ -89,7 +91,9 @@ def test_hints_are_shown_once_per_rule_and_files_ordered_by_severity():
 def test_truncation_only_with_a_width():
     long = aigate.render_text(CASES["no_tty_full"][0]())
     short = aigate.render_text(CASES["tty_80"][0](), width=80)
-    assert max(map(len, short.splitlines())) <= 80 and max(map(len, long.splitlines())) > 80
+    body = [ln for ln in short.splitlines() if not ln.startswith("aigate-lite by ")]     # the credit line is never cut
+    assert max(map(len, body)) <= 80 and max(map(len, long.splitlines())) > 80
+    assert short.splitlines()[-1] == aigate.credit_line()
 
 
 def test_verbose_keeps_the_detailed_view_and_quiet_is_unchanged():

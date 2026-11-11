@@ -4,3 +4,4 @@ app/a.py
             → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
 ✖ FIX · risk 30/100 · 1 fix · 0.1s — commit stopped
 next: fix it, or for this commit only (humans): AIGATE_ALLOW=security.eval git commit ...
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

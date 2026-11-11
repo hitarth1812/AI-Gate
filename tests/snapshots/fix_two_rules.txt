@@ -9,3 +9,4 @@ app/b.py
              → Pass an argument list without a shell.
 ✖ FIX · risk 50/100 · 3 fix · 1 warn · 0.1s — commit stopped
 next: fix the 3 FIX lines above (a false positive? aigate-lite explain <rule>)
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

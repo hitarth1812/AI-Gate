@@ -5741,6 +5741,10 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
     if quiet and res.verdict == "pass":
         return ""
     out = []
+
+    def foot():
+        """The credit line: only when a finding is printed, never with -q, always the last line."""
+        return [f"{s('dim')}{credit_line(sym)}{s('reset')}"] if active and not quiet else []
     st = res.stats
     if verbose or quiet:
         prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
@@ -5783,7 +5787,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             nxt = _next_line(res, active, baselined, stage)
             if nxt:
                 out.append(nxt)
-        return "\n".join(out) + "\n"
+        return "\n".join(out + foot()) + "\n"
 
     who = "human" if res.provenance[0] != "agent" else f"AI agent ({res.provenance[1].lstrip('$')})"
     head = (f"aigate-lite {__version__} {sym['dot']} {mode} {sym['dot']} {st['files']} file"
@@ -5798,7 +5802,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
         nxt = _next_line(res, active, baselined, stage)
         if nxt:
             out.append(_fit(nxt, width, sym))
-        return "\n".join(out) + "\n"
+        return "\n".join(out + foot()) + "\n"
     rank = {"block": 0, "fix": 1, "warn": 2}
     by_file: dict = defaultdict(list)
     for f in active:
@@ -5835,7 +5839,19 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
     nxt = _next_line(res, active, baselined, stage)
     if nxt:
         out.append(_fit(nxt, width, sym))
-    return "\n".join(out) + "\n"
+    return "\n".join(out + foot()) + "\n"
+
+
+def credit_line(sym=None) -> str:
+    """The visible credit (ATTRIBUTION) in the report's own symbols: ASCII where the console cannot show `·`. It is a
+    plain line of text, printed under a report that has findings. Never truncated to the terminal width: a cut-off link
+    is no credit."""
+    return ATTRIBUTION.replace("·", (sym or SYMBOLS_UTF)["dot"])
+
+
+def agent_tool_line() -> str:
+    """The last line before END in the agent format: which tool wrote the report, and where it lives."""
+    return to_ascii(f"TOOL aigate-lite {__version__} {__url__}")
 
 
 def report_text(res: Result, *, color: bool, verbose: bool, quiet: bool, stage: str, mode="staged",
@@ -5861,7 +5877,11 @@ def render_agent(res: Result) -> str:
         AIGATE verdict=<v> risk=<r> exit=<code>
         <ACTION> <rule> <path>:<line> <message> | fix: <hint>
         MORE <n>          (only when capped: 50 block/fix lines, then 20 warn lines)
+        TOOL aigate-lite <version> <url>
         END
+
+    The first line and END are the contract; TOOL (credit: which tool wrote this) sits directly before END and a reader
+    may ignore it.
     """
     rank = {"block": 0, "fix": 1, "warn": 2}
     active = sorted((f for f in res.findings if not f.allowed),
@@ -5875,7 +5895,7 @@ def render_agent(res: Result) -> str:
         out.append(to_ascii(" ".join((line + (f" | fix: {hint[0]}" if hint else "")).split())))
     if len(active) > len(loud) + len(quiet):
         out.append(f"MORE {len(active) - len(loud) - len(quiet)}")
-    out.append("END")
+    out += [agent_tool_line(), "END"]
     return "\n".join(out) + "\n"
 
 
@@ -5889,7 +5909,8 @@ def report_json(res: Result, view=None) -> None:
         extra["truncated"] = len(res.findings) - len(shown)
     print(json.dumps({
         **extra,
-        "tool": "aigate-lite", "version": __version__, "schema": 1, "label": res.label,
+        "tool": "aigate-lite", "version": __version__, "schema": 1, "author": __author__, "url": __url__,
+        "label": res.label,
         "tool_info": {"name": "aigate-lite", "version": __version__, "author": __author__, "license": __license__,
                       "url": __url__},
         "provenance": {"kind": res.provenance[0], "source": res.provenance[1]}, "config": res.config,
@@ -7451,7 +7472,8 @@ def review_report(res: Result) -> dict:
     if info.get("deps_removed") and not info.get("deps_added"):
         good.append("dependencies removed, none added: " + ", ".join(info["deps_removed"][:5]))
     return {
-        "tool": "aigate-lite", "version": __version__, "schema": REVIEW_SCHEMA, "kind": "review", "label": res.label,
+        "tool": "aigate-lite", "version": __version__, "schema": REVIEW_SCHEMA, "author": __author__, "url": __url__,
+        "kind": "review", "label": res.label,
         "provenance": {"kind": res.provenance[0], "source": res.provenance[1]}, "verdict": res.verdict, "risk": res.risk,
         "summary": {"files": res.stats.get("files", 0), "added": res.stats.get("added", 0),
                     "removed": res.stats.get("removed", 0), "functions_changed": len(funcs), "functions_with_tests": tested,
@@ -7515,7 +7537,7 @@ def render_review_text(rep) -> str:
     if rep["allowed"]:
         out.append(f"  ({_plural(rep['allowed'], 'finding')} allowed by an allow entry or the baseline)")
     out += [f"  note: {n}" for n in rep["notes"]]
-    out += ["", f"Verdict: {rep['verdict'].upper()} - {_verdict_sentence(rep)}"]
+    out += ["", f"Verdict: {rep['verdict'].upper()} - {_verdict_sentence(rep)}", "", ATTRIBUTION]
     return to_ascii("\n".join(out)) + "\n"
 
 
@@ -7542,7 +7564,8 @@ def render_review_md(rep) -> str:
     if rep["allowed"]:
         out.append(f"- ({_plural(rep['allowed'], 'finding')} allowed by an allow entry or the baseline)")
     out += [f"> note: {n}" for n in rep["notes"]]
-    out += ["", f"**Verdict: {rep['verdict'].upper()}** - {_verdict_sentence(rep)}"]
+    out += ["", f"**Verdict: {rep['verdict'].upper()}** - {_verdict_sentence(rep)}", "",
+            f"Reviewed by [aigate-lite]({__url__}) {__version__}"]
     return "\n".join(out) + "\n"
 
 
@@ -7733,7 +7756,7 @@ def run_check(args, env, collect=False):
         if args.format == "text" and not args.quiet:
             print("aigate-lite: nothing to check")
         elif args.format == "agent":
-            print("AIGATE verdict=pass risk=0 exit=0\nEND")
+            print("AIGATE verdict=pass risk=0 exit=0\n" + agent_tool_line() + "\nEND")
         return 0
 
     registry = Registry(offline=args.offline or env.get("AIGATE_OFFLINE") == "1",
@@ -7766,7 +7789,7 @@ def run_check(args, env, collect=False):
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
             elif args.format == "agent":
-                print("AIGATE verdict=pass risk=0 exit=0\nEND")
+                print("AIGATE verdict=pass risk=0 exit=0\n" + agent_tool_line() + "\nEND")
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,

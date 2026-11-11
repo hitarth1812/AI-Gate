@@ -10,3 +10,4 @@ app/m3.py
   5  FIX    security.shell  subprocess.run(...) runs through a shell
 ✖ BLOCK (risk score escalated it) · risk 64/100 · 4 fix · 0.1s — commit stopped
 next: fix the 4 FIX lines above (a false positive? aigate-lite explain <rule>)
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

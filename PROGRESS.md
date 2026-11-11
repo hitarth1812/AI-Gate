@@ -1801,3 +1801,43 @@ Reviewer fixtures (`--review`): 51/51 for a person and an agent, unchanged. Thes
 
 ### Bench (py -3.12 bench/bench.py --against 532a4b0, 40 pairs, gates PASS)
 startup -0.9%, startup-direct +1.1%, A +0.4%, B 0.0%, C -0.1%, D -0.3%, E +0.3%, F +0.2%, G -0.1%; git calls and blob reads identical.
+
+## Phase 7 -> 7A: visible credit (branch phase-7, from phase-6 tip c23bb70)
+
+### Step 0
+- origin/main is still the Phase 3 merge (e332152); phases 4-6 are not on main. The human chose: build from phase-6. Human
+  answers: CI green (all 12 jobs, not checked by me: gh is not logged in here), repo public, NOT on PyPI, exclude hitarth1812/*.
+- Baseline, identical code vs itself (`py -3.12 bench/bench.py --against c23bb70 --pairs 40`, edits stashed so both sides
+  were the same file): startup +1.2%, startup-direct -1.1%, A +0.1%, B -0.7%, C +1.6%, D -0.7%, E -1.7%, F -3.3%, G -0.6%.
+  That is the noise band for this machine today.
+
+### Built (additive only)
+- Text: `credit_line()` (ATTRIBUTION in the report's symbols, never cut to the terminal width) is the last line when at
+  least one active finding is printed; not on a pass, not with -q, not in github/json/agent/sarif. Review text: always.
+- Review markdown: last line `Reviewed by [aigate-lite](<url>) <version>`.
+- JSON (check, audit, review): top-level `author` and `url` added; no key removed or retyped (`tests/test_credit.py` pins
+  every key and type). Agent: `TOOL aigate-lite <version> <url>` directly before END (also pass and nothing staged).
+- SARIF driver pinned by a test. A test scans tracked files for zero-width and bidi characters.
+
+### Existing tests whose expectation changed (each is a pin of the old output)
+| test | change |
+|---|---|
+| tests/snapshots/*.txt (11 of 12) | one more last line (the credit) in every snapshot with a finding; `pass.txt` unchanged |
+| test_output::test_every_non_pass_result_ends_with_exactly_one_next_line | the credit is last, the `next:` line just above it |
+| test_output::test_truncation_only_with_a_width | the credit line is excluded from the 80-column check and checked to be uncut |
+| test_audit_ux::test_the_baseline_pointer_closes_every_audit_report | credit last, pointer above it |
+| test_attribution::test_normal_reports_stay_free_of_the_credit | replaced by "one credit line with findings, none with -q / github" |
+| test_attribution::test_agent_format_is_unchanged | now pins the TOOL line before END |
+| test_attribution::test_check_results_and_exit_codes_do_not_depend_on_the_attribution | `author` joins the keys ignored when comparing a copy with another author |
+| test_agent_format (golden, caps, pass) | the TOOL line |
+| test_review_rest::test_review_json_schema_is_versioned_and_stable | key set gains author, url |
+
+### Tests (Windows 11)
+3.11, 3.13, 3.14: 1014 passed, 12 skipped, 2 failed (before the test_audit_ux fix: 1 of the 2 failures); 3.12: 1008 passed, 18 skipped,
+2 failed. After the fix only `test_errors::test_8_unreachable_registry_gives_one_specific_note` fails: it fails the same way
+on c23bb70 (a PermissionError on the local proxy connection instead of a refusal: this machine blocks it today; it passed on
+2026-11-08), so it is not caused by this phase. On 3.12 six installed-mode tests skip ("cannot create a virtual environment
+here"); they ran on 3.11/3.13/3.14. Not run: Ubuntu, macOS, GitHub Actions.
+
+### Bench (`py -3.12 bench/bench.py --against c23bb70 --pairs 40`, gates PASS)
+startup -1.3%, startup-direct -0.6%, A +0.0%, B -0.3%, C +0.1%, D +0.5%, E +0.7%, F -0.0%, G +0.4%; git calls and blob reads identical.
