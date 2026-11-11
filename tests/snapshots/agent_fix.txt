@@ -4,3 +4,4 @@ app/a.py
             → Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
 ✖ FIX · risk 36/100 · 1 fix · 0.1s — commit stopped
 next: fix the 1 FIX line above (a false positive? aigate-lite explain <rule>)
+aigate-lite by Hitarth Khatiwala · Apache-2.0 · https://github.com/hitarth1812/AI-Gate

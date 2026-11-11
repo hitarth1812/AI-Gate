@@ -336,8 +336,8 @@ def test_review_json_schema_is_versioned_and_stable(repo):
     change(repo, {**BAD, "requirements.txt": "requests==2.0\n"})
     data = review(repo)
     assert data["schema"] == aigate.REVIEW_SCHEMA == 1 and data["kind"] == "review" and data["tool"] == "aigate-lite"
-    assert set(data) == {"tool", "version", "schema", "kind", "label", "provenance", "verdict", "risk", "summary", "must_fix",
-                         "should_check", "looks_good", "allowed", "notes"}
+    assert set(data) == {"tool", "version", "schema", "author", "url", "kind", "label", "provenance", "verdict", "risk",
+                         "summary", "must_fix", "should_check", "looks_good", "allowed", "notes"}   # 7A added author, url
     assert set(data["summary"]) == {"files", "added", "removed", "functions_changed", "functions_with_tests", "tests_changed",
                                     "deps_added", "deps_removed", "checked"}
     row = data["should_check"][0]

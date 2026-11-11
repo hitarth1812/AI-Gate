@@ -1,6 +1,25 @@
 # Changelog
 
-## 0.5.0 — unreleased: the reviewer (Phase 6A)
+## 0.5.0 — unreleased: the reviewer (Phase 6A) and visible credit (Phase 7A)
+
+### Visible credit (Phase 7A)
+
+Additive only: no result, verdict, exit code or hook behaviour depends on any of this. Nothing is sent over the network.
+
+#### Added
+- Text reports (`check`, `audit`) that print a finding end with one credit line (`aigate-lite by Hitarth Khatiwala ·
+  Apache-2.0 · <url>`); `review` text always does. Not on a clean pass, not with `-q`, not in `--format github`.
+- `review --format md` ends with `Reviewed by [aigate-lite](<url>) <version>`.
+- JSON (`check`, `audit`, `review`): top-level `"author"` and `"url"`. `"tool"`, `"schema"` and every other key and type are unchanged.
+- Agent format: one `TOOL aigate-lite <version> <url>` line directly before `END` (also on a pass and with nothing staged).
+  The first line and `END` are as before.
+
+#### Changed
+- Tests that pinned the old output were updated: the golden text snapshots (one more last line when a finding is
+  printed), the agent-format tests (the extra line), the "reports stay free of the credit" test (now: one line, with
+  the exceptions above) and the review JSON key set.
+
+### The reviewer (Phase 6A)
 
 `aigate-lite review` reads a change like a careful senior reviewer and checks it against the rest of the repository. The
 gate (block/fix/warn) is unchanged and the commit hook does not run any of this (it is not slower). The version in the code

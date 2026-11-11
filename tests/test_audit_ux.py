@@ -48,7 +48,9 @@ def test_summary_counts_match_the_full_json_report(audit_repo):
 
 def test_the_baseline_pointer_closes_every_audit_report(audit_repo):
     for args in ((), ("--summary",), ("--group-by", "rule"), ("--max-findings", "2")):
-        last = text(audit_repo, *args).stdout.splitlines()[-1]
+        lines = text(audit_repo, *args).stdout.splitlines()
+        assert lines[-1].startswith("aigate-lite by ")          # Phase 7A: the credit line is last, the pointer just above it
+        last = lines[-2]
         assert last.startswith("next: ") and "aigate-lite baseline" in last, (args, last)
 
 

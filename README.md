@@ -128,9 +128,12 @@ Detection is best effort. An agent that runs with none of these signals looks li
 
     AIGATE verdict=fix risk=30 exit=1
     FIX security.eval app/a.py:7 eval() runs code built at runtime | fix: Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
+    TOOL aigate-lite 0.5.0 https://github.com/hitarth1812/AI-Gate
     END
 
 At most 50 block/fix lines and 20 warn lines are listed; a `MORE <n>` line says how many were left out.
+The first line and `END` are the contract; `TOOL` (which tool wrote the report) always sits directly before `END`
+and a reader may ignore it.
 Add instructions like these to your agent's instruction file (`CLAUDE.md`, a `.cursor/rules` file,
 `.github/copilot-instructions.md`, …):
 
@@ -247,7 +250,8 @@ and `C-cache` rows (300 files) with `A` and `A-cache` (1 file) in docs/PERF.md.
 
 - `--format text` (default), `json` (stable schema), `github` (annotations for Actions) or `sarif`
   (SARIF 2.1.0, for code-scanning uploads).
-- `-q` prints only what stops the commit; `-v` adds hints, fingerprints and allowed findings.
+- `-q` prints only what stops the commit; `-v` adds hints, fingerprints and allowed findings. A text report that prints
+  a finding ends with a one-line credit (see "Credit and usage").
 - Exit codes: `0` pass or warnings only, `1` fix or block, `2` usage or git error.
 - The verdict is the strongest action found. A Fix verdict becomes Block when the risk score is 60 or
   higher; the score uses the same formula as the full gate.
@@ -313,6 +317,23 @@ Suggested credit line: "Uses aigate-lite by Hitarth Khatiwala" (https://github.c
 
 `aigate-lite doctor` warns (it never fails) if the copyright header in the running file was removed or changed.
 Nothing in the gate depends on it: check results, exit codes and hooks behave the same either way.
+
+## Credit and usage
+
+Every place the tool names itself is visible text, documented here, and never changes a result or an exit code.
+
+| Where | What you see | When it is absent |
+|---|---|---|
+| `check` / `audit` text report | one last line: `aigate-lite by Hitarth Khatiwala · Apache-2.0 · <url>` (ASCII separators on a console that cannot show `·`) | on a clean pass, with `-q`, and in `--format json`, `agent`, `sarif` and `github` |
+| `review` text report | the same line, always | never absent |
+| `review --format md` | a last line `Reviewed by [aigate-lite](<url>) <version>` | never absent |
+| JSON (`check`, `audit`, `review`) | `"author"` and `"url"` next to `"tool"` and `"version"` (`"schema"` is unchanged; nothing was removed or retyped) | |
+| `--format agent` | one line `TOOL aigate-lite <version> <url>` directly before `END` | |
+| SARIF | the tool driver's `name`, `version`, `informationUri` and `organization` | |
+
+The credit is credit, not proof: nothing in the tool or in the CI examples trusts it, and nothing is hidden (there are no
+invisible characters or encoded marks anywhere; a test scans the repository for them). The footer is a plain line of
+text; the tool is Apache-2.0, so keep the copyright header and NOTICE when you redistribute it (Section 4).
 
 ## Development
 
