@@ -17,13 +17,16 @@ actions and risk score.
 
 ## Install
 
-After the first release (not published to PyPI yet: until then use the file itself, as in the next section):
+aigate-lite is on PyPI: <https://pypi.org/project/aigate-lite/>.
 
 ```bash
 pip install aigate-lite          # adds the commands `aigate-lite` and `aigate`
 pipx install aigate-lite         # the same, in its own environment (recommended for a command-line tool)
 uvx aigate-lite review           # run once without installing
+aigate-lite --version            # check the install
 ```
+
+You can also use the single file without installing anything, as in the next section.
 
 Maintainers: how a release is published (PyPI Trusted Publishing, no token) is in [docs/RELEASING.md](docs/RELEASING.md).
 
