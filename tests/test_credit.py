@@ -207,8 +207,10 @@ def test_sarif_pins_name_version_information_uri_and_organization(repo):
 
 # ------------------------------------------------------------------------------------------------ nothing hidden
 
-HIDDEN = {"​", "‌", "‍", "‎", "‏", "⁠", "⁡", "⁢", "⁣", "⁤", "﻿",
-          "­", "‪", "‫", "‬", "‭", "‮", "⁦", "⁧", "⁨", "⁩"}
+HIDDEN = {"\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060",
+          "\u2061", "\u2062", "\u2063", "\u2064", "\ufeff", "\u00ad",
+          "\u202a", "\u202b", "\u202c", "\u202d", "\u202e", "\u2066",
+          "\u2067", "\u2068", "\u2069"}      # zero-width, bidi and soft-hyphen characters, written as escapes so this file stays clean
 
 
 def test_no_zero_width_or_bidi_characters_in_the_tool_docs_or_outputs():

@@ -1841,3 +1841,14 @@ here"); they ran on 3.11/3.13/3.14. Not run: Ubuntu, macOS, GitHub Actions.
 
 ### Bench (`py -3.12 bench/bench.py --against c23bb70 --pairs 40`, gates PASS)
 startup -1.3%, startup-direct -0.6%, A +0.0%, B -0.3%, C +0.1%, D +0.5%, E +0.7%, F -0.0%, G +0.4%; git calls and blob reads identical.
+
+## Release workflow (branch release-workflow, from origin/main ed264f8)
+
+- Added `.github/workflows/release.yml` (build -> test-wheel -> publish; PyPI Trusted Publishing, no secret), `scripts/release_check.py`
+  (tag/version/wheel-content guards), `docs/RELEASING.md`, a README "Install" section, `tests/test_release_workflow.py`.
+- The workflow has NOT run on GitHub and trusted publishing is untested until the first tag.
+- Found while running the full suite: `tests/test_credit.py` (7A) listed the forbidden zero-width/bidi characters as literal
+  characters, so its own scan of tracked files flagged the file. They are now `\uXXXX` escapes; the test is not weakened.
+- Tests (py -3.12, Windows 11): 1035 passed, 18 skipped, 2 failed before that fix. The two failures were that test and
+  `test_errors::test_8_unreachable_registry_gives_one_specific_note` (environmental, see Phase 7A). After the fix the three
+  affected files pass (56 passed).
