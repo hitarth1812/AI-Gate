@@ -40,6 +40,28 @@ def decode_output(data, encoding):
     return data.decode(encoding, errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
+WALK_SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "build", "dist", ".venv", "venv", "node_modules", ".work"}
+
+
+def project_files(suffixes=None, names=()) -> list:
+    """The project's own files as relative POSIX paths: `git ls-files` in a git checkout, else (an unpacked sdist or
+    zip) a walk of the tree without build output and caches. The checks that use this run either way."""
+    if (ROOT / ".git").exists():
+        proc = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
+        files = [p for p in proc.stdout.splitlines() if (ROOT / p).is_file()] if proc.returncode == 0 else None
+    else:
+        files = None
+    if files is None:
+        files = []
+        for dirpath, dirnames, filenames in os.walk(ROOT):
+            dirnames[:] = sorted(d for d in dirnames if d not in WALK_SKIP_DIRS and not d.endswith(".egg-info"))
+            rel = Path(dirpath).relative_to(ROOT)
+            files += [(rel / f).as_posix() for f in sorted(filenames) if not f.endswith((".pyc", ".pyo"))]
+    if suffixes is None and not names:
+        return files
+    return [p for p in files if (suffixes and p.endswith(tuple(suffixes))) or p.rsplit("/", 1)[-1] in names]
+
+
 spec = importlib.util.spec_from_file_location("aigate_lite", SCRIPT)
 aigate = importlib.util.module_from_spec(spec)
 sys.modules["aigate_lite"] = aigate

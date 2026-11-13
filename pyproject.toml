@@ -5,22 +5,39 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "aigate-lite"
 dynamic = ["version"]
-description = "Free, local commit-time gate that checks AI-written code before it is committed or pushed"
+description = "Free, local reviewer and commit gate for AI-written code: catches fake packages, weakened tests, invented APIs and leaked secrets before they are committed"
 readme = "README.md"
-authors = [{ name = "Hitarth Khatiwala", email = "hitarthkhatiwala@gmail.com" }]
+authors = [{ name = "Hitarth Khatiwala" }]
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 dependencies = []
-keywords = ["git-hooks", "pre-commit", "ai", "code-review", "security", "supply-chain"]
+keywords = ["git-hooks", "pre-commit", "ai", "code-review", "security", "supply-chain", "ai-code-review", "llm",
+            "claude-code", "hallucination", "slopsquatting"]
+# No License :: classifier: the SPDX `license` field above is set, and setuptools>=77 rejects both together.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Security",
+]
 
 [project.scripts]
 aigate-lite = "aigate_lite:main"
-aigate = "aigate_lite:main"
 
 [project.urls]
 Homepage = "https://github.com/hitarth1812/AI-Gate"
 Repository = "https://github.com/hitarth1812/AI-Gate"
+Issues = "https://github.com/hitarth1812/AI-Gate/issues"
+Changelog = "https://github.com/hitarth1812/AI-Gate/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/hitarth1812/AI-Gate#readme"
 
 [tool.setuptools]
 py-modules = ["aigate_lite"]

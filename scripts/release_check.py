@@ -6,7 +6,9 @@
                                       Prints the version.
     release_check.py dist [DIST_DIR]  Fails unless the wheel and the sdist in DIST_DIR (default dist/) both carry exactly
                                       one version, equal to __version__, and the wheel holds only aigate_lite.py and its
-                                      dist-info (with LICENSE and NOTICE). Prints the version.
+                                      dist-info (with LICENSE and NOTICE), and the wheel metadata carries the
+                                      required classifiers and project URLs (REQUIRED_CLASSIFIERS, REQUIRED_URLS) and
+                                      no License :: classifier. Prints the version.
 
 Errors go to stderr, the version to stdout, and the exit status is 1 on any failure.
 """
@@ -18,6 +20,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 SEMVER = re.compile(r"\d+\.\d+\.\d+(?:(?:a|b|rc)\d+)?(?:\.post\d+)?(?:\.dev\d+)?")
+
+
+REQUIRED_CLASSIFIERS = (
+    "Development Status :: ",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Quality Assurance",
+    "Topic :: Security",
+)
+REQUIRED_URLS = ("Homepage", "Repository", "Issues", "Changelog", "Documentation")
 
 
 class Failure(Exception):
@@ -50,6 +68,22 @@ def _metadata_version(text, where):
     return found[0]
 
 
+def check_metadata(text, where):
+    """The PyPI page's facts: classifiers (a prefix ending in ": " matches any value) and project URLs."""
+    classifiers = re.findall(r"^Classifier: (.+?)\s*$", text, re.M)
+    missing = [c for c in REQUIRED_CLASSIFIERS
+               if not any(have == c or (c.endswith(": ") and have.startswith(c)) for have in classifiers)]
+    if missing:
+        raise Failure(f"{where}: classifiers missing from pyproject.toml: {missing}")
+    licence = [c for c in classifiers if c.startswith("License ::")]
+    if licence:
+        raise Failure(f"{where}: {licence} - use the SPDX `license` field only")
+    urls = {u.split(",", 1)[0].strip().lower() for u in re.findall(r"^Project-URL: (.+?)\s*$", text, re.M)}
+    missing = [u for u in REQUIRED_URLS if u.lower() not in urls]
+    if missing:
+        raise Failure(f"{where}: [project.urls] missing: {missing}")
+
+
 def check_dist(dist, root=ROOT):
     version = code_version(root)
     dist = Path(dist)
@@ -65,7 +99,9 @@ def check_dist(dist, root=ROOT):
         if meta_names != [dist_info + "METADATA"]:
             raise Failure(f"{wheels[0].name}: metadata is {meta_names}, expected only {dist_info}METADATA "
                           f"(built version differs from __version__ {version!r})")
-        built = _metadata_version(z.read(meta_names[0]).decode("utf-8"), wheels[0].name)
+        metadata = z.read(meta_names[0]).decode("utf-8")
+        built = _metadata_version(metadata, wheels[0].name)
+        check_metadata(metadata, wheels[0].name)
         stray = [n for n in names if n != "aigate_lite.py" and not n.startswith(dist_info)]
         if stray:
             raise Failure(f"{wheels[0].name} holds files besides aigate_lite.py and {dist_info}: {stray}")

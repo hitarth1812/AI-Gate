@@ -56,7 +56,7 @@ def test_version_is_single_sourced_and_pyproject_reads_it():
     meta = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text(encoding="utf-8"))
     assert "version" not in meta["project"] and "version" in meta["project"]["dynamic"]
     assert meta["tool"]["setuptools"]["dynamic"]["version"] == {"attr": "aigate_lite.__version__"}
-    assert aigate.__version__ == "0.5.0"
+    assert aigate.__version__ == "0.5.1"
 
 
 def stage(repo, files):
@@ -400,7 +400,9 @@ def test_setup_mode_installed_copies_nothing(repo):
 def test_setup_keeps_a_vendored_repository_vendored_and_names_the_switch(repo):
     assert repo.run("install", "--vendor").returncode == 0
     proc = repo.run("setup")
-    assert proc.returncode == 0 and "already has .aigate/aigate_lite.py" in proc.stdout and "aigate-lite unvendor" in proc.stdout
+    # 0.5.1: one message about the copy (unchanged here), not "copied the gate" followed by "already has ... stays vendored"
+    assert proc.returncode == 0 and "the vendored copy .aigate/aigate_lite.py is unchanged" in proc.stdout \
+        and "aigate-lite unvendor" in proc.stdout and "copied the gate" not in proc.stdout
     assert aigate.hook_mode((repo.path / ".git" / "hooks" / "pre-commit").read_text(encoding="utf-8")) == "vendored"
 
 
@@ -467,7 +469,7 @@ def build_wheel(dest):
     files = {"aigate_lite.py": SCRIPT.read_bytes(),
              f"{dist}/METADATA": f"Metadata-Version: 2.1\nName: aigate-lite\nVersion: {ver}\nRequires-Python: >=3.11\n".encode(),
              f"{dist}/WHEEL": b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
-             f"{dist}/entry_points.txt": b"[console_scripts]\naigate-lite = aigate_lite:main\naigate = aigate_lite:main\n"}
+             f"{dist}/entry_points.txt": b"[console_scripts]\naigate-lite = aigate_lite:main\n"}
     rows = [f"{n},sha256={base64.urlsafe_b64encode(hashlib.sha256(b).digest()).rstrip(b'=').decode()},{len(b)}"
             for n, b in files.items()] + [f"{dist}/RECORD,,"]
     wheel = dest / f"aigate_lite-{ver}-py3-none-any.whl"

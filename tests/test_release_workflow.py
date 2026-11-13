@@ -105,12 +105,24 @@ def make_tree(tmp_path, version="1.2.3"):
     return root
 
 
-def make_dist(tmp_path, version="1.2.3", wheel_extra=(), wheel_meta=None, sdist_meta=None, skip=()):
+GOOD_META = ("".join(f"Classifier: {c}{'4 - Beta' if c.endswith(': ') else ''}\n"
+                     for c in ("Development Status :: ", "Environment :: Console", "Intended Audience :: Developers",
+                               "Operating System :: OS Independent", "Programming Language :: Python :: 3 :: Only",
+                               "Programming Language :: Python :: 3.11", "Programming Language :: Python :: 3.12",
+                               "Programming Language :: Python :: 3.13", "Programming Language :: Python :: 3.14",
+                               "Topic :: Software Development :: Quality Assurance", "Topic :: Security"))
+             + "".join(f"Project-URL: {u}, https://example.invalid/{u}\n"
+                       for u in ("Homepage", "Repository", "Issues", "Changelog", "Documentation")))
+
+
+def make_dist(tmp_path, version="1.2.3", wheel_extra=(), wheel_meta=None, sdist_meta=None, skip=(),
+              extra_meta=GOOD_META):
     dist = tmp_path / "dist"
     dist.mkdir()
     info = f"aigate_lite-{version}.dist-info/"
     with zipfile.ZipFile(dist / f"aigate_lite-{version}-py3-none-any.whl", "w") as z:
-        files = {"aigate_lite.py": "x = 1\n", info + "METADATA": f"Metadata-Version: 2.4\nName: aigate-lite\nVersion: {wheel_meta or version}\n",
+        files = {"aigate_lite.py": "x = 1\n", info + "METADATA": f"Metadata-Version: 2.4\nName: aigate-lite\nVersion: {wheel_meta or version}\n"
+                 + extra_meta,
                  info + "WHEEL": "w", info + "RECORD": "", info + "licenses/LICENSE": "l", info + "licenses/NOTICE": "n"}
         for name in skip:
             files.pop(name)
@@ -170,3 +182,23 @@ def test_dist_guard_rejects_a_build_of_another_version_and_a_missing_dist(tmp_pa
         rc.check_dist(make_dist(tmp_path, version="1.2.4"), root)
     with pytest.raises(rc.Failure, match="does not exist"):
         rc.check_dist(tmp_path / "nowhere", root)
+
+
+@pytest.mark.parametrize("drop, message", [
+    ("Classifier: Topic :: Security\n", "classifiers missing"),
+    ("Classifier: Programming Language :: Python :: 3.14\n", "classifiers missing"),
+    ("Project-URL: Issues, https://example.invalid/Issues\n", r"missing: \['Issues'\]"),
+    ("Project-URL: Changelog, https://example.invalid/Changelog\n", r"missing: \['Changelog'\]"),
+])
+def test_dist_guard_requires_the_pypi_classifiers_and_urls(tmp_path, drop, message):
+    rc, root = load_release_check(), make_tree(tmp_path)
+    assert drop in GOOD_META
+    with pytest.raises(rc.Failure, match=message):
+        rc.check_dist(make_dist(tmp_path, extra_meta=GOOD_META.replace(drop, "")), root)
+
+
+def test_dist_guard_rejects_a_license_classifier(tmp_path):
+    rc, root = load_release_check(), make_tree(tmp_path)
+    meta = GOOD_META + "Classifier: License :: OSI Approved :: Apache Software License\n"
+    with pytest.raises(rc.Failure, match="SPDX"):
+        rc.check_dist(make_dist(tmp_path, extra_meta=meta), root)

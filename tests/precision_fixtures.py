@@ -138,6 +138,62 @@ FILES = {
     "tsconfig.json": '{\n  // comments are fine in tsconfig\n  "compilerOptions": {}\n}\n',
     ".vscode/settings.json": '{\n  // and in editor settings\n  "a": 1\n}\n',
     ".devcontainer/devcontainer.json": '{\n  // and in dev containers\n  "name": "x"\n}\n',
+    # 0.5.1 Part D (synthetic, shaped like a Next.js + Playwright repository)
+    # D1. conditional skips are conditional by syntax
+    "e2e/login.spec.ts": "\n".join([
+        "import { test, expect } from '@playwright/test';",
+        "const baseURL = process.env.BASE_URL;",
+        "test.describe('login', () => {",
+        "  test('logs in', async ({ page, browserName }) => {",
+        "    test.skip(!process.env.E2E_USER, 'needs E2E_USER');",
+        "    test.skip(!baseURL, 'needs a base url');",
+        "    const rows = await page.locator('tr').count();",
+        "    test.skip(rows === 0, 'nothing to check');",
+        "    if (!process.env.CI_TOKEN) {",
+        "      test.skip(true, 'needs the CI token');",
+        "    }",
+        "    test.fixme(browserName === 'webkit', 'webkit renders the menu differently');",
+        "    await expect(page).toHaveTitle(/Login/);",
+        "  });",
+        "  if (process.env.SKIP_SMOKE) test.describe.skip('smoke', () => {});",
+        "  test.skip('old checkout flow', async () => {});",
+        "  it.skip('legacy redirect', () => {});",
+        "  xit('another legacy case', () => {});",
+        "  test('menu', async ({ isMobile }) => { test.skip(isMobile, 'flaky on mobile'); });",
+        "});",
+        ""]),
+    # D2. end-to-end fixtures and mocks are test context (people)
+    "e2e/fixtures/mock-server.ts": "\n".join([
+        "export const apiToken = '" + SECRET + "';",
+        "console.log('mock server listening');",
+        "export const awsKey = '" + AWS + "';",
+        ""]),
+    "src/__mocks__/api.ts": "\n".join([
+        "export const fetchUser = () => { console.log('mocked fetchUser'); return { id: 1 }; };",
+        ""]),
+    "src/lib/log.ts": "\n".join([
+        "export function track(e: string) { console.log('track', e); }",
+        ""]),
+    # D3. HMAC-SHA1 is not a weak hash; plain SHA-1 of a secret and Math.random() for a token still are
+    "src/lib/sign.ts": "\n".join([
+        "import crypto from 'crypto';",
+        "export const sig = (secret: string, body: string) => crypto.createHmac('sha1', secret).update(body).digest('hex');",
+        "export const weak = (password: string) => crypto.createHash('sha1').update(password).digest('hex');",
+        "export const token = Math.random().toString(36).slice(2);",
+        ""]),
+    "scripts/sign.py": "\n".join([
+        "import hashlib, hmac",
+        "def sign(secret, body):",
+        "    return hmac.new(secret, body, hashlib.sha1).hexdigest()",
+        "def legacy(password):",
+        "    return hashlib.sha1(password.encode()).hexdigest()",
+        ""]),
+    # D5. a localhost connection string in the docs is an example
+    "docs/dev.md": "\n".join([
+        "# Local development", "",
+        "    DATABASE_URL=postgres://app:Zx9kQ2vB@localhost:5432/app",
+        "    REPLICA_URL=postgres://app:Zx9kQ2vB7m@replica.internal.acme.io:5432/app",
+        ""]),
 }
 
 # (case id, rule, path, text that identifies the line, expectation for a human, expectation for an agent)
@@ -199,6 +255,29 @@ CASES = [
     ("jsonc-tsconfig", "code.syntax_error", "tsconfig.json", "comments are fine", None, None),
     ("jsonc-vscode", "code.syntax_error", ".vscode/settings.json", "editor settings", None, None),
     ("jsonc-devcontainer", "code.syntax_error", ".devcontainer/devcontainer.json", "dev containers", None, None),
+    # 0.5.1 Part D
+    ("js-skip-env", "tests.skip_added", "e2e/login.spec.ts", "E2E_USER", "warn", "fix"),
+    ("js-skip-env-var", "tests.skip_added", "e2e/login.spec.ts", "!baseURL", "warn", "fix"),
+    ("js-skip-data", "tests.skip_added", "e2e/login.spec.ts", "rows === 0", "warn", "fix"),
+    ("js-skip-in-if", "tests.skip_added", "e2e/login.spec.ts", "test.skip(true", "warn", "fix"),
+    ("js-fixme-cond", "tests.skip_added", "e2e/login.spec.ts", "test.fixme", "warn", "fix"),
+    ("js-describe-cond", "tests.skip_added", "e2e/login.spec.ts", "SKIP_SMOKE", "warn", "fix"),
+    ("js-skip-named", "tests.skip_added", "e2e/login.spec.ts", "old checkout flow", "fix", "fix"),
+    ("js-it-skip", "tests.skip_added", "e2e/login.spec.ts", "legacy redirect", "fix", "fix"),
+    ("js-xit", "tests.skip_added", "e2e/login.spec.ts", "xit(", "fix", "fix"),
+    ("js-skip-flaky", "tests.skip_added", "e2e/login.spec.ts", "flaky on mobile", "fix", "fix"),
+    ("mock-secret", "secrets.generic", "e2e/fixtures/mock-server.ts", "apiToken", "warn", "fix"),
+    ("mock-console", "code.console_log", "e2e/fixtures/mock-server.ts", "mock server listening", None, "warn"),
+    ("mock-aws", "secrets.hardcoded", "e2e/fixtures/mock-server.ts", "awsKey", "block", "block"),
+    ("mocks-dir-console", "code.console_log", "src/__mocks__/api.ts", "mocked fetchUser", None, "warn"),
+    ("src-console", "code.console_log", "src/lib/log.ts", "console.log", "warn", "warn"),
+    ("hmac-sha1-js", "security.weak_crypto", "src/lib/sign.ts", "createHmac", None, "warn"),
+    ("sha1-password-js", "security.weak_crypto", "src/lib/sign.ts", "createHash", "warn", "warn"),
+    ("random-token-js", "security.weak_crypto", "src/lib/sign.ts", "Math.random", "warn", "warn"),
+    ("hmac-sha1-py", "security.weak_crypto", "scripts/sign.py", "hmac.new", None, "warn"),
+    ("sha1-password-py", "security.weak_crypto", "scripts/sign.py", "hashlib.sha1(password", "warn", "warn"),
+    ("doc-localhost-dsn", "secrets.generic", "docs/dev.md", "localhost:5432", "pass", "warn"),
+    ("doc-remote-dsn", "secrets.generic", "docs/dev.md", "replica.internal", "fix", "fix"),
 ]
 
 # what a person got for these cases before the "core" default (size.*, perf.*, code.duplicate_block off for people):
@@ -264,6 +343,30 @@ OLD_ACTIONS = {
     'jsonc-tsconfig': None,
     'jsonc-vscode': None,
     'jsonc-devcontainer': None,
+    # 0.5.1 cases: an agent's result on main (0.5.0), recorded with
+    #   python bench/precision.py --against main --agent --json
+    'js-skip-env': 'fix',
+    'js-skip-env-var': 'fix',
+    'js-skip-data': 'fix',
+    'js-skip-in-if': 'fix',
+    'js-fixme-cond': None,
+    'js-describe-cond': 'fix',
+    'js-skip-named': 'fix',
+    'js-it-skip': 'fix',
+    'js-xit': 'fix',
+    'js-skip-flaky': 'fix',
+    'mock-secret': 'fix',
+    'mock-console': 'warn',
+    'mock-aws': 'block',
+    'mocks-dir-console': 'warn',
+    'src-console': 'warn',
+    'hmac-sha1-js': 'warn',
+    'sha1-password-js': 'warn',
+    'random-token-js': 'warn',
+    'hmac-sha1-py': 'warn',
+    'sha1-password-py': 'warn',
+    'doc-localhost-dsn': 'warn',
+    'doc-remote-dsn': 'fix',
 }
 
 

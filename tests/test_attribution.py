@@ -65,7 +65,9 @@ def test_pyproject_metadata():
     project = meta["project"]
     assert project["authors"][0]["name"] == AUTHOR and project["license"] == "Apache-2.0"
     assert project["license-files"] == ["LICENSE", "NOTICE"]
-    assert project["scripts"] == {"aigate-lite": "aigate_lite:main", "aigate": "aigate_lite:main"}
+    # 0.5.1: the `aigate` alias is gone (an unrelated PyPI project is named aigate); no email is published
+    assert project["scripts"] == {"aigate-lite": "aigate_lite:main"}
+    assert all("email" not in a for a in project["authors"])
     assert project["urls"]["Repository"] == aigate.__url__
 
 

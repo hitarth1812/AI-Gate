@@ -1,19 +1,14 @@
 import json
-import subprocess
 
-import pytest
-
-from conftest import ROOT, GitRepo, find
+from conftest import ROOT, GitRepo, find, project_files
 
 DOC_SUFFIXES = (".md", ".toml", ".yml", ".yaml")
 KEY_HEADER = "-----BEGIN " + "OPENSSH PRIVATE KEY-----"     # split so this file is not itself a finding
 
 
 def tracked_files():
-    proc = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True, text=True)
-    if proc.returncode != 0:
-        pytest.skip("not a git checkout")
-    return [p for p in proc.stdout.splitlines() if (ROOT / p).is_file()]
+    """git ls-files in a checkout; the walked tree in an unpacked sdist or zip (0.5.1: no longer skipped there)."""
+    return project_files()
 
 
 def doc_files():

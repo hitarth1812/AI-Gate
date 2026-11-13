@@ -127,7 +127,9 @@ def test_10_interpreter_too_old(repo):
     fake = ("import sys, runpy; sys.version_info = (3, 10, 4, 'final', 0); "
             f"runpy.run_path({str(SCRIPT)!r}, run_name='__main__')")
     proc = subprocess.run([sys.executable, "-c", fake], capture_output=True, text=True)
-    assert proc.returncode == 2 and "needs Python 3.11 or newer" in proc.stderr and "fix: install Python" in proc.stderr
+    assert proc.returncode == 2 and "aigate-lite needs Python 3.11+; this is 3.10. Try: " in proc.stderr \
+        and "-m aigate_lite" in proc.stderr and "fix: install Python" in proc.stderr
+    assert len(proc.stderr.strip().splitlines()) == 1                       # 0.5.1: one line
 
 
 @needs_sh
