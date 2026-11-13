@@ -7204,15 +7204,25 @@ def top_level_sigs(tree) -> dict:
 
 def signature_changes(ctx) -> list:
     """Functions of changed files whose parameters differ between the old and the new version:
-    [{"path", "name", "lang", "old", "new", "line"}]. Python: module-level functions; Go: package-level functions."""
+    [{"path", "name", "lang", "old", "new", "line"}]. Python: module-level functions; Go: package-level functions;
+    JS/TS: exported functions (`export function f(...)`, `export const f = (...) =>`), by parameter count."""
     if "sigchanges" in ctx.cache:
         return ctx.cache["sigchanges"]
     out = []
-    for fc in ctx.code_changes(PY_EXTS | {".go"}):
+    for fc in ctx.code_changes(PY_EXTS | JS_FAMILY | {".go"}):
         if not (fc.old_spec and fc.new_spec):
             continue
         try:
-            if fc.ext in PY_EXTS:
+            if fc.ext in JS_FAMILY:
+                a, b = js_symbols(ctx.old_text(fc) or "", fc.path), js_symbols(ctx.new_text(fc) or "", fc.path)
+                if a is None or b is None:
+                    continue
+                for name, info in b["names"].items():
+                    was = a["names"].get(name)
+                    if info["t"] == "f" and was and was["t"] == "f" and info["n"] is not None and was["n"] is not None \
+                            and was["n"] != info["n"]:
+                        out.append({"path": fc.path, "name": name, "lang": "js", "old": was, "new": info, "line": 1})
+            elif fc.ext in PY_EXTS:
                 old, new = ctx.py_tree(fc, "old")[0], ctx.py_tree(fc, "new")[0]
                 if old is None or new is None:
                     continue
@@ -7342,6 +7352,8 @@ CALLER_LIMIT = 15
 def broken_caller_findings(ctx, rp, idx) -> list:
     out = []
     for change in signature_changes(ctx):
+        if change["lang"] == "js":      # JS/TS signatures feed review.claim_mismatch only; callers are not checked
+            continue
         found = (py_callers if change["lang"] == "py" else go_callers)(ctx, rp, idx, change, CALLER_LIMIT)
         for path, line, call in found:
             out.append(rv("api.broken_caller", path, line,
