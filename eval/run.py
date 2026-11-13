@@ -153,6 +153,9 @@ def apply_generators(case: Case, repo: Path):
             data = b"\xef\xbb\xbf" + data
         elif kind == "nul":
             data = data[:len(data) // 2] + b"\x00" + data[len(data) // 2:]
+        elif kind == "mixed":                                   # every second line ends in CRLF, the others in LF
+            lines = data.replace(b"\r\n", b"\n").split(b"\n")
+            data = b"".join(ln + (b"\r\n" if i % 2 else b"\n") for i, ln in enumerate(lines[:-1])) + lines[-1]
         elif kind == "utf16":
             data = b"\xff\xfe" + data.decode("utf-8").encode("utf-16-le")
         p.write_bytes(data)

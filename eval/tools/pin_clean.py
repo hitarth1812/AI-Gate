@@ -49,7 +49,7 @@ def main():
                  f"origin = {json.dumps(f'https://github.com/{repo} @ {tag} (ls-remote, peeled)')}", 'who = "person"',
                  'mode = "clean"', 'label_status = "frozen"', f"repo = {json.dumps(f'https://github.com/{repo}')}",
                  f"sha = {json.dumps(sha)}", 'note = "a popular, well-maintained project: a person must see 0 BLOCK"']
-        (d / "case.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        (d / "case.toml").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
         print(f"{cid:20} {tag:8} {sha}  -> {d.parent.name}")
     return 0
 

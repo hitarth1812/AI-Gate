@@ -12,3 +12,7 @@ path = "app.py"
 line = 3
 action = "fix"
 agent_action = "fix"
+
+[[transform]]
+path = "app.py"
+kind = "mixed"

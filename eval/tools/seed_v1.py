@@ -73,7 +73,7 @@ def emit(id, family, language, origin, before, after, fire=(), notfire=(), who="
         out += ["", "[[must_not_fire]]", f"rule = {tq(rule)}", f"path = {tq(path)}"]
     if extra:
         out += ["", extra.strip("\n")]
-    (d / "case.toml").write_text("\n".join(out) + "\n", encoding="utf-8")
+    (d / "case.toml").write_bytes(("\n".join(out) + "\n").encode("utf-8"))      # LF on every OS (git must not rewrite corpus bytes)
     for sub, files in (("before", before), ("after", after)):
         for rel, text in files.items():
             p = d / sub / rel
@@ -639,7 +639,8 @@ def seed_adversarial():
     adv(A + "range-check", "python", "check --range over one commit", base, {"app.py": "def f():\n    return eval('1')\n"}, [F("security.eval", "app.py", "eval", "fix", "fix")], mode="range")
     adv(A + "crlf-everywhere", "python", "CRLF line endings with a real finding", base, {"app.py": "def f(s):\r\n    return eval(s)\r\n"}, [F("security.eval", "app.py", "eval", "fix", "fix")],
         extra="[[transform]]\npath = \"app.py\"\nkind = \"crlf\"")
-    adv(A + "mixed-endings", "python", "mixed line endings with a real finding", base, {"app.py": "def f(s):\n    x = 1\r\n    return eval(s)\n"}, [F("security.eval", "app.py", "eval", "fix", "fix")])
+    adv(A + "mixed-endings", "python", "mixed line endings with a real finding", base, {"app.py": "def f(s):\n    x = 1\n    return eval(s)\n"}, [F("security.eval", "app.py", "eval", "fix", "fix")],
+        extra="[[transform]]\npath = \"app.py\"\nkind = \"mixed\"")
     adv(A + "go-generated-huge", "go", "a huge generated Go file", {"go.mod": "module x\n\ngo 1.22\n", "a.go": "package x\n"}, {}, extra=gen("gen/big.go", "many_lines", 100_000))
     adv(A + "ts-long-template", "typescript", "a very long template literal", base, {"src/a.ts": "export const t = `" + ("a${b}" * 3000) + "`;\n"})
     adv(A + "unterminated-string", "python", "an unterminated string literal", base, {"app.py": "def f():\n    return 'abc\n"}, [F("code.syntax_error", "app.py", None, "fix", "fix")])

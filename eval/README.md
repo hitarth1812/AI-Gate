@@ -56,7 +56,7 @@ path = "app.py"
 ```
 
 `before/` is committed as the base, `after/` is overlaid and staged. Extra keys: `delete = [...]`, `[[rename]] from/to`,
-`[[symlink]] path/target`, `[[gitlink]] path/sha`, `[[transform]] path/kind` (`crlf latin1 bom nul utf16`) and
+`[[symlink]] path/target`, `[[gitlink]] path/sha`, `[[transform]] path/kind` (`crlf mixed latin1 bom nul utf16`) and
 `[[generate]] path/kind/size` (`long_line binary deep_json deep_python many_lines many_files big_text empty`): content
 that is huge, binary or oddly encoded is made at run time and never committed.
 
