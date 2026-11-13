@@ -1167,6 +1167,7 @@ class Finding:
     base_key: str | None = None    # key before twin numbering (set by number_twins)
     twin: int = 1                  # 1 for the first finding with this rule, file and key; 2, 3, ... after it
     human: str | None = None       # the action for a human's change, when softer than `action` (agents keep `action`)
+    person_flat: bool = False      # a person's `human` action is final: no sensitive-path escalation (an agent still gets it)
 
     @property
     def meta(self) -> Rule:
@@ -5011,6 +5012,9 @@ def _code_lines_file(ctx, fc) -> list:
         if weak:
             f = make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip())
             f.human = "off" if HMAC_SHA1.search(text) and not WEAK_RANDOM.search(text) else None   # HMAC-SHA1 is sound
+            if f.human is None and test and not WEAK_RANDOM.search(text):   # a hash of a test input: a person's warning, even under auth/
+                f.human = "warn"
+                f.person_flat = True
             out.append(f)
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
@@ -5787,7 +5791,7 @@ def apply_policy(findings, ctx, env) -> list:
         if f.action == "off":
             continue
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
-        if f.sensitive and f.meta.escalate:
+        if f.sensitive and f.meta.escalate and not (f.person_flat and not ctx.agent):
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
         legacy_id = (f.rule, f.path, f.legacy_fingerprint)
         if f.action == "pass":
