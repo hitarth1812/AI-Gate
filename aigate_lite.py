@@ -4930,10 +4930,14 @@ PLACEHOLDER_RE = re.compile(
 JS_PLACEHOLDER = re.compile(r"""throw\s+new\s+Error\(\s*['"`](?:not\s+(?:yet\s+)?implemented|todo|implement)""", re.I)
 TODO_RE = re.compile(r"(?:#|//|/\*|\*)\s*(?:TODO|FIXME|XXX|HACK)\b")
 SECRET_WORDS = r"(?:password|passwd|pwd|secret|token|otp|nonce|salt|session|api_?key)"
+# A secret word is delimited by \b or, inside a camelCase identifier (`sessionToken`, `newToken`), by a lower->Upper hump;
+# `tokenizer`, `passwordless` and `SESSION_TOKEN`-style names are unchanged (the hump tests are case-sensitive).
+_HUMP = r"(?-i:(?<=[a-z0-9])(?=[A-Z]))"
+_SECRET_AT = r"(?:\b|" + _HUMP + r")%s(?:\b|" + _HUMP + r")"
 WEAK_CRYPTO = re.compile(
-    r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*\b(?:password|passwd|pwd|secret|token)\b)|"
+    r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*" + _SECRET_AT % r"(?:password|passwd|pwd|secret|token)" + r")|"
     r"(?=.*(?:\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(|Math\.random\(\)))"
-    r"(?=.*\b" + SECRET_WORDS + r"\b)")
+    r"(?=.*" + _SECRET_AT % SECRET_WORDS + r")")
 # HMAC with SHA-1 (or MD5) is not a weak hash for a secret: its security does not rest on collision resistance. Not
 # flagged for people; an agent's change keeps the finding. Plain SHA-1/MD5 hashing of a secret is still flagged.
 HMAC_SHA1 = re.compile(r"(?i)createHmac\(\s*['\"](?:sha1|md5)['\"]|\bhmac\.new\([^)]*\bhashlib\.(?:sha1|md5)\b|"
