@@ -68,3 +68,11 @@ These were found when the first scoreboard was triaged; they are listed so nothi
 - `Math.random()` assigned to a camelCase name (`sessionToken`) is not `security.weak_crypto`: the word list needs a word
   boundary and camelCase has none (`seed-ts-weak-math-random-token`).
 - `review.claim_mismatch` does not fire for TypeScript changes (Python and Go do).
+
+## E. Doubtful seeded labels found by triage (proposals; not applied)
+
+- `seed-ts-claim-fix-other`: commit message "fix total rounding" while the diff touches only `src/api.ts`. The tool does not
+  report it because a bare lowercase word (`total`) is not treated as a symbol (existing precision case `cm-ok-plain-word`
+  pins that on purpose; the Python and Go twins pass only because their messages name `compute_total` / `Total`).
+  Proposal: change the commit message of the case to `fix the total() rounding` (a symbol-shaped token) so it tests the
+  language gate and not the word heuristic. Until then it stays an expected FN (excluded from nothing; it is in the ratchet).
