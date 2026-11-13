@@ -8051,6 +8051,14 @@ def run_check(args, env, collect=False):
                 print("aigate-lite: nothing staged to check")
             elif args.format == "agent":
                 print("AIGATE verdict=pass risk=0 exit=0\n" + agent_tool_line() + "\nEND")
+            elif args.format in ("json", "sarif", "github") and not collect:   # a machine reader still gets a document
+                empty = Result([], "pass", False, 0.0, provenance, run_label,
+                               {"files": 0, "added": 0, "removed": 0, "seconds": round(time.monotonic() - started, 2)},
+                               cfg.origin, [])
+                if args.format == "json":
+                    report_json(empty, {"summary": getattr(args, "summary", False)})
+                else:
+                    (report_github if args.format == "github" else report_sarif)(empty)
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
