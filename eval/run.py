@@ -49,7 +49,7 @@ STRIP = {"CLAUDECODE", "AI_AGENT", "GEMINI_CLI", "GIT_AUTHOR_NAME", "GIT_COMMITT
 _PEM = base64.b64encode(bytes(range(256))).decode()
 SUBST = {
     "@@PEMBODY@@": "\n".join(_PEM[i:i + 64] for i in range(0, len(_PEM), 64)),
-    "@@ZWSP@@": "​", "@@RLO@@": "‮", "@@LRI@@": "⁦", "@@PDI@@": "⁩",   # invisible characters, never stored
+    "@@ZWSP@@": "\u200b", "@@RLO@@": "\u202e", "@@LRI@@": "\u2066", "@@PDI@@": "\u2069",   # invisible characters, never stored
     "@@AWS@@": "AKIA" + "QWERTYUIOPASDFGH",
     "@@GHTOKEN@@": "ghp_" + "Zx9kQ2vB7mN4pL1wT8yR5uJ3cH6dF0aSeGiO",
     "@@STRIPE@@": "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc",

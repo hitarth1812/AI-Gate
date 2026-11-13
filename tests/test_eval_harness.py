@@ -15,8 +15,8 @@ ev = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(ev)
 
 CASES = ev.load_cases()
-HIDDEN = {"​", "‌", "‍", "‎", "‏", "⁠", "﻿", "­", "‪", "‫", "‬",
-          "‭", "‮", "⁦", "⁧", "⁨", "⁩"}
+HIDDEN = {"\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060", "\ufeff", "\u00ad", "\u202a", "\u202b", "\u202c",
+          "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069"}
 
 
 def test_the_corpus_meets_the_v1_minimum_counts():
@@ -79,7 +79,7 @@ def test_no_provider_secret_and_no_invisible_character_is_stored_in_the_corpus()
 def test_placeholders_expand_to_what_the_gate_recognises():
     assert ev.fill(b"k=@@AWS@@").decode() == "k=AKIAQWERTYUIOPASDFGH"
     assert b"BEGIN RSA PRIVATE KEY" in ev.fill(b"@@PEMBEGIN@@") and len(ev.fill(b"@@PEMBODY@@").splitlines()) == 6
-    assert ev.fill("@@ZWSP@@".encode()) == "​".encode()
+    assert ev.fill("@@ZWSP@@".encode()) == "\u200b".encode()
 
 
 # ---------------------------------------------------------------------------------------------------- scoring
