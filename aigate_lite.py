@@ -5881,6 +5881,19 @@ def _summary(res: Result, active, allowed, baselined, stage, sym, s) -> str:
             f" {dot} {res.stats['seconds']:.1f}s{stopped}")
 
 
+def _block_advice(rule: str) -> str:
+    """What to do about a BLOCK, by kind of rule (the `next:` line must be true for what actually blocks)."""
+    if rule.startswith("secrets."):
+        return "remove the secret and rotate it"
+    if rule.startswith("suppress."):
+        return "remove the suppression and fix the cause it hides"
+    if rule.startswith("deps."):
+        return "check the package name and version, a made-up name can be a typosquat"
+    if rule.startswith("scope."):
+        return "keep the change out of the forbidden paths"
+    return "fix the cause"
+
+
 def _next_line(res: Result, active, baselined, stage) -> str | None:
     hidden = f" ({len(baselined)} baseline finding{'' if len(baselined) == 1 else 's'} hidden)" if baselined else ""
     act = "push" if stage == "push" else "commit"
@@ -5888,10 +5901,21 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
     fixes = [f for f in active if f.action == "fix"]
     if res.verdict == "block" and blocks:
         n = len(blocks)
-        if stage == "scan":
-            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then adopt " \
-                   f"a baseline so only new findings count: aigate-lite baseline{hidden}"
-        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+        rules = list(dict.fromkeys(f.rule for f in blocks))
+        if all(r.startswith("secrets.") for r in rules):
+            if stage == "scan":
+                return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then " \
+                       f"adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+        # something other than a secret blocks: say what to do for that kind, never call it a secret
+        advice = list(dict.fromkeys(_block_advice(r) for r in rules))
+        other = [r for r in rules if not r.startswith("secrets.")]
+        pointer = other[0] if len(other) == 1 else "<rule>"
+        base = ", then adopt a baseline so only new findings count: aigate-lite baseline" \
+            if stage == "scan" and not any(r.startswith(BASELINE_NEVER) for r in rules) else ""
+        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above ({'; '.join(advice)}){base}; or allow " \
+               f"{'it' if n == 1 else 'one'} with a reason via an [[allow]] entry in .aigate/lite.toml: " \
+               f"aigate-lite explain {pointer}{hidden}"
     if res.verdict in ("block", "fix"):
         n, rules = len(fixes), sorted({f.rule for f in fixes})
         if stage == "scan":
