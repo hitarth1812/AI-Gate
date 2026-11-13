@@ -1,12 +1,67 @@
 # Changelog
 
-## 0.5.0 — unreleased: the reviewer (Phase 6A) and visible credit (Phase 7A)
+## 0.5.1 — unreleased: fix every known error (network/TLS, Windows, JS/TS precision, metadata, docs, tests)
+
+### Fixed
+- **Correctness: a local error no longer hides real findings.** With `SSLKEYLOGFILE` pointing at a file that cannot be
+  written (seen on Windows: a `\\?\Volume{...}\virtual_file.log` path), `ssl.create_default_context()` raised
+  `PermissionError`, every registry lookup failed, and the report turned real `deps.vulnerable` findings into
+  `deps.unverified` "could not reach" warnings. Now:
+  - one TLS context per run: when the default context cannot be built, the same verifying context is built without key
+    logging (certificate and hostname verification stay on) and one note says `SSLKEYLOGFILE=<path> cannot be written;
+    continuing without TLS key logging`. Every lookup passes that context explicitly.
+  - a failure on this machine (a file, a permission, an environment variable) is never reported as "not reachable" or
+    "could not reach": one note names the cause and says package and vulnerability checks did NOT run. For a person in the
+    default mode no `deps.unverified` line is added for it; an agent, and `[gate] offline = "block"`, keep the finding,
+    with the local cause in its message (nothing that blocked before passes now).
+  - an unwritable lookup cache: lookups still run with an in-memory cache and one note names `AIGATE_CACHE_DIR`. The cache
+    path is used as given.
+  - many `deps.unverified` warnings in a person's text report print as one line with the count ("package and
+    vulnerability checks did NOT run"); `-v`, JSON and an agent's report keep every line.
+  - `doctor`: a new `tls` check names `SSLKEYLOGFILE` with the PowerShell and sh commands to fix it; the network check
+    reports the real exception class, and a local error is no longer "not reachable".
+- Started by a Python older than 3.11, aigate-lite prints one line, `aigate-lite needs Python 3.11+; this is 3.X. Try:
+  py -3.12 -m aigate_lite ...` (`python3.12` outside Windows), and exits 2.
+- `setup` in a repository with a vendored copy printed "copied the gate" and then "stays vendored". Now one message says
+  the copy was updated from version X to Y, or is unchanged, and names `aigate-lite unvendor`. A vendored copy NEWER than
+  the running tool is never overwritten: it is kept, with a warning.
+- Tests no longer assume a git checkout of the project: the hidden-character scan and the repository-hygiene tests walk
+  the tree in an unpacked sdist or zip (the checks still run there). The sdist now carries the test suite (`MANIFEST.in`).
+
+### Changed (people only; an AI agent's result is unchanged, each with a test)
+- `tests.skip_added` (JS/TS): a conditional skip is a warning: `test.skip(<condition>, ...)`, `test.fixme(<condition>)`,
+  a skip inside an `if`. Gated on the environment (`process.env`, or a variable read from it): the usual hint. Gated on
+  data (`.count() === 0`, `.length`): "assert the precondition instead of skipping". `test.skip('name', ...)`, `it.skip`,
+  `describe.skip`, `xit` and a reason that says flaky/broken/TODO stay a fix. `test.fixme(...)` is now detected at all.
+- `e2e/`, `tests-e2e/`, `__mocks__/`, `mocks/`, `*.mock.*`, `mock-*.{js,mjs,cjs,ts}`, `playwright.config.*`, `cypress/`,
+  `cypress.config.*`, `vitest.setup.*`, `jest.setup.*` are test context: `secrets.generic` is a warning and
+  `code.console_log` is off there. Provider-shaped keys still block everywhere.
+- `security.weak_crypto`: HMAC with SHA-1 (or MD5) is not flagged (`createHmac('sha1'`, `hmac.new(..., hashlib.sha1)`,
+  `hmac.New(sha1.New, ...)`, `HmacSHA1`). Plain SHA-1/MD5 of a secret and `Math.random()` for a token are still flagged.
+- `deps.version_cooldown` (npm range): a committed lockfile (`package-lock.json`, `pnpm-lock.yaml`, `yarn.lock`,
+  `bun.lock`) that pins an older version makes it information only ("npm ci / pnpm install --frozen-lockfile uses the
+  lockfile"). Without a lockfile the warning stays and suggests committing one.
+- `secrets.generic`: a localhost connection string in documentation is information only.
+- PyPI metadata: a description that says what the tool does, classifiers, Issues / Changelog / Documentation URLs and
+  more keywords. `scripts/release_check.py` fails a build without them (or with a `License ::` classifier).
+- README: a new first screen (what it is, the five things it catches, a three-line install, PyPI badges), installed
+  commands first with a Windows (`py`) form for every `python3` example, a troubleshooting table, absolute links (the
+  README is the PyPI page). A test ties the README's rule count to the rule table.
+- Tool messages that print a `python3 .aigate/aigate_lite.py` command (husky, lefthook, pre-commit, core.hooksPath) also
+  print the Windows form.
+
+### Removed
+- The `aigate` console script (an alias of `aigate-lite`): an unrelated PyPI project is named `aigate`. Use `aigate-lite`
+  (or `python -m aigate_lite`); hooks never used the alias.
+- The author's email address from the package metadata.
+
+## 0.5.0 — 2026-11-12: the reviewer (Phase 6A) and visible credit (Phase 7A)
 
 ### Release workflow (PyPI Trusted Publishing)
 
 No change to the tool itself. `.github/workflows/release.yml` builds on a `vX.Y.Z` tag, tests the built wheel on three
 operating systems, and publishes with PyPI Trusted Publishing (OIDC; no token or secret). `scripts/release_check.py` holds
-the guards (tag equals `__version__`, built metadata, wheel contents). How to release: `docs/RELEASING.md`. Not published yet.
+the guards (tag equals `__version__`, built metadata, wheel contents). How to release: `docs/RELEASING.md`.
 
 ### Visible credit (Phase 7A)
 

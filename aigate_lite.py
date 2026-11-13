@@ -20,17 +20,20 @@ Single file, Python 3.11+ standard library only. No account, server, API key or
 LLM. The only network use is free public lookups (PyPI, npm, OSV), which are
 cached and skipped with --offline.
 
-    python3 aigate_lite.py install        # add the pre-commit and pre-push hooks
-    python3 aigate_lite.py check          # check staged changes now
-    python3 aigate_lite.py check --range origin/main..HEAD
-    python3 aigate_lite.py explain        # list every rule
+    aigate-lite setup                     # add the hooks and a starter config
+    aigate-lite check                     # check staged changes now
+    aigate-lite check --range origin/main..HEAD
+    aigate-lite explain                   # list every rule
+
+Without installing: python3 aigate_lite.py <command> (Windows: py aigate_lite.py <command>).
 """
 import sys
 
-if sys.version_info < (3, 11):
-    sys.stderr.write("aigate-lite: needs Python 3.11 or newer (found %s)\n"
-                     "  fix: install Python 3.11+ (hooks also use $AIGATE_PYTHON when it is set)\n"
-                     % sys.version.split()[0])
+if sys.version_info < (3, 11):    # keep this block parseable by old interpreters: no newer syntax above this line
+    sys.stderr.write("aigate-lite needs Python 3.11+; this is %d.%d. Try: %s -m aigate_lite ... "
+                     "(fix: install Python 3.11 or newer; hooks also use $AIGATE_PYTHON)\n"
+                     % (sys.version_info[0], sys.version_info[1],
+                        "py -3.12" if sys.platform == "win32" else "python3.12"))
     sys.exit(2)
 
 import ast
@@ -50,7 +53,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
@@ -1500,6 +1503,52 @@ def default_cache_dir() -> str:
     return os.path.join(base, "aigate-lite")
 
 
+_TLS: dict = {}         # the one TLS context of this run ("ctx") and the note its creation produced ("note")
+
+
+def tls_context():
+    """The one TLS context every lookup of this run uses (urlopen without a context builds its own each time).
+    ssl.create_default_context() opens $SSLKEYLOGFILE for TLS key logging and raises OSError when that file cannot be
+    opened (seen on Windows: a \\\\?\\Volume{...} path left by another program). Then the same verifying context is built
+    without key logging: certificate and hostname checks stay on (PROTOCOL_TLS_CLIENT turns both on), and one note
+    says why. Verification is never switched off."""
+    if "ctx" not in _TLS:
+        import ssl
+        try:
+            ctx = ssl.create_default_context()
+        except OSError as e:
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.load_default_certs()
+            keylog = os.environ.get("SSLKEYLOGFILE")
+            _TLS["note"] = (f"SSLKEYLOGFILE={keylog} cannot be written; continuing without TLS key logging "
+                            f"({type(e).__name__}; fix: unset SSLKEYLOGFILE or point it at a writable file)"
+                            if keylog else f"TLS setup failed ({type(e).__name__}: {e}); continuing with the "
+                            "system certificates (verification stays on)")
+        _TLS["ctx"] = ctx
+    return _TLS["ctx"]
+
+
+def is_local_error(e) -> bool:
+    """True for a failure on this machine (a file, a permission, an environment variable), False for the network.
+    urllib wraps connection problems in URLError; a bare OSError that is not a socket error happened before any
+    connection was made."""
+    import socket
+    import ssl
+    import urllib.error
+    return (isinstance(e, OSError) and not isinstance(e, (urllib.error.URLError, ConnectionError, TimeoutError,
+                                                           socket.gaierror, socket.herror, ssl.SSLError)))
+
+
+def local_reason(e) -> str:
+    """A local failure in words a user can act on, naming the file or variable involved."""
+    where = getattr(e, "filename", None)
+    keylog = os.environ.get("SSLKEYLOGFILE")
+    if where and keylog and os.path.normcase(str(where)) == os.path.normcase(keylog):
+        return (f"{type(e).__name__}: SSLKEYLOGFILE={keylog} cannot be written; fix: unset SSLKEYLOGFILE "
+                "(PowerShell: Remove-Item Env:SSLKEYLOGFILE; sh: unset SSLKEYLOGFILE)")
+    return f"{type(e).__name__} on this machine: {getattr(e, 'strerror', None) or e}" + (f": {where}" if where else "")
+
+
 def network_reason(e) -> str:
     """Why a registry request failed, in words a user can act on."""
     import socket
@@ -1548,6 +1597,10 @@ class Registry:
         self.dirty = False
         self.failures = 0
         self.failure_reason = None
+        self.local_failures = 0          # failures on this machine (a file, a permission): never "could not reach"
+        self.local_reason = None
+        self.local_names: set = set()    # package names whose lookup failed locally
+        self.cache_error = None          # why the disk cache could not be written (lookups still ran, memory only)
         if use_cache and self.fixture is None:
             self.cache_path = os.path.join(default_cache_dir(), "registry-v1.json")
             try:
@@ -1588,6 +1641,7 @@ class Registry:
         if len(osv) > 1:
             self._osv_batch(osv)
             keys = [k for k in keys if k not in self.mem]
+        tls_context()                    # once, before the threads
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
             list(pool.map(self.get, keys))
@@ -1622,10 +1676,11 @@ class Registry:
                 if not isinstance(results, list) or len(results) != len(chunk):
                     raise ValueError("unexpected OSV response")
             except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
-                self.failures += 1
-                self.failure_reason = self.failure_reason or network_reason(e)
+                self._failed(e, chunk[0])                 # one failure per batch call, as before
                 for k in chunk:
                     self.mem[k] = None
+                    if is_local_error(e):
+                        self.local_names.add(k[2])
                 continue
             for k, res in zip(chunk, results):
                 found = res.get("vulns") if isinstance(res, dict) else None
@@ -1677,7 +1732,7 @@ class Registry:
         req = urllib.request.Request(url, data=body, method=method, headers=headers)
         timeout = max(1.0, min(self.timeout, self.deadline - time.monotonic()))
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with urllib.request.urlopen(req, timeout=timeout, context=tls_context()) as resp:
                 raw = resp.read()
                 if resp.headers.get("Content-Encoding") == "gzip":
                     raw = gzip.decompress(raw)
@@ -1731,9 +1786,17 @@ class Registry:
             status, raw = self._http("https://api.osv.dev/v1/query", method="POST", body=body)
             return sorted({v["id"] for v in json.loads(raw).get("vulns", []) if v.get("id")}) if status == 200 else None
         except (urllib.error.URLError, OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+            self._failed(e, key)
+            return None
+
+    def _failed(self, e, key) -> None:
+        if is_local_error(e):
+            self.local_failures += 1
+            self.local_reason = self.local_reason or local_reason(e)
+            self.local_names.add(key[2])
+        else:
             self.failures += 1
             self.failure_reason = self.failure_reason or network_reason(e)
-            return None
 
     def _fetch_info_go(self, name):
         """Versions from the proxy's @v/list (no times: those come from vtime), the first version's time as the
@@ -1802,8 +1865,12 @@ class Registry:
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump({"v": 1, "entries": entries}, fh)
             os.replace(tmp, self.cache_path)
-        except OSError:
-            pass
+        except OSError as e:
+            self.cache_error = f"{type(e).__name__}: {e.strerror or e}"
+            try:
+                os.remove(tmp)
+            except (OSError, NameError):
+                pass
 
 
 # --------------------------------------------------------------------------- languages: lexer
@@ -2716,6 +2783,25 @@ def _pem_body(fc, line_no, rest) -> bool:
     return strong and total >= 60
 
 
+# Test and fixture paths that the default [paths] tests list does not name: end-to-end suites, mocks and test-runner
+# configs. A person's change there gets the test-file treatment for secrets.generic (warn) and code.console_log (off);
+# an AI agent's change keeps the full rules. Provider-shaped keys (secrets.hardcoded) block everywhere.
+PERSON_TEST_CONTEXT = ("e2e/**", "**/e2e/**", "tests-e2e/**", "**/tests-e2e/**", "**/__mocks__/**", "**/mocks/**",
+                       "*.mock.*", "mock-*.js", "mock-*.mjs", "mock-*.cjs", "mock-*.ts", "playwright.config.*",
+                       "cypress/**", "**/cypress/**", "cypress.config.*", "vitest.setup.*", "jest.setup.*")
+
+
+_PERSON_TEST: dict = {}
+
+
+def person_test_context(path) -> bool:
+    """Asked once per added line; matched once per path."""
+    hit_ = _PERSON_TEST.get(path)
+    if hit_ is None:
+        hit_ = _PERSON_TEST[path] = path_matches(path, PERSON_TEST_CONTEXT)
+    return hit_
+
+
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
     import hashlib
@@ -2742,24 +2828,28 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
     if found or ctx.ignored(fc.path) or is_lockfile(fc.path) or lname == ".env" or lname.startswith(".env."):
         return found                                              # env files are judged as a whole by secrets.env_file
     soft = "warn" if ctx.is_test(fc.path) else None              # fixtures in tests are usually fake
+    def fixture():                                                # e2e/, mocks: people only (asked only on a hit)
+        return "warn" if soft is None and person_test_context(fc.path) else None
     docs = bool(DOC_PATH.search(fc.path)) and fc.ext != ".txt" and not ctx.sensitive(fc.path)
     for m in GENERIC_ASSIGN.finditer(text):
         if _looks_like_secret(m.group("name"), m.group("val")):
             val = m.group("val")
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
-                _soft_value(val, docs))
+                _soft_value(val, docs) or fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
             add("secrets.generic", m.group("val"), f"'{m.group('name')}' is set to a literal ({redact(m.group('val'))})", soft,
-                _soft_value(m.group("val"), False))
+                _soft_value(m.group("val"), False) or fixture())
     for m in JWT_RE.finditer(text):
-        add("secrets.generic", m.group(1), f"JSON Web Token ({redact(m.group(1))})", soft)
+        add("secrets.generic", m.group(1), f"JSON Web Token ({redact(m.group(1))})", soft, fixture())
     for m in CONN_RE.finditer(text):
         val, host = m.group("val"), m.group("host").lower()
         if val.lower() not in DEFAULT_PASSWORDS and not PLACEHOLDER_VALUE.search(val):
             local = host in LOCAL_HOSTS or host.endswith(".local")
-            add("secrets.generic", val, f"password in a connection string for {host}", "warn" if local else soft)
+            # a localhost connection string in documentation is an example: information only, for people
+            add("secrets.generic", val, f"password in a connection string for {host}", "warn" if local else soft,
+                "pass" if local and docs else fixture())
     return found
 
 
@@ -4049,10 +4139,37 @@ def age_text(days: float) -> str:
     return f"{int(days)} days" if days >= 2 else f"{max(1, int(days * 24))} hours"
 
 
+def registry_notes(reg) -> list:
+    """At most one note each: the TLS fallback, local lookup failures, network lookup failures, an unwritable cache."""
+    notes = []
+    if "note" in _TLS and "ctx" in _TLS:
+        notes.append(_TLS["note"])
+    if reg.local_failures:
+        notes.append(f"{reg.local_failures} registry lookup(s) failed on this machine, not on the network "
+                     f"({reg.local_reason}); package and vulnerability checks did NOT run for "
+                     f"{len(reg.local_names)} package(s)")
+    if reg.failures:
+        notes.append(f"{reg.failures} registry lookup(s) failed ({reg.failure_reason or 'offline or blocked'}); "
+                     "dependency checks are incomplete (--offline skips them)")
+    if reg.cache_error:
+        notes.append(f"the lookup cache {os.path.dirname(reg.cache_path)} could not be written ({reg.cache_error}); "
+                     "lookups ran with an in-memory cache this time. Set AIGATE_CACHE_DIR to a writable folder")
+    return notes
+
+
 def unverified(ctx, path, line, message, key):
+    """deps.unverified for a lookup that failed. A failure on this machine (a file or a permission, see
+    is_local_error) is not "could not reach": for a person in the default mode it is left to the one run note that
+    names the cause; an agent, and `offline = "block"`, keep the finding (nothing that blocked before passes now),
+    with the local cause instead of "could not reach"."""
     mode = ctx.cfg["gate"]["offline"]
     if mode == "skip":
         return []
+    reg = ctx.registry
+    if key in getattr(reg, "local_names", ()):
+        if mode != "block" and not ctx.agent:
+            return []
+        message = message.split(": could not reach", 1)[0] + f": not checked: {reg.local_reason}"
     return [make("deps.unverified", path, line, message, action="block" if mode == "block" else None, key=key)]
 
 
@@ -4114,10 +4231,56 @@ def evaluate_dep(ctx, dep, old, path) -> list:
         allows = (py_spec_allows if dep.eco == "pypi" else npm_spec_allows)(dep.spec, latest)
         age = age_days(versions.get(latest))
         if allows is not False and age is not None and age < dcfg["cooldown_days"]:
-            out.append(make("deps.version_cooldown", path, dep.line,
-                            f"{label} '{dep.spec or '*'}' allows {latest}, published {age_text(age)} ago; "
-                            "a fresh install will pick it up", action="warn", key=f"{name}@{latest}"))
+            f = make("deps.version_cooldown", path, dep.line,
+                     f"{label} '{dep.spec or '*'}' allows {latest}, published {age_text(age)} ago; "
+                     "a fresh install will pick it up", action="warn", key=f"{name}@{latest}")
+            if dep.eco == "npm":
+                lock, locked = npm_locked(ctx, path, name)
+                if lock is None:
+                    f.hint = "commit a lockfile (package-lock.json, pnpm-lock.yaml, yarn.lock or bun.lock) so installs are repeatable"
+                elif locked and latest not in locked and all(
+                        (age_days(versions.get(v)) or 0) >= dcfg["cooldown_days"] for v in locked):
+                    f.message = (f"{label} '{dep.spec or '*'}' allows {latest} (published {age_text(age)} ago), but "
+                                 f"{lock} pins {', '.join(sorted(locked))}: npm ci / pnpm install --frozen-lockfile "
+                                 "uses the lockfile")
+                    f.human = "pass"                 # information only for people; an agent keeps the warning
+            out.append(f)
     return out
+
+
+NPM_LOCKS = ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock")
+
+
+def npm_locked(ctx, manifest, name):
+    """(lockfile path, versions of `name` it pins) for the committed or staged lockfile next to `manifest`;
+    (None, set()) when there is no lockfile there."""
+    base = manifest.rsplit("/", 1)[0] + "/" if "/" in manifest else ""
+    for lock in NPM_LOCKS:
+        text = ctx.read_new(base + lock)
+        if text is None:
+            continue
+        found = set()
+        q = re.escape(name)
+        if lock.endswith(".json"):
+            try:
+                data = json.loads(text)
+            except ValueError:
+                return base + lock, found
+            for key in (f"node_modules/{name}",):
+                v = (data.get("packages") or {}).get(key, {}).get("version")
+                if isinstance(v, str):
+                    found.add(v)
+            v = ((data.get("dependencies") or {}).get(name) or {}).get("version")
+            if isinstance(v, str):
+                found.add(v)
+        elif lock == "pnpm-lock.yaml":
+            found |= set(re.findall(rf"(?m)^\s*['\"]?/?{q}@(\d[^\s:'\"(]*)", text))
+        elif lock == "yarn.lock":
+            found |= set(re.findall(rf'(?m)^"?{q}@[^\r\n]*:\r?\n\s+version:?\s+"?([^"\s]+)', text))
+        else:
+            found |= set(re.findall(rf'"{q}":\s*\[\s*"{q}@([^"]+)"', text))
+        return base + lock, found
+    return None, set()
 
 
 def check_deps(ctx) -> list:
@@ -4260,6 +4423,74 @@ def _before(lx, fc, line) -> str:
     """The line above `line` (the `if` that guards a skip)."""
     get = lx.line if lx is not None else (lambda n: fc.added.get(n, ""))
     return get(line - 1)
+
+
+JS_SKIP_CALL = re.compile(r"\b(?:test|it|describe|context|suite)(?:\.describe)?\.(?:skip|fixme)\s*\(")
+JS_IF = re.compile(r"\bif\s*\((?P<cond>.*)\)")
+JS_ENV_VAR = re.compile(r"\b(?:const|let|var)\s+(?:\{\s*)?(?P<names>[\w\s,:]+?)(?:\s*\})?\s*=\s*process\.env\b")
+JS_DATA_GATE = re.compile(r"\.count\(\s*\)|\.length\b|[=!]==?\s*0\b|<\s*1\b|\bisEmpty\b")
+DATA_SKIP_HINT = "assert the precondition instead of skipping (a skip on empty data hides a broken fixture)"
+
+
+def _js_first_arg(text, start) -> str | None:
+    """The first argument of the call whose "(" ends at `start`, or None when the call has no argument."""
+    depth, i, quote = 0, start, None
+    while i < len(text):
+        c = text[i]
+        if quote:
+            if c == "\\":
+                i += 1
+            elif c == quote:
+                quote = None
+        elif c in "'\"`":
+            quote = c
+        elif c in "([{":
+            depth += 1
+        elif c in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif c == "," and depth == 0:
+            break
+        i += 1
+    arg = text[start:i].strip()
+    return arg or None
+
+
+def js_skip_condition(text, before) -> str | None:
+    """The condition of a conditional Playwright / Jest / Mocha skip, or None for an unconditional one.
+    Conditional by syntax: `test.skip(<condition>, 'reason')`, `test.fixme(<condition>)`, a skip inside an `if`
+    (same line or the line above), `cond ? describe.skip : describe`. `test.skip('name', fn)`, `it.skip(...)`,
+    `xit(...)` and a bare `test.skip()` are unconditional."""
+    m = JS_SKIP_CALL.search(text)
+    if not m:
+        return None
+    arg = _js_first_arg(text, m.end())
+    guard = JS_IF.search(text[:m.start()]) or (JS_IF.search(before) if before.rstrip().endswith(("{", ")")) else None)
+    if arg is not None and arg[0] not in "'\"`" and arg not in ("true", "false"):
+        return arg
+    if guard:
+        return guard.group("cond")
+    tern = re.search(r"(?P<cond>[^?=(]+)\?\s*(?:test|it|describe)(?:\.describe)?\.skip\b", text)
+    return tern.group("cond") if tern else None
+
+
+def js_skip_finding(ctx, fc, line, text, before="") -> Finding:
+    """skip_finding for JS/TS: a conditional skip is a warning for a person, with a hint that depends on what it
+    tests (the environment, or the data). An agent keeps the fix."""
+    f = skip_finding(fc, line, text, before)
+    cond = js_skip_condition(text, before)
+    if cond is None or SKIP_BAD.search(JS_SKIP_CALL.sub("(", text)) or f.human is not None:   # the reason, not `.fixme(`
+        return f
+    env_names = {n.split(":")[-1].strip() for m in JS_ENV_VAR.finditer(ctx.new_text(fc) or "")
+                 for n in m.group("names").split(",") if n.strip()}
+    if "process.env" in cond or any(re.search(rf"\b{re.escape(n)}\b", cond) for n in env_names if n):
+        f.human, f.hint = "warn", SKIP_HINT
+    elif JS_DATA_GATE.search(cond):
+        f.human, f.hint = "warn", DATA_SKIP_HINT
+    else:
+        f.human, f.hint = "warn", SKIP_HINT
+    return f
 
 
 def skip_finding(fc, line, text, before="") -> Finding:
@@ -4429,7 +4660,7 @@ def check_test_config(ctx, fc) -> list:
 
 
 JS_FOCUS = re.compile(r"\b(?:it|test|describe|context|suite)\.only\s*\(|\b(?:fit|fdescribe|ftest)\s*\(")
-JS_SKIP = re.compile(r"\b(?:it|test|describe|context|suite)\.(?:skip|todo)\s*\(|\b(?:xit|xdescribe|xtest|xcontext)\s*\(")
+JS_SKIP = re.compile(r"\b(?:it|test|describe|context|suite)\.(?:skip|todo|fixme)\s*\(|\b(?:xit|xdescribe|xtest|xcontext)\s*\(")
 JS_TRIVIAL = re.compile(r"expect\(\s*(?:true|1)\s*\)\s*\.(?:toBe\(\s*(?:true|1)\s*\)|toBeTruthy\(\s*\))|"
                         r"\bassert(?:\.ok)?\(\s*(?:true|1)\s*\)|expect\((\w+)\)\.to(?:Be|Equal)\(\1\)")
 JS_ASSERT = re.compile(r"\b(?:expect|assert)\s*[.(]")
@@ -4501,7 +4732,9 @@ def check_tests(ctx) -> list:
             for line, text in fc.added.items():
                 if hit(lx, JS_FOCUS, line, text):
                     out.append(make("tests.focused", fc.path, line, text.strip()[:80], key=text.strip()))
-                elif hit(lx, JS_SKIP, line, text) or hit(lx, OTHER_SKIP, line, text):
+                elif hit(lx, JS_SKIP, line, text):
+                    out.append(js_skip_finding(ctx, fc, line, text, _before(lx, fc, line)))
+                elif hit(lx, OTHER_SKIP, line, text):
                     out.append(skip_finding(fc, line, text, _before(lx, fc, line)))
                 if hit(lx, JS_TRIVIAL, line, text):
                     out.append(make("tests.trivial_assert", fc.path, line, text.strip()[:80], key=text.strip()))
@@ -4700,6 +4933,11 @@ WEAK_CRYPTO = re.compile(
     r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*\b(?:password|passwd|pwd|secret|token)\b)|"
     r"(?=.*(?:\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(|Math\.random\(\)))"
     r"(?=.*\b" + SECRET_WORDS + r"\b)")
+# HMAC with SHA-1 (or MD5) is not a weak hash for a secret: its security does not rest on collision resistance. Not
+# flagged for people; an agent's change keeps the finding. Plain SHA-1/MD5 hashing of a secret is still flagged.
+HMAC_SHA1 = re.compile(r"(?i)createHmac\(\s*['\"](?:sha1|md5)['\"]|\bhmac\.new\([^)]*\bhashlib\.(?:sha1|md5)\b|"
+                       r"\bhmac\.New\(\s*(?:sha1|md5)\.New\b|HmacSHA1|HmacMD5|\bhmac\.new\([^)]*['\"](?:sha1|md5)['\"]")
+WEAK_RANDOM = re.compile(r"\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(|Math\.random\(\)")
 NON_PY_RULES = [
     ("security.verification_disabled", re.compile(
         r"rejectUnauthorized\s*:\s*false|NODE_TLS_REJECT_UNAUTHORIZED['\"]?\]?\s*=\s*['\"]?0|strictSSL\s*:\s*false|"
@@ -4771,14 +5009,18 @@ def _code_lines_file(ctx, fc) -> list:
         elif todo:
             out.append(make("code.todo", fc.path, line, text.strip()[:80], key=text.strip()))
         if weak:
-            out.append(make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip()))
+            f = make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip())
+            f.human = "off" if HMAC_SHA1.search(text) and not WEAK_RANDOM.search(text) else None   # HMAC-SHA1 is sound
+            out.append(f)
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
                 if hit(lx, rx, line, text, CODE):
                     out.append(make(rule, fc.path, line, what, key=text.strip()))
         if is_js and not test and hit(lx, JS_CONSOLE, line, text, CODE) \
                 and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
-            out.append(make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip()))
+            f = make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip())
+            f.human = "off" if person_test_context(fc.path) else None      # e2e / mock files: people only
+            out.append(f)
     if is_js:
         for block in _blocks(fc.added):
             rows = [(ln, fc.added[ln]) for ln in block]
@@ -5727,6 +5969,19 @@ def _fit(text: str, width, sym) -> str:
     return text
 
 
+UNVERIFIED_FOLD = 3         # this many deps.unverified warnings (a person's change) print as one line
+
+
+def unverified_fold(res, active) -> list:
+    """The deps.unverified warnings a person's default text report prints as one line (one registry problem gives
+    one per package). An agent's report, -v, JSON and the agent format keep every line."""
+    if res.provenance[0] == "agent":
+        return []
+    found = [f for f in active if f.rule == "deps.unverified" and f.action == "warn"
+             and (": could not reach " in f.message or ": not checked: " in f.message)]
+    return found if len(found) >= UNVERIFIED_FOLD else []
+
+
 def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="commit", mode="staged",
                 hook=False, width=None, sym=None, view=None) -> str:
     """The text report. Default: compact, grouped by file. -v: the detailed view. -q: only what stops the commit.
@@ -5804,12 +6059,14 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             out.append(_fit(nxt, width, sym))
         return "\n".join(out + foot()) + "\n"
     rank = {"block": 0, "fix": 1, "warn": 2}
+    folded = unverified_fold(res, active)
+    listed = [f for f in active if f not in folded] if folded else active
     by_file: dict = defaultdict(list)
-    for f in active:
+    for f in listed:
         by_file[f.path].append(f)
     files = sorted(by_file, key=lambda p: (min(rank[f.action] for f in by_file[p]), p))
-    lw = max((len(str(f.line or "-")) for f in active), default=1)
-    rw = max((len(f.rule) for f in active), default=0)
+    lw = max((len(str(f.line or "-")) for f in listed), default=1)
+    rw = max((len(f.rule) for f in listed), default=0)
     cap = HOOK_CAP if hook else None
     if limit is not None:
         cap = limit if cap is None else min(cap, limit)
@@ -5832,9 +6089,13 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                 hinted.add(f.rule)
                 out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
                            f"{s('reset')}")
-    if cap is not None and len(active) > shown:
-        out.append(f"  +{len(active) - shown} more {sym['dash']} "
+    if cap is not None and len(listed) > shown:
+        out.append(f"  +{len(listed) - shown} more {sym['dash']} "
                    + ("run: aigate-lite check" if hook else f"raise --max-findings (now {limit}) or use --summary"))
+    if folded:
+        out.append(_fit(f"  {s('warn')}WARN{s('reset')}  deps.unverified  {len(folded)} packages: package and "
+                        f"vulnerability checks did NOT run for them (see the note above; -v lists them)", None if color
+                        else width, sym))
     out.append(_summary(res, active, allowed, baselined, stage, sym, s))
     nxt = _next_line(res, active, baselined, stage)
     if nxt:
@@ -7843,9 +8104,7 @@ def run_check(args, env, collect=False):
             notes.append("merge commit: incoming changes from the merged branch are checked too")
     registry.save()
     results.save()
-    if registry.failures:
-        notes.append(f"{registry.failures} registry lookup(s) failed ({registry.failure_reason or 'offline or blocked'}); "
-                     "dependency checks are incomplete (--offline skips them)")
+    notes += registry_notes(registry)
 
     final_ctx = ctx
     findings = apply_policy(findings, final_ctx, env)
@@ -8298,13 +8557,13 @@ PRE_COMMIT_SNIPPET = """  - repo: local
     hooks:
       - id: aigate-lite
         name: aigate-lite
-        entry: python3 .aigate/aigate_lite.py check --staged
+        entry: python3 .aigate/aigate_lite.py check --staged      # Windows: py .aigate/aigate_lite.py check --staged
         language: system
         pass_filenames: false
         always_run: true
       - id: aigate-lite-push
         name: aigate-lite (push)
-        entry: python3 .aigate/aigate_lite.py check --push
+        entry: python3 .aigate/aigate_lite.py check --push        # Windows: py .aigate/aigate_lite.py check --push
         language: system
         pass_filenames: false
         always_run: true
@@ -8312,6 +8571,45 @@ PRE_COMMIT_SNIPPET = """  - repo: local
 
 
 MODES = ("installed", "vendored")
+
+
+def _file_version(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            m = re.search(r'^__version__ = "([^"]+)"', fh.read(4000), re.M)
+        return m.group(1) if m else None
+    except OSError:
+        return None
+
+
+def vendor_copy(script, dest, from_setup=False) -> str:
+    """Copy this file to .aigate/aigate_lite.py and say exactly what happened, in one message: copied, updated from
+    version X to Y, unchanged, or kept because the copy there is NEWER than this tool (never overwritten silently)."""
+    import shutil
+    rel = ".aigate/aigate_lite.py"
+    switch = " (`aigate-lite unvendor` switches the hooks to the installed tool)" if from_setup else ""
+    if os.path.abspath(dest) == script:
+        return f"the gate runs from {rel} itself (version {__version__}){switch}"
+    if not os.path.exists(dest):
+        shutil.copy2(script, dest)
+        return f"copied the gate (version {__version__}) to {rel} (commit it so teammates get the same version)"
+    try:
+        with open(dest, "rb") as fh:
+            mine = fh.read()
+        with open(script, "rb") as fh:
+            same = mine.replace(b"\r\n", b"\n") == fh.read().replace(b"\r\n", b"\n")
+    except OSError:
+        same = False
+    old = _file_version(dest)
+    if same:
+        return f"the vendored copy {rel} is unchanged (version {__version__}){switch}"
+    old_t, new_t = release_tuple(old or ""), release_tuple(__version__)
+    if old_t and new_t and _cmp(old_t, new_t) > 0:
+        return (f"warning: the vendored copy {rel} is version {old}, NEWER than this aigate-lite ({__version__}); "
+                f"kept it unchanged. Upgrade this tool (pipx upgrade aigate-lite), or run it from {rel}{switch}")
+    shutil.copy2(script, dest)
+    return (f"updated the vendored copy {rel} from version {old or 'unknown'} to {__version__} "
+            f"(commit it so teammates get the same version){switch}")
 
 
 def resolve_mode(args) -> str:
@@ -8332,7 +8630,7 @@ def cmd_install(args) -> int:
               "Add this line to that tool's pre-commit hook instead:\n"
               + ("    aigate-lite check --staged\n(run `aigate-lite install --force` to install plain git hooks anyway)"
                  if mode == "installed" else
-                 "    python3 .aigate/aigate_lite.py check --staged\n"
+                 "    python3 .aigate/aigate_lite.py check --staged      (Windows: py .aigate/aigate_lite.py check --staged)\n"
                  "(run `aigate-lite install --vendor --force` to copy the script into .aigate/ and install anyway)"))
         return 1
     if os.path.exists(os.path.join(repo.root, ".pre-commit-config.yaml")) and not args.force and mode == "installed":
@@ -8350,10 +8648,7 @@ def cmd_install(args) -> int:
     if args.vendor:
         dest = os.path.join(repo.root, ".aigate", "aigate_lite.py")
         os.makedirs(os.path.dirname(dest), exist_ok=True)
-        if os.path.abspath(dest) != script:
-            import shutil
-            shutil.copy2(script, dest)
-        print("copied the gate to .aigate/aigate_lite.py (commit it so teammates get the same version)")
+        print(vendor_copy(script, dest, from_setup=getattr(args, "from_setup", False)))
         notice = os.path.join(os.path.dirname(script), "NOTICE")
         if os.path.isfile(notice) and os.path.abspath(os.path.join(os.path.dirname(dest), "NOTICE")) != \
                 os.path.abspath(notice):
@@ -8627,8 +8922,7 @@ def cmd_setup(args) -> int:
     note = ""
     if mode is None:
         if have_copy:
-            mode, note = "vendored", ("this repository already has .aigate/aigate_lite.py, so it stays vendored; to use the "
-                                      "installed tool instead: pipx install aigate-lite, then aigate-lite unvendor")
+            mode = "vendored"        # install's vendor message says what happened to the copy and names unvendor
         elif installed_package():
             mode = "installed"
         else:
@@ -9100,9 +9394,10 @@ DOCTOR_URLS = (("PyPI", "https://pypi.org/pypi/pip/json"),
                ("npm downloads", "https://api.npmjs.org/downloads/point/last-week/react"),
                ("pypistats", "https://pypistats.org/api/packages/pip/recent"))
 DOCTOR_SNIPPETS = {
-    "husky": "add this line to .husky/pre-commit: python3 .aigate/aigate_lite.py check --staged",
+    "husky": "add this line to .husky/pre-commit: python3 .aigate/aigate_lite.py check --staged "
+             "(Windows: py .aigate/aigate_lite.py check --staged; installed: aigate-lite check --staged)",
     "lefthook": "add to lefthook.yml: pre-commit: { commands: { aigate-lite: { run: python3 .aigate/aigate_lite.py "
-                "check --staged } } }",
+                "check --staged } } } (Windows: run: py .aigate/aigate_lite.py check --staged)",
 }
 
 
@@ -9274,7 +9569,8 @@ def _doctor_hook_manager(repo):
         return _check("hooks.manager", "warn", f"core.hooksPath is {hooks_path or 'unset'}"
                       f"{' (husky)' if which else ''}: git runs hooks from there, not .git/hooks",
                       DOCTOR_SNIPPETS["husky"] if which else
-                      f"add `python3 .aigate/aigate_lite.py check --staged` to {hooks_path}/pre-commit")
+                      f"add `python3 .aigate/aigate_lite.py check --staged` (Windows: `py .aigate/aigate_lite.py "
+                      f"check --staged`) to {hooks_path}/pre-commit")
     if any(os.path.exists(os.path.join(root, n)) for n in ("lefthook.yml", "lefthook.yaml", ".lefthook.yml")):
         return _check("hooks.manager", "warn", "lefthook manages hooks", DOCTOR_SNIPPETS["lefthook"])
     return _check("hooks.manager", "ok", "no other hook manager found")
@@ -9381,7 +9677,7 @@ def _default_fetch(url, timeout):
     import urllib.request
     req = urllib.request.Request(url, headers={"User-Agent": f"aigate-lite/{__version__} doctor"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=tls_context()) as resp:
             return resp.status
     except urllib.error.HTTPError as e:
         return e.code
@@ -9400,11 +9696,17 @@ def _doctor_network(env, cfg, fetch):
             fetch(url, 3)
             return name, None
         except urllib.error.URLError as e:
-            return name, "tls" if isinstance(e.reason, ssl.SSLError) else str(e.reason)
+            if isinstance(e.reason, ssl.SSLError):
+                return name, "tls"
+            return name, f"{type(e.reason).__name__}: {e.reason}"
         except ssl.SSLError:
             return name, "tls"
-        except (OSError, ValueError) as e:
-            return name, str(e) or type(e).__name__
+        except OSError as e:
+            if is_local_error(e):
+                return name, ("local", local_reason(e))
+            return name, f"{type(e).__name__}: {e}"
+        except ValueError as e:
+            return name, f"{type(e).__name__}: {e}"
     with ThreadPoolExecutor(max_workers=len(DOCTOR_URLS)) as pool:
         results = list(pool.map(one, DOCTOR_URLS))
     failed = [(n, why) for n, why in results if why]
@@ -9412,12 +9714,36 @@ def _doctor_network(env, cfg, fetch):
         return _check("network", "ok", f"PyPI, npm, OSV, npm downloads and pypistats reachable{via}")
     status = "fail" if cfg["gate"].get("offline") == "block" else "warn"
     names = ", ".join(n for n, _ in failed)
+    local = [why[1] for _, why in failed if isinstance(why, tuple)]
+    if local:
+        return _check("network", status, f"lookups to {names} failed on this machine, not on the network "
+                      f"({local[0]}); dependency checks will be incomplete",
+                      "fix the local cause above (see the tls check); --offline skips the lookups")
     if any(why == "tls" for _, why in failed):
         return _check("network", status, f"TLS certificate verification failed for {names}{via}",
                       "behind a corporate proxy? point SSL_CERT_FILE at your company's CA bundle "
                       "(SSL_CERT_FILE=/path/to/ca.pem)")
     return _check("network", status, f"not reachable: {names}{via} ({failed[0][1]}); dependency checks will be "
                   "incomplete", "check your connection or proxy settings (HTTPS_PROXY), or use --offline")
+
+
+def _doctor_tls(env):
+    """Can this Python build a verifying TLS context? Names SSLKEYLOGFILE when it is the cause."""
+    import ssl
+    keylog = env.get("SSLKEYLOGFILE")
+    try:
+        ssl.create_default_context()
+    except OSError as e:
+        if keylog:
+            return _check("tls", "warn", f"SSLKEYLOGFILE={keylog} cannot be written ({type(e).__name__}: "
+                          f"{e.strerror or e}); lookups continue without TLS key logging, verification on",
+                          "unset it. PowerShell: Remove-Item Env:SSLKEYLOGFILE (and remove it from System > "
+                          "Environment Variables if it is set there); sh: unset SSLKEYLOGFILE")
+        return _check("tls", "warn", f"the default TLS context cannot be created ({type(e).__name__}: {e}); "
+                      "lookups use the system certificates, verification on",
+                      "check SSL_CERT_FILE and SSL_CERT_DIR")
+    detail = "default TLS context ok (certificate and hostname verification on)"
+    return _check("tls", "ok", detail + (f"; key logging to {keylog}" if keylog else ""))
 
 
 def _doctor_agent(env, cfg):
@@ -9472,6 +9798,7 @@ def doctor_report(env, offline=False, fetch=None) -> list:
     else:
         checks += _doctor_python(env, os.path.join(cwd, ".git", "hooks"))
         cfg = merge_config({}, [])
+    checks.append(_doctor_tls(env))
     checks.append(_check("network", "ok", "skipped (--offline)") if offline
                   else _doctor_network(env, cfg, fetch or _default_fetch))
     checks.append(_doctor_agent(env, cfg))

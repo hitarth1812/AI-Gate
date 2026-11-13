@@ -4,12 +4,11 @@ markdown review, `author` and `url` in the JSON, one TOOL line before END in the
 
 Markers the repository's own self-scan looks for are built from pieces so this file is not itself a finding."""
 import json
-import subprocess
 import unicodedata
 
 import pytest
 
-from conftest import ROOT, aigate
+from conftest import ROOT, aigate, project_files
 from test_review_api import base, change
 from test_review_rest import review
 
@@ -214,8 +213,9 @@ HIDDEN = {"\u200b", "\u200c", "\u200d", "\u200e", "\u200f", "\u2060",
 
 
 def test_no_zero_width_or_bidi_characters_in_the_tool_docs_or_outputs():
-    paths = subprocess.run(["git", "ls-files", "*.py", "*.md", "*.toml", "*.yml", "*.txt", "NOTICE", "LICENSE"], cwd=ROOT,
-                           capture_output=True, text=True, check=True).stdout.split()
+    # git ls-files in a checkout; a walk of the tree in an unpacked sdist or zip (the check runs in both)
+    paths = project_files((".py", ".md", ".toml", ".yml", ".txt"), names=("NOTICE", "LICENSE"))
+    assert "aigate_lite.py" in paths and "NOTICE" in paths
     bad = []
     for rel in paths:
         text = (ROOT / rel).read_text(encoding="utf-8", errors="replace")

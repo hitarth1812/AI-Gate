@@ -70,3 +70,15 @@ rule = "suppress.type"
 path = "tests/test_gate.py"
 fingerprint = "bf6291d50780e4ff"
 reason = "fixture line for the end-to-end gate tests"
+
+[[allow]]
+rule = "tests.skip_added"
+path = "tests/test_network_local.py"
+fingerprint = "62329cb24eefd94a"
+reason = "the read-only-cache case cannot run on Windows (ACLs) or as root; the other cache cases run everywhere"
+
+[[allow]]
+rule = "tests.skip_added"
+path = "tests/test_old_python.py"
+fingerprint = "d1e339d9073294fe"
+reason = "needs a real Python older than 3.11 on the machine; the old-grammar parse tests always run"

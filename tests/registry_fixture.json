@@ -16,6 +16,7 @@
     "httpx": {"created": "2019-01-01T00:00:00Z", "versions": {"0.28.1": "2024-12-06T00:00:00Z"}, "latest": "0.28.1"}
   },
   "npm": {
+    "fresh-npm-lib": {"created": "2024-01-10T00:00:00Z", "versions": {"1.0.0": "2024-01-10T00:00:00Z", "1.1.0": "2026-10-29T00:00:00Z"}, "latest": "1.1.0"},
     "express": {"created": "2010-12-29T00:00:00Z", "versions": {"4.21.2": "2024-12-05T00:00:00Z", "5.1.0": "2025-03-31T00:00:00Z"}, "latest": "5.1.0"},
     "left-pad": {"created": "2014-03-14T00:00:00Z", "versions": {"1.3.0": "2018-04-09T00:00:00Z"}, "latest": "1.3.0", "deprecated": "use String.prototype.padStart()"},
     "react": {"created": "2011-10-26T00:00:00Z", "versions": {"19.0.0": "2024-12-05T00:00:00Z"}, "latest": "19.0.0"},

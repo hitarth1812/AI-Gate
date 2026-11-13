@@ -1852,3 +1852,36 @@ startup -1.3%, startup-direct -0.6%, A +0.0%, B -0.3%, C +0.1%, D +0.5%, E +0.7%
 - Tests (py -3.12, Windows 11): 1035 passed, 18 skipped, 2 failed before that fix. The two failures were that test and
   `test_errors::test_8_unreachable_registry_gives_one_specific_note` (environmental, see Phase 7A). After the fix the three
   affected files pass (56 passed).
+
+## 0.5.1: fix every known error (branch fix-0.5.1, from main d58ef2c)
+
+Decisions from the human (Part A): remove the author email from the package metadata; drop the `aigate` console script.
+
+### Part B (correctness): the cause, confirmed
+`SSLKEYLOGFILE` was set (in this machine's shell: `\\?\Volume{ba5fbc33-...}\virtual_file.log`). `ssl.create_default_context()`
+opens that file for TLS key logging and raises OSError (PermissionError here; errno 22 when the path is mangled), and
+`urlopen()` without a context builds the same default context, so every lookup failed before any connection. Reproduced
+in `tests/test_network_local.py::test_the_cause_reproduced_...`. The same cause made `test_errors::test_8` fail on this
+machine since 2026-11-11 (it passes now).
+Before/after on a repo staging `requests==2.19.0` with live PyPI/OSV and the unwritable SSLKEYLOGFILE:
+0.5.0 gave `deps.unverified "could not reach PyPI"` and exit 0 (the real `deps.vulnerable` was hidden); 0.5.1 gives one
+SSLKEYLOGFILE note and `deps.vulnerable` (FIX, exit 1). `doctor`: 0.5.0 "network not reachable"; 0.5.1 a `tls` warning
+with the PowerShell and sh fixes, network OK.
+
+### Tests (Windows 11)
+Full suite, all four versions (scratchpad run_all.sh): 3.11, 3.12, 3.13, 3.14 each 1167 passed, 13 skipped, 0 failed.
+After the last two changes (lazy person_test_context, two [[allow]] entries) the full 3.12 suite again: 1167 passed,
+13 skipped. Skips: 12 POSIX-only (file modes, chmod, symlinks, a moved venv launcher) and the read-only cache case on
+Windows. From an unpacked sdist (no .git; its shipped aigate_lite.egg-info removed as conftest asks),
+Python 3.13: 1167 passed, 13 skipped. Not run: Ubuntu/WSL2, macOS, GitHub Actions.
+
+### Precision (`py -3.12 bench/precision.py [--agent] [--against main]`)
+Person: 66/78 before (main) -> 78/78 after. Agent: 77/78 before -> 78/78 after (the one change: `test.fixme(...)` is now
+detected, which is stricter). Generated repos (scratchpad gen_051_audit.py, offline audit): Next.js + Playwright, person
+10 fix / 9 warn -> 1 fix / 15 warn, agent 10 fix / 9 warn -> 11 fix / 9 warn; Go service with docs, person 1 fix / 16 warn
+-> 1 fix / 0 warn, agent unchanged (1 fix / 16 warn).
+
+### Bench (`py -3.12 bench/bench.py --against main --pairs 40`, gates PASS)
+First run showed C +8.8% and G +14.6%: `person_test_context()` matched 17 globs on every added line. Now it is cached per
+path and asked only when a credential-like value is found. Second run: startup +0.9%, startup-direct +2.2%, A +2.9%,
+B -0.6%, C +0.3%, D +1.7%, E -1.1%, F -0.9%, G -1.8%; git calls and blob reads identical.
