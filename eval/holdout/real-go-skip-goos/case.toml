@@ -1,0 +1,15 @@
+id = "real-go-skip-goos"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): cmd/atlas/graceful_shutdown_other_test.go:18 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "environment-gated"
+
+[[must_fire]]
+rule = "tests.skip_added"
+path = "cmd/atlas/graceful_shutdown_other_test.go"
+line = 4
+action = "warn"
+agent_action = "fix"

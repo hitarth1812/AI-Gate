@@ -1,0 +1,14 @@
+id = "seed-go-leak-stripe"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/pay.go"
+line = 3
+action = "block"
+agent_action = "block"

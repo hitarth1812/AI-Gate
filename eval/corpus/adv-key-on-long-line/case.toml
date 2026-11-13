@@ -1,0 +1,19 @@
+id = "adv-key-on-long-line"
+source = "adversarial"
+language = "javascript"
+origin = "adversarial: key on a 5000-character line"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "bundle.js"
+action = "block"
+agent_action = "block"
+
+[[generate]]
+path = "bundle.js"
+kind = "long_line"
+size = 5000
+prefix = "var k='@@AWS@@';"

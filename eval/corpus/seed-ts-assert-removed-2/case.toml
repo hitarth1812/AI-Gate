@@ -1,0 +1,11 @@
+id = "seed-ts-assert-removed-2"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "tests.assertions_removed"
+path = "src/lib.test.ts"

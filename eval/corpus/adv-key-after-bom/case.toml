@@ -1,0 +1,18 @@
+id = "adv-key-after-bom"
+source = "adversarial"
+language = "python"
+origin = "adversarial: key in a file with a UTF-8 BOM"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "app.py"
+line = 1
+action = "block"
+agent_action = "block"
+
+[[transform]]
+path = "app.py"
+kind = "bom"

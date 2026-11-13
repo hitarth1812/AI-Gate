@@ -1,0 +1,14 @@
+id = "real-go-claude-settings-json"
+source = "real"
+language = "json"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): .claude/settings.json:47 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "a JSON file with text after the object: a real syntax error"
+
+[[must_fire]]
+rule = "code.syntax_error"
+path = ".claude/settings.json"
+action = "fix"
+agent_action = "fix"

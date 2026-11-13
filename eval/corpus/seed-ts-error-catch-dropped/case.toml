@@ -1,0 +1,13 @@
+id = "seed-ts-error-catch-dropped"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.error_check_removed"
+path = "src/api.ts"
+action = "warn"
+agent_action = "fix"

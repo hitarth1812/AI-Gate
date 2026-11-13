@@ -1,0 +1,11 @@
+id = "adv-skip-in-comment"
+source = "adversarial"
+language = "python"
+origin = "adversarial: pytest.mark.skip inside a comment (not a skip)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "tests.skip_added"
+path = "tests/test_a.py"

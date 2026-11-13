@@ -1,0 +1,12 @@
+id = "real-go-conn-localhost-ci-2"
+source = "real"
+language = "yaml"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): .github/workflows/ci-stability.yml:39 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "same pattern, second workflow"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = ".github/workflows/ci-stability.yml"

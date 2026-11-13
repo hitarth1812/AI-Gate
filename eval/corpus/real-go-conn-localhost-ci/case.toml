@@ -1,0 +1,12 @@
+id = "real-go-conn-localhost-ci"
+source = "real"
+language = "yaml"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): .github/workflows/ci.yml:145 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "a throwaway localhost database in CI config: information only for people (proposed); agents keep the warning"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = ".github/workflows/ci.yml"

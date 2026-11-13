@@ -1,0 +1,11 @@
+id = "adv-empty-file"
+source = "adversarial"
+language = "python"
+origin = "adversarial: an empty file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "empty.py"
+kind = "empty"

@@ -1,0 +1,12 @@
+id = "seed-ts-typosquat-1"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "deps.typosquat"
+path = "package.json"
+line = 9

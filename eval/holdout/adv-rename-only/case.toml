@@ -1,0 +1,11 @@
+id = "adv-rename-only"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a pure rename"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[rename]]
+from = "old_name.py"
+to = "new_name.py"

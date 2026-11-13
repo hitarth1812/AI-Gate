@@ -1,0 +1,13 @@
+package main
+
+import (
+	"example.com/shop/shop"
+	"example.com/shop/store"
+)
+
+func main() {
+	_, _ = store.Pair(1, 2)
+	_ = shop.Total([]int{1}, 5)
+	n, _ := shop.Parse("4")
+	_ = n
+}

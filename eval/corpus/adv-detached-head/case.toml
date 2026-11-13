@@ -1,0 +1,14 @@
+id = "adv-detached-head"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a staged change on a detached HEAD"
+who = "both"
+mode = "detached"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.eval"
+path = "app.py"
+line = 2
+action = "fix"
+agent_action = "fix"

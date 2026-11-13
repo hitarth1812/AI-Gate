@@ -1,0 +1,14 @@
+id = "real-go-rollback-nolint-plain"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): cmd/atlas/router_integration_test.go:266 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "cmd/atlas/router_integration_test.go"
+line = 4
+action = "warn"
+agent_action = "warn"

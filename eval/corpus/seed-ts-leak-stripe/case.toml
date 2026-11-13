@@ -1,0 +1,14 @@
+id = "seed-ts-leak-stripe"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "src/pay.ts"
+line = 1
+action = "block"
+agent_action = "block"

@@ -1,0 +1,15 @@
+id = "real-go-rollback-nolint-sensitive-3"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/auth/session/postgres.go:107 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "paths under auth/ are [paths] sensitive: one step stricter by design"
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "internal/auth/session/postgres.go"
+line = 4
+action = "fix"
+agent_action = "fix"

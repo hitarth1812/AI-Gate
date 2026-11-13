@@ -1,0 +1,13 @@
+id = "adv-minified-js"
+source = "adversarial"
+language = "javascript"
+origin = "adversarial: a 2 MB minified bundle on one line"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "dist/app.min.js"
+kind = "long_line"
+size = 2000000
+prefix = "!function(){"

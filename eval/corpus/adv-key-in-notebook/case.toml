@@ -1,0 +1,14 @@
+id = "adv-key-in-notebook"
+source = "adversarial"
+language = "json"
+origin = "adversarial: key in a notebook cell"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "nb/a.ipynb"
+line = 1
+action = "block"
+agent_action = "block"

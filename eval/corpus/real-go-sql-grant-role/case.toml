@@ -1,0 +1,15 @@
+id = "real-go-sql-grant-role"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/orgs/postgres/stage9_integration_test.go:282 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "identifiers cannot be parameterised; in a test file this is a warning for people. Paths under auth/ are [paths] sensitive and one step stricter by design (that is why the same pattern was FIX in one file and WARN in the others)"
+
+[[must_fire]]
+rule = "security.sql_injection"
+path = "internal/orgs/postgres/stage9_integration_test.go"
+line = 4
+action = "warn"
+agent_action = "fix"

@@ -1,0 +1,11 @@
+id = "adv-symlink-to-dir"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a symlink to a directory"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[symlink]]
+path = "vendor_link"
+target = "app"

@@ -1,0 +1,6 @@
+name: ci
+on: push
+jobs:
+  t:
+    env:
+      MIGRATE_URL: "postgres://atlas:atlas@localhost:5432/atlas?sslmode=disable"

@@ -1,0 +1,12 @@
+id = "adv-deep-json"
+source = "adversarial"
+language = "json"
+origin = "adversarial: 100,000 nested brackets"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "data/deep.json"
+kind = "deep_json"
+size = 100000

@@ -1,0 +1,13 @@
+id = "seed-go-error-parse-ignored"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.error_check_removed"
+path = "shop/shop.go"
+action = "warn"
+agent_action = "fix"

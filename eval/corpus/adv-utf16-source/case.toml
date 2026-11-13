@@ -1,0 +1,11 @@
+id = "adv-utf16-source"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a UTF-16 source file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[transform]]
+path = "app.py"
+kind = "utf16"

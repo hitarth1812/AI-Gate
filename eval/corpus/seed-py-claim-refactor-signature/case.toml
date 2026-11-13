@@ -1,0 +1,14 @@
+id = "seed-py-claim-refactor-signature"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["refactor only, no behaviour change"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

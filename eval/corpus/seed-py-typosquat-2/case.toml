@@ -1,0 +1,12 @@
+id = "seed-py-typosquat-2"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "deps.typosquat"
+path = "requirements.txt"
+line = 2

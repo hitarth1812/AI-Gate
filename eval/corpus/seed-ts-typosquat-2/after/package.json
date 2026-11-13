@@ -1,0 +1,11 @@
+{
+  "name": "shop",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest"
+  },
+  "dependencies": {
+    "expresss": "^1.0.0"
+  }
+}

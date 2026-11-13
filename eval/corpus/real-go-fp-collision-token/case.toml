@@ -1,0 +1,12 @@
+id = "real-go-fp-collision-token"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/orgs/postgres/membership_integration_test.go:508 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "an identifier, a path or a generated name, not a credential (proposed FP for people; agents keep the finding)"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "internal/orgs/postgres/membership_integration_test.go"

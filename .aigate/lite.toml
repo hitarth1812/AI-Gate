@@ -5,6 +5,14 @@
 # finding of the same rule in the same file is still reported.
 version = 1
 
+# The evaluation corpus is test data: it contains the mistakes the gate is measured on (skips, eval, SQL built from
+# strings, ...), by design. A [paths] ignore REPLACES the default list, so the defaults are repeated here. Provider-shaped
+# secrets are still found in ignored files, and the corpus never contains one: it writes them as @@AWS@@ and so on
+# (eval/run.py fills them in at run time).
+[paths]
+ignore = ["**/node_modules/**", "**/vendor/**", "**/third_party/**", "dist/**", "build/**", "**/.venv/**", "**/venv/**",
+          "*.min.js", "*.min.css", "*.map", ".aigate/aigate_lite.py", "eval/corpus/**", "eval/holdout/**"]
+
 # ---- aigate_lite.py: the detector's own text and deliberate design choices
 
 [[allow]]

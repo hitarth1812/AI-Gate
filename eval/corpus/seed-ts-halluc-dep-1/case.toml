@@ -1,0 +1,14 @@
+id = "seed-ts-halluc-dep-1"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "deps.hallucinated"
+path = "package.json"
+line = 9
+action = "block"
+agent_action = "block"

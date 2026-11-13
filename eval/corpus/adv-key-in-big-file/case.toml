@@ -1,0 +1,19 @@
+id = "adv-key-in-big-file"
+source = "adversarial"
+language = "python"
+origin = "adversarial: key in a file over 1 MB"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "big.py"
+action = "block"
+agent_action = "block"
+
+[[generate]]
+path = "big.py"
+kind = "big_text"
+size = 1100000
+prefix = "KEY = '@@AWS@@'\n"

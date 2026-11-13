@@ -1,0 +1,15 @@
+id = "real-go-conn-localhost-code"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): cmd/verify_p2/main.go:37 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "a localhost DSN in non-test code: a low warning"
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "cmd/verify_p2/main.go"
+line = 4
+action = "warn"
+agent_action = "warn"

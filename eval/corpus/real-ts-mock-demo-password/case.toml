@@ -1,0 +1,15 @@
+id = "real-ts-mock-demo-password"
+source = "real"
+language = "typescript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): e2e/mock-api.mjs:117 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "a fixture credential in an e2e / mock / test-runner file: test context for people (a *.spec.* file is a test file for everyone)"
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "e2e/mock-api.mjs"
+line = 1
+action = "warn"
+agent_action = "fix"

@@ -1,0 +1,12 @@
+id = "real-ts-mock-otpauth-url"
+source = "real"
+language = "javascript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): e2e/mock-api.mjs:887 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "a mock otpauth URL in an e2e mock (proposed FP for people)"
+
+[[must_not_fire]]
+rule = "security.weak_crypto"
+path = "e2e/mock-api.mjs"

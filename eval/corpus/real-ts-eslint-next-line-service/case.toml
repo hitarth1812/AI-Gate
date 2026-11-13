@@ -1,0 +1,14 @@
+id = "real-ts-eslint-next-line-service"
+source = "real"
+language = "typescript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): src/components/services/ServiceMark.tsx:15 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "src/components/services/ServiceMark.tsx"
+line = 1
+action = "warn"
+agent_action = "warn"

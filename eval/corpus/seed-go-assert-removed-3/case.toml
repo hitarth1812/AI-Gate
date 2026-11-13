@@ -1,0 +1,11 @@
+id = "seed-go-assert-removed-3"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "tests.assertions_removed"
+path = "shop/shop_test.go"

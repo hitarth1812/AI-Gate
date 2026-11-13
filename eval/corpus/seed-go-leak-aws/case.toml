@@ -1,0 +1,14 @@
+id = "seed-go-leak-aws"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/config.go"
+line = 3
+action = "block"
+agent_action = "block"

@@ -1,0 +1,14 @@
+id = "adv-key-in-shell-script"
+source = "adversarial"
+language = "shell"
+origin = "adversarial: key exported in a shell script"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "scripts/run.sh"
+line = 2
+action = "block"
+agent_action = "block"

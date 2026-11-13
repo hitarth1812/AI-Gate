@@ -1,0 +1,20 @@
+id = "seed-py-leak-pem"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "keys/server.pem"
+line = 1
+action = "block"
+agent_action = "block"
+
+[[must_fire]]
+rule = "secrets.env_file"
+path = "keys/server.pem"
+action = "block"
+agent_action = "block"

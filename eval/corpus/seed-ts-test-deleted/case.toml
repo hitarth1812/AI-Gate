@@ -1,0 +1,11 @@
+id = "seed-ts-test-deleted"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "tests.deleted"
+path = "src/lib.test.ts"
