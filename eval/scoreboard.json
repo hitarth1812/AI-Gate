@@ -8,22 +8,21 @@
   },
   "contested": 0,
   "failures": {
-   "CRASH": 2,
    "FN": 4,
    "FP": 1,
    "OVER": 1
   },
   "overall": {
    "agent_softer": 0,
-   "crashes": 2,
+   "crashes": 0,
    "false_block_clean": 0,
    "fn": 4,
    "fp": 1,
    "gate_errors": 0,
    "over": 1,
    "runs": 84,
-   "runtime_ms_p50": 397.7,
-   "runtime_ms_p95": 932.1,
+   "runtime_ms_p50": 494.1,
+   "runtime_ms_p95": 1519.0,
    "under": 0,
    "unexpected_block": 0
   },
@@ -165,7 +164,7 @@
  "platform": "win32",
  "python": "3.12.10",
  "schema": 1,
- "seconds": 186.4,
+ "seconds": 200.8,
  "tool_version": "0.5.1",
  "train": {
   "cases": {
@@ -177,21 +176,21 @@
   "contested": 1,
   "failures": {
    "FALSE_BLOCK": 13,
-   "FN": 18,
+   "FN": 14,
    "FP": 13,
-   "OVER": 2
+   "OVER": 1
   },
   "overall": {
    "agent_softer": 0,
    "crashes": 0,
    "false_block_clean": 13,
-   "fn": 18,
+   "fn": 14,
    "fp": 13,
    "gate_errors": 0,
-   "over": 2,
+   "over": 1,
    "runs": 418,
-   "runtime_ms_p50": 394.5,
-   "runtime_ms_p95": 2389.6,
+   "runtime_ms_p50": 467.6,
+   "runtime_ms_p95": 2295.2,
    "under": 0,
    "unexpected_block": 0
   },
@@ -298,12 +297,12 @@
    },
    "review.claim_mismatch": {
     "clean": 0,
-    "fn": 4,
+    "fn": 2,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
-    "recall": 0.75,
-    "tp": 12,
+    "recall": 0.875,
+    "tp": 14,
     "under": 0
    },
    "scope.forbidden_path": {
@@ -368,12 +367,12 @@
    },
    "security.weak_crypto": {
     "clean": 0,
-    "fn": 2,
+    "fn": 0,
     "fp": 1,
-    "over": 1,
-    "precision": 0.905,
-    "recall": 0.905,
-    "tp": 19,
+    "over": 0,
+    "precision": 0.957,
+    "recall": 1.0,
+    "tp": 22,
     "under": 0
    },
    "suppress.lint": {

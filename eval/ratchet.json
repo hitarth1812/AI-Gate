@@ -246,7 +246,6 @@
   "real-go-fp-secretid-path|person|FP:secrets.generic@internal/platform/secrets/awskeys/provider_test.go:4 warn",
   "real-go-fp-token-concat|person|FP:secrets.generic@internal/orgs/postgres/membership_integration_test.go:4 warn",
   "real-go-fp-token-literal-json|person|FP:secrets.generic@internal/auth/credentials/handler_test.go:4 warn",
-  "real-go-sha1-in-test-file|person|OVER:security.weak_crypto@internal/auth/credentials/screener_test.go:7 fix>warn",
   "real-go-skip-data-routes|person|OVER:tests.skip_added@internal/api/drift_test.go:4 fix>warn",
   "real-ts-fp-challenge-token-1|person|FP:secrets.generic@src/lib/api/errors.test.ts:3 warn",
   "real-ts-fp-challenge-token-2|person|FP:secrets.generic@src/lib/api/errors.test.ts:3 warn",
@@ -254,13 +253,9 @@
   "real-ts-fp-challenge-token-4|person|FP:secrets.generic@src/lib/api/errors.test.ts:3 warn",
   "real-ts-mock-random-secret|person|FP:security.weak_crypto@e2e/mock-api.mjs:2 warn",
   "seed-ts-claim-fix-other|agent|FN:review.claim_mismatch@(commit):None",
-  "seed-ts-claim-fix-other|person|FN:review.claim_mismatch@(commit):None",
-  "seed-ts-claim-refactor-signature|agent|FN:review.claim_mismatch@(commit):None",
-  "seed-ts-claim-refactor-signature|person|FN:review.claim_mismatch@(commit):None",
-  "seed-ts-weak-math-random-token|agent|FN:security.weak_crypto@src/auth.ts:2",
-  "seed-ts-weak-math-random-token|person|FN:security.weak_crypto@src/auth.ts:2"
+  "seed-ts-claim-fix-other|person|FN:review.claim_mismatch@(commit):None"
  ],
- "holdout_failing_count": 8,
+ "holdout_failing_count": 6,
  "best": {
   "false_block_clean": 13,
   "unexpected_block": 0,
@@ -268,6 +263,6 @@
   "gate_errors": 0,
   "agent_softer": 0,
   "runtime_ms_p50": 394.5,
-  "runtime_ms_p95": 2389.6
+  "runtime_ms_p95": 2295.2
  }
 }

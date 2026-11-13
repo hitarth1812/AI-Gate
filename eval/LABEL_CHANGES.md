@@ -76,3 +76,12 @@ These were found when the first scoreboard was triaged; they are listed so nothi
   pins that on purpose; the Python and Go twins pass only because their messages name `compute_total` / `Total`).
   Proposal: change the commit message of the case to `fix the total() rounding` (a symbol-shaped token) so it tests the
   language gate and not the word heuristic. Until then it stays an expected FN (excluded from nothing; it is in the ratchet).
+
+## F. Round 1: the Go data-gated skip (proposal)
+
+`real-go-skip-data-routes` (and the JS/TS data-gated skips, which already work) rely on a skip being CONDITIONAL. In Go the
+data-gated skip is an unconditional `t.Skip("no registered routes to patch")` after an `if`; the diff added only the call. Two
+independent verifiers rejected a message-text heuristic because it softens unconditional skips written with similar words.
+Options: (a) keep today's FIX for a person and change the label to FIX (proposal: the skip is not provably conditional); (b) only
+soften when the `t.Skip` is the body of an `if` whose condition reads a length/count/emptiness (the JS rule), which needs the Go
+lexer's block structure. Recommend (a) now, (b) as a later round. Needs your decision before the label changes.
