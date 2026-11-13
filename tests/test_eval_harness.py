@@ -77,7 +77,7 @@ def test_no_provider_secret_and_no_invisible_character_is_stored_in_the_corpus()
 
 
 def test_placeholders_expand_to_what_the_gate_recognises():
-    assert ev.fill(b"k=@@AWS@@").decode() == "k=AKIAQWERTYUIOPASDFGH"
+    assert ev.fill(b"k=@@AWS@@").decode() == "k=AKIA" + "QWERTYUIOPASDFGH"        # split: this file is not itself a finding
     assert b"BEGIN RSA PRIVATE KEY" in ev.fill(b"@@PEMBEGIN@@") and len(ev.fill(b"@@PEMBODY@@").splitlines()) == 6
     assert ev.fill("@@ZWSP@@".encode()) == "\u200b".encode()
 

@@ -5,13 +5,13 @@
 # finding of the same rule in the same file is still reported.
 version = 1
 
-# The evaluation corpus is test data: it contains the mistakes the gate is measured on (skips, eval, SQL built from
+# The evaluation corpus (and the one-shot tools that wrote it, eval/tools/) is test data: it contains the mistakes the gate is measured on (skips, eval, SQL built from
 # strings, ...), by design. A [paths] ignore REPLACES the default list, so the defaults are repeated here. Provider-shaped
 # secrets are still found in ignored files, and the corpus never contains one: it writes them as @@AWS@@ and so on
 # (eval/run.py fills them in at run time).
 [paths]
 ignore = ["**/node_modules/**", "**/vendor/**", "**/third_party/**", "dist/**", "build/**", "**/.venv/**", "**/venv/**",
-          "*.min.js", "*.min.css", "*.map", ".aigate/aigate_lite.py", "eval/corpus/**", "eval/holdout/**"]
+          "*.min.js", "*.min.css", "*.map", ".aigate/aigate_lite.py", "eval/corpus/**", "eval/holdout/**", "eval/tools/**"]
 
 # ---- aigate_lite.py: the detector's own text and deliberate design choices
 
@@ -90,3 +90,23 @@ rule = "tests.skip_added"
 path = "tests/test_old_python.py"
 fingerprint = "d1e339d9073294fe"
 reason = "needs a real Python older than 3.11 on the machine; the old-grammar parse tests always run"
+
+# ---- tests/test_next_line.py: `# nosec` lines are the fixture the test stages into a temporary repository
+
+[[allow]]
+rule = "suppress.security"
+path = "tests/test_next_line.py"
+fingerprint = "b43fc18fc3faf437"
+reason = "fixture line staged into a temp repo to produce a suppress.security BLOCK (first case)"
+
+[[allow]]
+rule = "suppress.security"
+path = "tests/test_next_line.py"
+fingerprint = "36b06e1ce0783955"
+reason = "fixture line staged into a temp repo to produce a suppress.security BLOCK (second case)"
+
+[[allow]]
+rule = "suppress.security"
+path = "tests/test_next_line.py"
+fingerprint = "1126189b2365d12a"
+reason = "fixture line staged into a temp repo to produce a suppress.security BLOCK (third case)"
