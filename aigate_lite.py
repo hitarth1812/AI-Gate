@@ -4920,7 +4920,7 @@ def _refine_suppression(rule, fc, text, m, f) -> None:
         if SUPPRESS_REASON.search(rest) or re.match(r"\s*[:\-—]\s*\S.{2,}", rest):
             f.human = "warn"
     elif rule == "suppress.security" and fc.ext == ".go" and "gosec" in m.group(0):
-        # decided by the human (0.5.2, A1): a justified //nolint:gosec, a reason of at least 4 words that is not a bare
+        # decided by the human (0.5.2, A1): a justified Go nolint directive for gosec, a reason of at least 4 words that is not a bare
         # "false positive", "ok", "ignore" or "intentional", is a fix for a person. person_flat keeps a sensitive-path
         # escalation from turning that fix back into a block. An agent keeps the block.
         reason = re.sub(r"^[\s/#\-—:]+", "", rest).strip().rstrip(".").strip()

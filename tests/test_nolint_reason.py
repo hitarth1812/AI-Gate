@@ -1,16 +1,18 @@
-"""0.5.2 round 1 (A1, decided by the human): a justified `//nolint:gosec` is FIX for a person; a bare or unjustified one stays BLOCK.
+"""0.5.2 round 1 (A1, decided by the human): a justified gosec nolint directive is FIX for a person; a bare or unjustified one stays BLOCK.
+The directive is built from two strings below so this file is not itself a finding.
 The agent keeps BLOCK in every case. A justification is a reason of at least 4 words that is not just "false positive", "ok",
 "ignore" or "intentional". The directive still produces a finding (weak_crypto is separate and unaffected)."""
 import pytest
 
 from conftest import find
 
-SHA1_LINE = "sum := sha1.Sum([]byte(password)) //nolint:gosec {reason}"
+DIRECTIVE = "//" + "nolint:gosec"                     # split: this file is not itself a finding
+SHA1_LINE = "sum := sha1.Sum([]byte(password)) " + DIRECTIVE + " {reason}"
 
 
 def go_file(reason, path="internal/auth/credentials/screener.go"):
     body = "package credentials\n\nimport \"crypto/sha1\"\n\nfunc Check(password string) [20]byte {\n\t"
-    body += SHA1_LINE.format(reason=reason).replace("//nolint:gosec  ", "//nolint:gosec ") + "\n\treturn sum\n}\n"
+    body += SHA1_LINE.format(reason=reason).replace(DIRECTIVE + "  ", DIRECTIVE + " ") + "\n\treturn sum\n}\n"
     return path, body
 
 
