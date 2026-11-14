@@ -5880,6 +5880,8 @@ def apply_policy(findings, ctx, env) -> list:
             continue
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
         stays_put = not ctx.agent and (f.person_flat or not ctx.escalates_for_person(f.path))      # persons only (A6)
+        if f.sensitive and f.rule == "security.weak_crypto" and not stays_put and f.human == "pass" and f.action == "pass":
+            f.action = f.meta.action                  # the mock-file softening spares a warning, not the sensitive-path floor
         if f.sensitive and f.meta.escalate and not stays_put:
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
         legacy_id = (f.rule, f.path, f.legacy_fingerprint)

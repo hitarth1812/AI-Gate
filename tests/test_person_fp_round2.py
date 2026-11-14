@@ -75,6 +75,13 @@ def test_mock_random_secret_agent_result_is_unchanged(repo):
     assert agent == ["warn"]
 
 
+@pytest.mark.parametrize("path", ["src/auth/__mocks__/session.js", "src/auth/mocks/session.js", "e2e/auth/token.js"])
+def test_mock_random_secret_under_a_sensitive_path_is_not_softened_for_a_person(repo, path):
+    text = "const secret = Array.from({ length: 32 }, () => B[Math.floor(Math.random() * B.length)]).join('');\n"
+    person, agent = person_and_agent(repo, path, text, "security.weak_crypto")
+    assert person == agent == ["fix"]            # the label only spares warn; a sensitive path keeps its floor
+
+
 # ---------------------------------------------------------------- negatives: a real secret in the same shape still warns
 
 REAL = "Zx9kQ2vB7mN4pL1w"
