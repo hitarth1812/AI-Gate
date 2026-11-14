@@ -3635,6 +3635,42 @@ def iter_imports(tree) -> list:
     return out
 
 
+PY_CREATES = frozenset({"write_text", "write_bytes", "mkdir", "makedirs", "touch"})
+
+
+def py_created_modules(tree) -> list:
+    """(first line, last line, line, name) of each module a scope writes to disk: the scope calls write_text,
+    write_bytes, mkdir, makedirs or touch, and spells `name` or `name.py` as the right side of a `/` or as an
+    argument of joinpath / join (a path being built). A test that does this and then imports the name is not
+    importing a package from a registry. Comments and docstrings are not path operands, so they never count."""
+    scopes = [tree] + [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    out = []
+    for scope in scopes:
+        nodes, stack = [], list(ast.iter_child_nodes(scope))
+        while stack:                                 # the scope's own nodes, not those of a nested function
+            n = stack.pop()
+            nodes.append(n)
+            if not isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+                stack.extend(ast.iter_child_nodes(n))
+        if not any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in PY_CREATES
+                   for n in nodes):
+            continue
+        for n in nodes:
+            if isinstance(n, ast.BinOp) and isinstance(n.op, ast.Div):
+                operands = [n.right]
+            elif isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and n.func.attr in ("joinpath", "join"):
+                operands = n.args
+            else:
+                continue
+            for o in operands:
+                if isinstance(o, ast.Constant) and isinstance(o.value, str):
+                    name = o.value[:-3] if o.value.endswith(".py") else o.value
+                    if name.isidentifier() and not name.startswith("__"):
+                        out.append((getattr(scope, "lineno", 1), getattr(scope, "end_lineno", None) or 1 << 30,
+                                    o.lineno, name))
+    return out
+
+
 @dataclasses.dataclass
 class Imp:
     eco: str
@@ -3843,6 +3879,7 @@ def python_imports(ctx):
                    if top not in stdlib and top not in REMOVED_STDLIB and top not in dcfg["first_party"]
                    and not path_matches(top, dcfg["private"])}
     local = python_local_modules(ctx, maybe_local)
+    made = {}                             # test file path -> py_created_modules
     for fc, found in new_imports:
         for top, dotted, line, optional in found:
             if top in REMOVED_STDLIB:
@@ -3855,6 +3892,11 @@ def python_imports(ctx):
                 continue
             if top in stdlib or top in local or top in dcfg["first_party"] or path_matches(top, dcfg["private"]):
                 continue
+            if ctx.is_test(fc.path):             # a test may write the module it imports (a temporary directory)
+                if fc.path not in made:
+                    made[fc.path] = py_created_modules(ctx.py_tree(fc)[0])
+                if any(a <= line <= b and c <= line and top == name for a, b, c, name in made[fc.path]):
+                    continue
             declared, has_manifest, _req_py = python_declared(ctx)
             env_names, env_map = python_environment(ctx)
             dists = import_dists(top, dotted, dcfg["import_map"], env_map)
