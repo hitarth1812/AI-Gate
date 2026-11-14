@@ -5,6 +5,7 @@ from conftest import aigate
 
 make = aigate.make
 AWS = "AWS access key ID (AKIA…FGH)"
+ASK = "stop and ask the human: a person must add the allow entry"      # 0.5.3: what an AI agent is told instead of the [[allow]] route
 
 
 def block(rule, path="a.py", msg="x"):
@@ -31,8 +32,11 @@ WHO = pytest.mark.parametrize("agent", [False, True])
 def test_suppress_security_block_never_mentions_secrets(stage, agent):
     line = next_line([block("suppress.security", msg="`# nosec` added")], stage=stage, agent=agent)
     assert "secret" not in line.lower()
-    assert "suppression" in line and "[[allow]]" in line and ".aigate/lite.toml" in line
-    assert line.endswith("aigate-lite explain suppress.security") or "aigate-lite explain suppress.security" in line
+    assert "suppression" in line and "aigate-lite explain suppress.security" in line
+    if agent:                                                       # an agent cannot allow a finding: never shown the route
+        assert ASK in line and "[[allow]]" not in line and ".aigate/lite.toml" not in line
+    else:
+        assert "[[allow]]" in line and ".aigate/lite.toml" in line
 
 
 @STAGES
@@ -40,8 +44,11 @@ def test_suppress_security_block_never_mentions_secrets(stage, agent):
 def test_hallucinated_dependency_block_never_mentions_secrets(stage, agent):
     line = next_line([block("deps.hallucinated", "requirements.txt", "fakepkg does not exist on PyPI")],
                      stage=stage, agent=agent)
-    assert "secret" not in line.lower()
-    assert "[[allow]]" in line and "aigate-lite explain deps.hallucinated" in line
+    assert "secret" not in line.lower() and "aigate-lite explain deps.hallucinated" in line
+    if agent:
+        assert ASK in line and "[[allow]]" not in line
+    else:
+        assert "[[allow]]" in line
 
 
 @STAGES
@@ -58,6 +65,8 @@ def test_secret_block_keeps_todays_wording(stage, agent):
     if stage == "scan":
         assert line == ("next: fix the 1 BLOCK line above (secrets cannot be baselined), then adopt a baseline so only "
                         "new findings count: aigate-lite baseline")
+    elif agent:                                                     # 0.5.3: the agent is told to ask the human
+        assert line == f"next: fix the 1 BLOCK line above; if it is not a secret, {ASK}"
     else:
         assert line == "next: fix the 1 BLOCK line above"
 
@@ -73,10 +82,12 @@ def test_mixed_blocks_do_not_call_a_non_secret_a_secret(stage, agent):
     assert "aigate-lite explain" in line
 
 
-def test_the_advice_is_the_same_for_a_person_and_an_agent():
+def test_the_advice_is_the_same_for_a_person_and_an_agent_except_the_allow_route():
     for rule in ("suppress.security", "deps.hallucinated", "scope.forbidden_path"):
         for stage in ("commit", "push", "scan"):
-            assert next_line([block(rule)], stage=stage) == next_line([block(rule)], stage=stage, agent=True)
+            person, agent = next_line([block(rule)], stage=stage), next_line([block(rule)], stage=stage, agent=True)
+            assert person.split("; or allow")[0].split("; if it is a false")[0] == agent.split("; or allow")[0].split("; if it is a false")[0]
+            assert "[[allow]]" in person and "[[allow]]" not in agent and ASK in agent and ASK not in person
     assert "AIGATE_ALLOW" not in next_line([block("suppress.security")])      # AIGATE_ALLOW never applies to a BLOCK
 
 

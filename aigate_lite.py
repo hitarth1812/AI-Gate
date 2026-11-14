@@ -789,6 +789,9 @@ DEFAULT_CONFIG = {
                   "conftest.py", "*.test.*", "*.spec.*", "*_test.go", "*Test.java", "*Tests.java"],
         "sensitive": ["**/auth/**", "**/security/**", "**/payments/**", "**/billing/**", "**/crypto/**",
                       "**/migrations/**", "go.mod", "go.sum", "go.work", "go.work.sum"],
+        # 0.5.3 (A6): examples and docs are not security-sensitive; a PERSON's change there is not escalated even under auth/
+        # (an AI agent's change still is). `sensitive_exclude = []` turns this off.
+        "sensitive_exclude": ["examples/**", "**/examples/**", "docs/**", "**/docs/**"],
         "forbidden": [],
         "forbidden_for_agents": [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**",
                                  "lefthook.yml", "go.work", "go.work.sum"],
@@ -1332,6 +1335,10 @@ class Context:
 
     def sensitive(self, path) -> bool:
         return path_matches(path, self.cfg["paths"]["sensitive"])
+
+    def escalates_for_person(self, path) -> bool:
+        """Sensitive-path escalation applies to a person's change unless the path is in `sensitive_exclude`."""
+        return self.sensitive(path) and not path_matches(path, self.cfg["paths"].get("sensitive_exclude") or ())
 
     def code_changes(self, exts=None, tests=True):
         """Changed text files worth analysing (not deleted, binary, ignored or lockfiles)."""
@@ -2828,7 +2835,8 @@ def _provider_finding(fc, line_no, what, val, where, hashlib):
     f.human = None
     # 0.5.2 (A5): a ready allow entry for a key that is really a test fixture; the key itself is never printed
     fp = fingerprint_v2("secrets.hardcoded", fc.path, key)
-    f.hint = ("if this value is not a secret (a test fixture or an example), allow it on purpose in .aigate/lite.toml:\n"
+    f.hint = (f.meta.hint + "\n"                                  # the rotate advice stays; the allow snippet follows it
+              "if this value is not a secret (a test fixture or an example), allow it on purpose in .aigate/lite.toml:\n"
               "[[allow]]\n"
               'rule = "secrets.hardcoded"\n'
               f'path = "{fc.path}"\n'
@@ -5844,7 +5852,8 @@ def apply_policy(findings, ctx, env) -> list:
         if f.action == "off":
             continue
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
-        if f.sensitive and f.meta.escalate and not (f.person_flat and not ctx.agent):
+        stays_put = not ctx.agent and (f.person_flat or not ctx.escalates_for_person(f.path))      # persons only (A6)
+        if f.sensitive and f.meta.escalate and not stays_put:
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
         legacy_id = (f.rule, f.path, f.legacy_fingerprint)
         if f.action == "pass":
@@ -5938,6 +5947,17 @@ def _summary(res: Result, active, allowed, baselined, stage, sym, s) -> str:
             f" {dot} {res.stats['seconds']:.1f}s{stopped}")
 
 
+AGENT_ASK = "stop and ask the human: a person must add the allow entry"
+
+
+def shown_hint(res, f):
+    """The hint printed for a finding. An AI agent cannot allow a finding (its config is read from HEAD and .aigate/ is a
+    forbidden path for it), so it is never shown the [[allow]] route: for a key it is told to stop and ask the human."""
+    if res.provenance[0] == "agent" and f.rule == "secrets.hardcoded":
+        return f"{f.meta.hint} If this value is not a secret, {AGENT_ASK}."       # the rotate advice stays; no allow route
+    return f.hint
+
+
 def _block_advice(rule: str) -> str:
     """What to do about a BLOCK, by kind of rule (the `next:` line must be true for what actually blocks)."""
     if rule.startswith("secrets."):
@@ -5963,6 +5983,8 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
             if stage == "scan":
                 return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then " \
                        f"adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+            if res.provenance[0] == "agent":
+                return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above; if it is not a secret, {AGENT_ASK}{hidden}"
             return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
         # something other than a secret blocks: say what to do for that kind, never call it a secret
         advice = list(dict.fromkeys(_block_advice(r) for r in rules))
@@ -5970,6 +5992,9 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
         pointer = other[0] if len(other) == 1 else "<rule>"
         base = ", then adopt a baseline so only new findings count: aigate-lite baseline" \
             if stage == "scan" and not any(r.startswith(BASELINE_NEVER) for r in rules) else ""
+        if res.provenance[0] == "agent":              # an agent cannot allow a finding: never show it the route
+            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above ({'; '.join(advice)}){base}; if it is a " \
+                   f"false positive, {AGENT_ASK}: aigate-lite explain {pointer}{hidden}"
         return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above ({'; '.join(advice)}){base}; or allow " \
                f"{'it' if n == 1 else 'one'} with a reason via an [[allow]] entry in .aigate/lite.toml: " \
                f"aigate-lite explain {pointer}{hidden}"
@@ -6099,7 +6124,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             out.append(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {f.path}"
                        f"{f':{f.line}' if f.line else ''}")
             out.append(f"        {f.message}")
-            hint = f.hint if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
+            hint = shown_hint(res, f) if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
             for i, ln in enumerate((hint or "").splitlines()):
                 out.append(f"        {s('dim')}{sym['arrow'] + ' ' if i == 0 else '  '}{ln}{s('reset')}")
             if verbose:
@@ -6165,7 +6190,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             out.append(plain[:len(prefix)] + s(f.action) + plain[len(prefix):len(prefix) + 5] + s("reset")
                        + plain[len(prefix) + 5:])
             shown += 1
-            hint = (f.hint or f.meta.hint or "").splitlines()
+            hint = (shown_hint(res, f) or f.meta.hint or "").splitlines()
             # 0.5.2 (A5): a key's ready [[allow]] snippet is printed whole, once per file (other rules: one line, once per rule)
             key = (f.rule, f.path) if f.rule == "secrets.hardcoded" else f.rule
             if f.action in ("block", "fix") and hint and key not in hinted:
@@ -6235,7 +6260,7 @@ def render_agent(res: Result) -> str:
     quiet = [f for f in active if f.action == "warn"][:AGENT_CAPS[1]]
     out = [f"AIGATE verdict={res.verdict} risk={res.risk:g} exit={1 if res.verdict in ('fix', 'block') else 0}"]
     for f in loud + quiet:
-        hint = (f.hint or f.meta.hint or "").splitlines()
+        hint = (shown_hint(res, f) or f.meta.hint or "").splitlines()
         line = f"{f.action.upper()} {f.rule} {f.path}{f':{f.line}' if f.line else ''} {f.message}"
         out.append(to_ascii(" ".join((line + (f" | fix: {hint[0]}" if hint else "")).split())))
     if len(active) > len(loud) + len(quiet):
@@ -6254,7 +6279,7 @@ def report_json(res: Result, view=None) -> None:
         extra["truncated"] = len(res.findings) - len(shown)
     print(json.dumps({
         **extra,
-        "tool": "aigate-lite", "version": __version__, "schema": 1, "author": __author__, "url": __url__,
+        "tool": "aigate-lite", "version": __version__, "schema": 1, "schema_version": 1, "author": __author__, "url": __url__,
         "label": res.label,
         "tool_info": {"name": "aigate-lite", "version": __version__, "author": __author__, "license": __license__,
                       "url": __url__},
@@ -7829,7 +7854,7 @@ def review_report(res: Result) -> dict:
     if info.get("deps_removed") and not info.get("deps_added"):
         good.append("dependencies removed, none added: " + ", ".join(info["deps_removed"][:5]))
     return {
-        "tool": "aigate-lite", "version": __version__, "schema": REVIEW_SCHEMA, "author": __author__, "url": __url__,
+        "tool": "aigate-lite", "version": __version__, "schema": REVIEW_SCHEMA, "schema_version": REVIEW_SCHEMA, "author": __author__, "url": __url__,
         "kind": "review", "label": res.label,
         "provenance": {"kind": res.provenance[0], "source": res.provenance[1]}, "verdict": res.verdict, "risk": res.risk,
         "summary": {"files": res.stats.get("files", 0), "added": res.stats.get("added", 0),
@@ -8175,7 +8200,8 @@ def run_check(args, env, collect=False):
         for problem in cfg.problems:
             findings.append(make("gate.config_invalid", CONFIG_PATH, None, problem, key=problem))
         findings += version_findings(cfg)
-        fail_action = "block" if cfg["gate"].get("fail_closed", True) else "warn"
+        # an internal error is a block; `fail_closed = false` softens it for a person only: never a silent pass for an AI agent
+        fail_action = "block" if cfg["gate"].get("fail_closed", True) or provenance[0] == "agent" else "warn"
         for checker in CHECKERS:
             if head is not None and not full and checker.name in SECRET_CHECKERS:
                 continue                               # scanned commit by commit below

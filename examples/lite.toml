@@ -16,6 +16,7 @@ cache = false             # remember files the per-file checks found clean (same
 
 [paths]
 # sensitive = ["**/auth/**", "**/payments/**"]        # security rules and suppressions are one step stricter here
+# sensitive_exclude = ["examples/**", "**/examples/**", "docs/**", "**/docs/**"]   # default: a person's change there is not escalated (an AI agent's is); [] turns this off
 # forbidden = ["infra/prod/**"]                       # nobody may change these
 # forbidden_for_agents = [".aigate/**", ".github/workflows/**", ".pre-commit-config.yaml", ".husky/**"]
 # ignore = ["**/node_modules/**", "dist/**"]
