@@ -3918,13 +3918,37 @@ JS_IMPORT_RES = [re.compile(r"""\bfrom\s*(['"])([^'"\n]+)\1"""),
                  re.compile(r"""\brequire\s*\(\s*(['"])([^'"\n]+)\1\s*\)""")]
 
 
+def _open_quote_string(lx, n) -> bool:
+    """True when line n of a Lexed file has a '...' or "..." string that is still open at the end of the line. JS
+    strings of those two kinds cannot span lines, so the lexer misread something (an apostrophe in JSX text, a quote
+    inside a regex) and its string/code split on this line cannot be trusted."""
+    line = lx.line(n).rstrip("\r")
+    base, i = lx.starts[n - 1], 0
+    while i < len(line):
+        if lx.kinds[base + i] != STR:
+            i += 1
+            continue
+        j = i
+        while j < len(line) and lx.kinds[base + j] == STR:
+            j += 1
+        run = line[i:j]
+        if run[0] in "'\"":
+            body = run[:-1]
+            escaped = (len(body) - len(body.rstrip("\\"))) % 2 == 1          # the last quote is `\'`, not a close
+            if len(run) < 2 or run[-1] != run[0] or escaped:
+                return True
+        i = j
+    return False
+
+
 def js_specifiers(line: str, lx=None, n=0) -> list:
     """Module specifiers named on one line. With the file's Lexed view (`line` being its line `n`), only an import
     keyword that is code counts: `from "x"` inside a string literal or a comment is not an import."""
     s = line.strip()
     if s.startswith(("//", "*", "/*")) or re.match(r"^(?:import|export)\s+type\b", s):
         return []
-    if lx is not None and lx.line(n).rstrip("\r") != line.rstrip("\r"):      # CRLF files: the added line has no "\r"
+    if lx is not None and (lx.line(n).rstrip("\r") != line.rstrip("\r")     # CRLF files: the added line has no "\r"
+                           or _open_quote_string(lx, n)):                   # the lexer misread this line
         lx = None
     return [m.group(2) for rx in JS_IMPORT_RES for m in rx.finditer(line) if lx is None or lx.region(n, m) == CODE]
 

@@ -220,3 +220,24 @@ MISSING = 'def test_a(tmp_path):\n    from ghost_mod import app\n    assert app\
 def test_not_created_here_still_blocks(repo, name, path, text):
     found = py_findings(repo, path, text)
     assert [f[3] for f in found] == ["block"] * len(found) and len(found) >= 1
+
+
+# ---------------------------------------------------------------- 2b. a lexer misread must not hide a real import
+
+@pytest.mark.parametrize("path,text", [
+    ("src/a.js", "const a = <p>I'm ok</p>; const x = require(\"ghost-evil-pkg\");\n"),
+    ("src/a.jsx", "const a = <p>I'm ok</p>; const x = require(\"ghost-evil-pkg\");\n"),
+    ("src/a.jsx", "const a = <p>don't</p>; const x = require('ghost-evil-pkg');\n"),
+    ("src/a.js", "if (x) /'/.test(y); import z from \"ghost-evil-pkg\"\n"),
+    ("src/a.js", "if (x) /\"/.test(y); const m = await import('ghost-evil-pkg');\n"),
+    ("src/a.jsx", "const a = <p>I'm ok</p>; export * from \"ghost-evil-pkg\";\n"),
+])
+def test_unterminated_quote_on_the_line_does_not_hide_a_real_import(repo, path, text):
+    found = js_findings(repo, path, text)
+    assert [f[3] for f in found] == ["block"]
+
+
+def test_a_closed_string_next_to_a_misread_line_is_still_not_an_import(repo):
+    text = ("describe('res', function(){\n  it('should set location from \"Referer\" header', function(done){})\n})\n"
+            "const a = <p>I'm ok</p>;\n")
+    assert js_findings(repo, "src/a.jsx", text) == []
