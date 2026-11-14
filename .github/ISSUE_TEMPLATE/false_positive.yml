@@ -1,0 +1,43 @@
+name: False positive / missed detection
+description: A finding that is wrong for your code, or a mistake the gate should have reported
+labels: ["false-positive"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste a real secret, key or code you may not share: a fake value of the same shape is enough. See docs/FALSE_POSITIVES.md.
+  - type: input
+    id: rule
+    attributes:
+      label: Rule id
+      description: For example `secrets.generic`
+    validations:
+      required: true
+  - type: textarea
+    id: code
+    attributes:
+      label: Smallest code that shows it
+      description: A few lines, written by you, names and values changed.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: who
+    attributes:
+      label: Whose change
+      options: ["A person's change", "An AI agent's change", "Both"]
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and why
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version and command
+      description: "`aigate-lite --version` and the command you ran"
+    validations:
+      required: true

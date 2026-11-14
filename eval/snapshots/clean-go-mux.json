@@ -1,0 +1,14 @@
+{
+ "_meta": {
+  "case": "clean-go-mux",
+  "date": "2026-11-14",
+  "lookups": 0,
+  "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
+  "now": "2026-11-14T09:45:22+00:00",
+  "sha": "b4617d0b9670ad14039b2739167fd35a60f557c5",
+  "tool_version": "0.5.2"
+ },
+ "go": {},
+ "npm": {},
+ "pypi": {}
+}

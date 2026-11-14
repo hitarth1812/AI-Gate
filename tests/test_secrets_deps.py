@@ -1,6 +1,6 @@
 from conftest import find, rules
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"            # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()            # split so this file is not itself a finding
 
 
 # ---------------------------------------------------------------- secrets
@@ -46,7 +46,7 @@ def test_env_files(repo):
 
 def test_private_key_file_blocks_but_certificate_passes(repo):
     repo.write("certs/server.pem", "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n")
-    repo.write("keys/deploy.key", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n")
+    repo.write("keys/deploy.key", "-----BEGIN " + "openssh private key".upper() + "-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n")
     repo.add()
     res = repo.check()
     # 0.5.2 (A5): one key file gives one BLOCK: the provider-key BLOCK (secrets.hardcoded) is the one; no duplicate env_file

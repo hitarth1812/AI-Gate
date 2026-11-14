@@ -11,7 +11,7 @@ version = 1
 # (eval/run.py fills them in at run time).
 [paths]
 ignore = ["**/node_modules/**", "**/vendor/**", "**/third_party/**", "dist/**", "build/**", "**/.venv/**", "**/venv/**",
-          "*.min.js", "*.min.css", "*.map", ".aigate/aigate_lite.py", "eval/corpus/**", "eval/holdout/**", "eval/tools/**"]
+          "*.min.js", "*.min.css", "*.map", ".aigate/aigate_lite.py", "eval/corpus/**", "eval/holdout/**", "eval/tools/**", "eval/snapshots/**"]
 
 # ---- aigate_lite.py: the detector's own text and deliberate design choices
 

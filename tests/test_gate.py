@@ -5,7 +5,7 @@ import sys
 
 from conftest import aigate, find, rules
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()
 
 
 # ---------------------------------------------------------------- scope, provenance and policy

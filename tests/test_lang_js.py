@@ -5,7 +5,7 @@ import json
 
 from conftest import find
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 
 
 def stage(repo, before, after, *args):

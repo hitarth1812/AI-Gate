@@ -11,7 +11,7 @@ BEGIN = "-----BEGIN " + "PRIVATE KEY-----"
 END = "-----END " + "PRIVATE KEY-----"
 EC_BEGIN = "-----BEGIN " + "EC PRIVATE KEY-----"
 SECRET = "k3J9xQ2m" + "Zp8Lw4Rt"                  # high entropy, not provider-shaped
-AWS = "AKIA" + "QWERTYUIOPASDFGH"
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()
 NOLINT = "//no" + "lint"
 TODO = "TO" + "DO"
 

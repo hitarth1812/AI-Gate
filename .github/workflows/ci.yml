@@ -58,3 +58,32 @@ jobs:
           name: bench-${{ matrix.os }}
           path: bench-smoke.json
           if-no-files-found: ignore
+
+  perf-budget:
+    name: performance budget (hook scenarios vs the base branch)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Fetch the base branch
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: git fetch --no-tags origin "$BASE_REF:refs/remotes/origin/$BASE_REF"
+      - name: Budget (a timed row fails when its median AND p95 are both more than 20% slower than the base branch)
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: python bench/bench.py --against "origin/$BASE_REF" --pairs 40 --budget 20 --json bench-budget.json
+      - name: Upload the comparison
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-budget
+          path: bench-budget.json
+          if-no-files-found: ignore

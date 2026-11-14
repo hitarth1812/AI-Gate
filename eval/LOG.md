@@ -63,3 +63,42 @@ Findings and mistakes along the way (so nothing is silent):
   (`Math.random() < sessionSampleRate`); an agent cannot complete the `[[allow]]` route the new next-line text names (its config
   is read from HEAD): a person has to add the entry.
 - Triage slip: one triage agent ran `eval/run.py --case` on a holdout id (it printed totals only); it says it did not use the output.
+
+## Round 2 (2026-11-14)
+
+Scoreboard from `py eval/run.py --update-ratchet` (same command before and after; before = origin/main `cfb08d7`):
+
+| | before | after |
+|---|---|---|
+| training cases (person and agent runs each) | 210 | 210 |
+| false BLOCK on clean repositories | 7 | 0 |
+| failures against labels (missed / false positive / strict / lax) | 10 / 13 / 0 / 0 | 0 / 0 / 0 / 0 |
+| unexpected BLOCK, crashes, gate.error, agent softer | 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 |
+| holdout cases | 42 | 57 (21 % of 267) |
+| holdout failures | missed 4, false positive 1, too strict 1 | missed 8, too strict 1 |
+| ratchet: known failing | 30 | 0 (holdout 9) |
+
+The training failures are zero because the fixers worked on exactly those cases. The holdout is the honest number: it grew by
+15 seeded cases nobody has fixed against, and 9 of its 57 fail (details in `eval/.holdout_detail.json`, not for fixers).
+
+What changed, in order: A6 as a person-only `sensitive_exclude`; clean-repo key cases scored with an allow entry (A5); dated registry
+snapshots for the 13 clean repositories (decision C); the agent is no longer shown the `[[allow]]` route; `gate.error` blocks for an
+agent; `schema_version`; the 13 `secrets.generic`/`weak_crypto` person-only softenings; split/joined provider keys in Python, an
+aliased skip, `eval` through builtins; and three `deps.hallucinated` false BLOCKs that only the snapshots made visible
+(`annotationlib` is Python 3.14 stdlib, a `from "Referer"` inside a JS test title, modules a test writes to a temp dir and imports).
+
+Rejected or revised attempts (so nothing is silent):
+- Round 1 Go data-skip fixer: rejected twice (a message heuristic over-softens); dropped, see LABEL_CHANGES F.
+- FP fixer first attempt (`e97ac3c`) rejected by its verifier (path-id and concatenation softening applied to non-test source); the retry
+  gates both on test files. The verifier then found one remaining overreach (a mock-file `Math.random` under `auth/` went fix to pass for
+  a person); narrowed in `24e85ff`: a sensitive path keeps its floor.
+- Evasion fixer first attempt rejected by its verifier (quadratic time on a long one-line list with a gate line: 105 s for 60,000
+  constants); fixed (0.96 s) in the next commit.
+- Deps fixer: verifier accepted, and found a narrow hole (a made-up package on the same line as misread JSX text passed); closed in
+  a further commit. Remaining, known: the key fold is Python only (JavaScript, TypeScript and Go are not folded); an agent can excuse a
+  made-up import in a test file by creating the module in the same function (by design, test files only).
+- My own mistakes: the self-scan failed after integration (a docstring example and a test fixture spelled a literal); fixed in `7dcb67b`.
+  The first full eval after integration showed the three clean-repo false BLOCKs above instead of hiding them behind an update of the ratchet
+  (the ratchet refused, as designed).
+- Fixers had to rewrite 18 test files' fake-key construction (`"AKIA" + "..."` became a call) because the new fold sees the literal; no
+  assertion changed (verifier read every file).

@@ -1,3 +1,4 @@
 # Pinned development tools for the tool's own CI (the tool itself has no dependencies).
 pytest==9.1.1
 pyflakes==3.4.0
+hypothesis==6.170.15   # fuzz tests only (tests/test_fuzz.py); the tool itself has no dependencies

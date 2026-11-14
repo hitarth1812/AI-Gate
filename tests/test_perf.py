@@ -130,9 +130,23 @@ def test_environment_scan_matches_importlib_metadata():
         repo = type("R", (), {"root": os.devnull})()
     names, mapping = aigate.python_environment(Ctx())
     expected = importlib.metadata.packages_distributions()
+    expected.pop("__pycache__", None)      # not a module: Python 3.11's list leaves it out, 3.12+ keeps it; the scan never reports it
     assert names == set(expected)
     for top, dists in expected.items():
         assert {d for d in dists if d} == mapping[top], top
+
+
+def test_a_pycache_entry_in_a_record_is_not_an_importable_name():
+    """A distribution that installs a single-file module lists `__pycache__/x.cpython-311.pyc` at the top of its RECORD (pip
+    compiles it); that directory is not an import name."""
+    from conftest import aigate
+
+    class Dist:
+        files = None
+
+        def read_text(self, name):
+            return {"RECORD": "onefile.py,sha256=x,1\n__pycache__/onefile.cpython-311.pyc,,\npkg/__init__.py,,\n"}.get(name)
+    assert aigate._dist_tops(Dist()) == {"onefile", "pkg"}
 
 
 def test_env_check_runs_one_git_process_however_many_env_files(repo):

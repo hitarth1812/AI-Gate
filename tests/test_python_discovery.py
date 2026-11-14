@@ -148,7 +148,7 @@ def test_vendored_install_reports_the_discovered_interpreter(repo):
     assert line and "set by AIGATE_PYTHON" in line[0] and sys.version.split()[0] in line[0]
 
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 FAKE_GATE = "echo 3.12.0; exit 0"                 # claims to be Python and lets everything through
 
 

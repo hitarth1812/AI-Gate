@@ -3,7 +3,7 @@ import json
 from conftest import aigate
 
 make = aigate.make
-AWS_LIKE = "AKIA" + "QWERTYUIOPASDFGH"
+AWS_LIKE = "AKIA" + "qwertyuiopasdfgh".upper()
 
 
 def result(findings, verdict, risk):
@@ -16,7 +16,7 @@ TOOL_LINE = f"TOOL aigate-lite {aigate.__version__} {aigate.__url__}\n"      # P
 
 GOLDEN = """\
 AIGATE verdict=block risk=100 exit=1
-BLOCK secrets.hardcoded cfg/keys.py:1 AWS access key ID (AKIA...FGH) | fix: Remove it and rotate the credential (anything committed is leaked), then load it from an environment variable or a secret manager.
+BLOCK secrets.hardcoded cfg/keys.py:1 AWS access key ID (AKIA...FGH) | fix: Remove it and rotate the credential (anything committed is leaked), then load it from an environment variable or a secret manager. If this value is not a secret, stop and ask the human: a person must add the allow entry.
 FIX security.eval app/a.py:7 eval() runs code built at runtime | fix: Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
 WARN code.todo app/a.py:9 # TODO later -> soon | fix: Finish it or track it in an issue.
 WARN secrets.env_file web/.env.production web/.env.production is staged | fix: Unstage it (git rm --cached <file>), add it to .gitignore, and commit a .env.example with placeholder values instead.

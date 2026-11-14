@@ -8,7 +8,7 @@ import pytest
 
 from conftest import SCRIPT, aigate, find
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 SH = shutil.which("sh")
 needs_sh = pytest.mark.skipif(SH is None, reason="no POSIX sh on this machine")
 

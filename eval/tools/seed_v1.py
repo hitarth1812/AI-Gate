@@ -40,9 +40,10 @@ def line_of(text: str, needle: str) -> int:
 
 
 def emit(id, family, language, origin, before, after, fire=(), notfire=(), who="both", messages=(), mode="staged",
-         status="frozen", contested=False, extra="", note="", delete=(), renames=()):
-    """fire: (rule, path, needle|None, action|None, agent_action|None); notfire: (rule, path)."""
-    d = (HOLDOUT if holdout_of(id) else CORPUS) / id
+         status="frozen", contested=False, extra="", note="", delete=(), renames=(), force_holdout=False):
+    """fire: (rule, path, needle|None, action|None, agent_action|None, tol); notfire: (rule, path).
+    force_holdout puts the case in eval/holdout/ whatever the hash says (seed_v2 uses it to raise the holdout to 20%)."""
+    d = (HOLDOUT if (force_holdout or holdout_of(id)) else CORPUS) / id
     if d.exists():
         shutil.rmtree(d)
     d.mkdir(parents=True)

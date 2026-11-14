@@ -1,0 +1,51 @@
+{
+ "_meta": {
+  "case": "clean-go-chi",
+  "date": "2026-11-14",
+  "lookups": 7,
+  "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
+  "now": "2026-11-14T09:45:22+00:00",
+  "sha": "67be7d9cafdaeb4e04e887ff78d09e030ee43b00",
+  "tool_version": "0.5.2"
+ },
+ "go": {
+  "github.com/go-chi/docgen": {
+   "created": "2017-07-06T22:10:52Z",
+   "deprecated": null,
+   "latest": "v1.4.0",
+   "versions": {
+    "v1.0.0": null,
+    "v1.0.1": null,
+    "v1.0.2": null,
+    "v1.0.3": null,
+    "v1.0.4": null,
+    "v1.0.5": null,
+    "v1.1.0": null,
+    "v1.2.0": "2021-03-25T12:15:23Z",
+    "v1.3.0": null,
+    "v1.4.0": null
+   },
+   "vulns": {
+    "v1.2.0": []
+   },
+   "yanked": []
+  },
+  "github.com/go-chi/render": {
+   "created": "2017-07-06T22:11:03Z",
+   "deprecated": null,
+   "latest": "v1.0.3",
+   "versions": {
+    "v1.0.0": null,
+    "v1.0.1": "2018-05-31T15:06:17Z",
+    "v1.0.2": null,
+    "v1.0.3": null
+   },
+   "vulns": {
+    "v1.0.1": []
+   },
+   "yanked": []
+  }
+ },
+ "npm": {},
+ "pypi": {}
+}

@@ -12,7 +12,7 @@ from conftest import ROOT, aigate, project_files
 from test_review_api import base, change
 from test_review_rest import review
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()
 AUTHOR = "Hitarth Khatiwala"
 URL = "https://github.com/hitarth1812/AI-Gate"
 TOOL = f"TOOL aigate-lite {aigate.__version__} {URL}"
@@ -122,13 +122,13 @@ def test_review_markdown_ends_with_a_reviewed_by_line(repo):
 
 # ------------------------------------------------------------------------------------------------ JSON: additive only
 
-CHECK_KEYS = {"tool": str, "version": str, "schema": int, "label": str, "tool_info": dict, "provenance": dict,
+CHECK_KEYS = {"tool": str, "version": str, "schema": int, "schema_version": int, "label": str, "tool_info": dict, "provenance": dict,
               "config": str, "verdict": str, "escalated": bool, "risk": (int, float), "exit_code": int, "stats": dict,
               "notes": list, "findings": list}
 FINDING_KEYS = {"rule": str, "action": str, "severity": str, "confidence": float, "path": str, "line": (int, type(None)),
                 "message": str, "hint": str, "fingerprint": str, "legacy_fingerprint": str, "sensitive_path": bool,
                 "allowed": (str, type(None))}
-REVIEW_KEYS = {"tool": str, "version": str, "schema": int, "kind": str, "label": str, "provenance": dict, "verdict": str,
+REVIEW_KEYS = {"tool": str, "version": str, "schema": int, "schema_version": int, "kind": str, "label": str, "provenance": dict, "verdict": str,
                "risk": (int, float), "summary": dict, "must_fix": list, "should_check": list, "looks_good": list,
                "allowed": int, "notes": list}
 

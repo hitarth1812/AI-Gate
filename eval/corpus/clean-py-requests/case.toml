@@ -8,3 +8,9 @@ label_status = "frozen"
 repo = "https://github.com/psf/requests"
 sha = "0e322af87745eff34caffe4df68456ebc20d9068"
 note = "a popular, well-maintained project: a person must see 0 BLOCK"
+
+# decided (LABEL_CHANGES A5): committed TLS test keys are BLOCK until allowed; scored with the entry a person would add
+[[allow]]
+rule = "secrets.hardcoded"
+path = "tests/certs/**"
+reason = "throwaway private keys used by the TLS tests (test fixtures)"

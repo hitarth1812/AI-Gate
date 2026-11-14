@@ -1,0 +1,14 @@
+id = "seed2-ts-eval-added"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.eval"
+path = "src/run.ts"
+line = 1
+action = "fix"
+agent_action = "fix"

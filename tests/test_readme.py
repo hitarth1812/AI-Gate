@@ -50,3 +50,11 @@ def test_troubleshooting_names_the_common_problems():
     for want in ("command not found", "py -m aigate_lite", "needs Python 3.11+", "SSLKEYLOGFILE", "HTTPS_PROXY",
                  "--offline", "husky", "pre-commit framework", "AIGATE_CACHE_DIR"):
         assert want in part, want
+
+
+def test_the_measured_accuracy_section_is_generated_from_the_scoreboard():
+    import subprocess
+    import sys
+    proc = subprocess.run([sys.executable, str(ROOT / "scripts" / "gen_accuracy.py"), "--check"], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "## Measured accuracy" in README and "scripts/gen_accuracy.py" in README

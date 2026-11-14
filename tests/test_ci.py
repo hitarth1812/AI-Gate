@@ -4,7 +4,7 @@ from pathlib import Path
 
 from conftest import ROOT
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 
 
 def assert_minimal_sarif(doc):
