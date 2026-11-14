@@ -3176,6 +3176,10 @@ def check_paths(ctx) -> list:
 
 # --------------------------------------------------------------------------- dependency data
 
+# Top-level standard library modules that a Python 3.11-3.14 project may import but the running interpreter's
+# sys.stdlib_module_names lacks (3.12 added none; 3.13 added the private interpreter modules; 3.14 added the rest).
+NEWER_STDLIB = frozenset({"annotationlib", "compression", "_interpreters", "_interpchannels", "_interpqueues", "_zstd"})
+
 REMOVED_STDLIB = {
     "distutils": ((3, 12), "setuptools, sysconfig or shutil"), "imp": ((3, 12), "importlib"),
     "asynchat": ((3, 12), "asyncio"), "asyncore": ((3, 12), "asyncio"), "smtpd": ((3, 12), "aiosmtpd"),
@@ -3817,7 +3821,7 @@ def python_imports(ctx):
     files = list(ctx.code_changes(PY_EXTS))
     if not files:
         return findings, candidates
-    stdlib = set(sys.stdlib_module_names) | {"__future__"}
+    stdlib = set(sys.stdlib_module_names) | {"__future__"} | NEWER_STDLIB
     dcfg = ctx.cfg["deps"]
     new_imports = []                      # (fc, imports added by this change)
     for fc in files:
