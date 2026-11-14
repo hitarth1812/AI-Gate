@@ -2717,7 +2717,7 @@ GENERIC_UNQUOTED = re.compile(
     r"(?P<val>[^\s'\"#$]{8,200})\s*$")
 JWT_RE = re.compile(r"\b(eyJ[A-Za-z0-9_\-]{10,}\.eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]{10,})")
 CONN_RE = re.compile(r"\b(?:postgres(?:ql)?|mysql|mariadb|mongodb(?:\+srv)?|rediss?|amqps?|mssql|sqlserver)://"
-                     r"[^\s:/@'\"]*:(?P<val>[^\s@'\"/]{3,})@(?P<host>[^\s/'\":?]+)")
+                     r"(?P<user>[^\s:/@'\"]*):(?P<val>[^\s@'\"/]{3,})@(?P<host>[^\s/'\":?]+)")
 PLACEHOLDER_VALUE = re.compile(
     r"(?i)your[_-]|xxx|\*\*\*|example|change[_-]?me|placeholder|dummy|sample|fake|mock|redacted|replace[_-]?me|"
     r"insert[_-]|todo|tbd|<|>|\$\{|\{\{|%\(|%s|process\.env|os\.environ|getenv|"
@@ -2753,11 +2753,31 @@ def _looks_like_secret(name: str, val: str) -> bool:
     return entropy(val) >= 3.0
 
 
-def _soft_value(val, docs) -> str | None:
+WORDS_VALUE = re.compile(r"[a-z]+(?:[_-][a-z]+){2,}")                   # a-strong-dev-password, definitely-not-a-token
+SHORT_ID_VALUE = re.compile(r"[a-z]{3,}(?:-[a-z]+)*-\d{1,3}")             # challenge-1: a test id, not a secret
+PATH_ID_VALUE = re.compile(r"[a-z][a-z_-]*(?:/[a-z][a-z_-]*)+")           # atlas/jwt-signing-keys: the name of a secret
+CONCAT_PREFIX = re.compile(r"[a-z][a-z0-9]*(?:[_-][a-z0-9]+)*[_-]")       # "uac-token-" (in `"uac-token-" + unique("t")`)
+CALL_AFTER = re.compile(r"\s*\+\s*[A-Za-z_][\w.]*\s*\(")
+CI_PATH = re.compile(r"(?i)(?:^|/)(?:\.github/workflows|\.circleci|\.buildkite)/|"
+                     r"(?:^|/)(?:\.gitlab-ci|\.travis|azure-pipelines|bitbucket-pipelines)[^/]*\.ya?ml$|(?:^|/)jenkinsfile$")
+
+
+def _soft_value(val, docs, test=False, rest="", json_key=False) -> str | None:
     """"pass" (information only) for people when a credential-named value is an identifier label such as `reset_password`
     or, in documentation, a `dev-...` placeholder. An AI agent's change keeps the finding: a passphrase of lowercase words
-    looks the same as a label."""
+    looks the same as a label. Also: the path-shaped name of a secret (`atlas/jwt-signing-keys`), a prefix literal that is
+    concatenated with a call (`"uac-token-" + unique("t")`, `rest` is the text after the literal), and, in documentation or
+    a test, a value that is only lowercase words (`a-strong-dev-password`; in a test only as a JSON key's value, never
+    `cfg.Secret = "a-sufficiently-long-secret"`) or, in a test, a word and a number (`challenge-1`)."""
     if len(val) <= 40 and LABEL_VALUE.fullmatch(val):
+        return "pass"
+    if len(val) <= 60 and PATH_ID_VALUE.fullmatch(val):
+        return "pass"
+    if len(val) <= 40 and CONCAT_PREFIX.fullmatch(val) and CALL_AFTER.match(rest):
+        return "pass"
+    if (docs or (test and json_key)) and len(val) <= 40 and WORDS_VALUE.fullmatch(val):
+        return "pass"
+    if test and len(val) <= 40 and SHORT_ID_VALUE.fullmatch(val):
         return "pass"
     return "pass" if docs and DOC_DEV_VALUE.match(val) else None
 
@@ -2878,7 +2898,8 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         if _looks_like_secret(m.group("name"), m.group("val")):
             val = m.group("val")
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
-                _soft_value(val, docs) or fixture())
+                _soft_value(val, docs, soft is not None, text[m.end():],
+                            bool(re.match(r"['\"]\s*:", text[m.end("name"):]))) or fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
@@ -2890,9 +2911,13 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         val, host = m.group("val"), m.group("host").lower()
         if val.lower() not in DEFAULT_PASSWORDS and not PLACEHOLDER_VALUE.search(val):
             local = host in LOCAL_HOSTS or host.endswith(".local")
-            # a localhost connection string in documentation is an example: information only, for people
+            # a localhost connection string in documentation is an example: information only, for people. So is a
+            # throwaway `user:user` one for localhost in CI config, or for an address (a `%s`) in a test
+            throwaway = val.lower() == m.group("user").lower()
+            info = (local and docs) or (throwaway and ((local and CI_PATH.search(fc.path))
+                                                       or (host.startswith("%") and soft is not None)))
             add("secrets.generic", val, f"password in a connection string for {host}", "warn" if local else soft,
-                "pass" if local and docs else fixture())
+                "pass" if info else fixture())
     return found
 
 
@@ -5076,6 +5101,8 @@ def _code_lines_file(ctx, fc) -> list:
             if f.human is None and test and not WEAK_RANDOM.search(text):   # a hash of a test input: a person's warning, even under auth/
                 f.human = "warn"
                 f.person_flat = True
+            if f.human is None and WEAK_RANDOM.search(text) and person_test_context(fc.path):
+                f.human = "pass"                       # a mock secret in an e2e / mock file: people only
             out.append(f)
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
