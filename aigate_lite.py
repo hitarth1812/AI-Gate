@@ -3876,11 +3876,15 @@ JS_IMPORT_RES = [re.compile(r"""\bfrom\s*(['"])([^'"\n]+)\1"""),
                  re.compile(r"""\brequire\s*\(\s*(['"])([^'"\n]+)\1\s*\)""")]
 
 
-def js_specifiers(line: str) -> list:
+def js_specifiers(line: str, lx=None, n=0) -> list:
+    """Module specifiers named on one line. With the file's Lexed view (`line` being its line `n`), only an import
+    keyword that is code counts: `from "x"` inside a string literal or a comment is not an import."""
     s = line.strip()
     if s.startswith(("//", "*", "/*")) or re.match(r"^(?:import|export)\s+type\b", s):
         return []
-    return [m.group(2) for rx in JS_IMPORT_RES for m in rx.finditer(line)]
+    if lx is not None and lx.line(n).rstrip("\r") != line.rstrip("\r"):      # CRLF files: the added line has no "\r"
+        lx = None
+    return [m.group(2) for rx in JS_IMPORT_RES for m in rx.finditer(line) if lx is None or lx.region(n, m) == CODE]
 
 
 def js_package(spec: str):
@@ -3949,15 +3953,17 @@ def js_imports(ctx):
         return findings, candidates                 # no package.json: nothing to compare against
     for fc in files:
         old = ctx.old_text(fc) or ""
-        old_specs = {s for ln in old.splitlines() for s in js_specifiers(ln)}
+        old_lx = ctx.lexed(fc, "old") if old else None
+        old_specs = {s for n, ln in enumerate(old.split("\n"), 1) for s in js_specifiers(ln, old_lx, n)}
         dirs = fc.path.split("/")[:-1]
         ancestors = ["/".join(dirs[:i]) for i in range(len(dirs), -1, -1)]
         declared = set().union(*(manifests.get(a, set()) for a in ancestors))
         if not any(a in manifests for a in ancestors):
             continue
         seen = set()
+        lx = ctx.lexed(fc)
         for line, text in fc.added.items():
-            for spec in js_specifiers(text):
+            for spec in js_specifiers(text, lx, line):
                 pkg = js_package(spec)
                 if not pkg or spec in old_specs or pkg in seen or (deno and not spec.startswith("npm:")):
                     continue
