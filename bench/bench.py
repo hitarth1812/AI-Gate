@@ -544,7 +544,10 @@ def _measure_against(old, new, pairs, py, repos, env, out) -> dict:
     return out
 
 
-def against_gates(res) -> list:
+def against_gates(res, budget=None) -> list:
+    """Failures of an interleaved old/new comparison. Strict gates by default (+5% for startup and A, +15% for the other timed
+    scenarios); with `budget` (a percentage, used by CI on shared runners) every timed row fails only when BOTH its median and
+    its p95 are more than `budget` percent slower. The hard git-call and blob counters apply in both modes."""
     fails = []
     for name, row in res.items():
         o, n = row["old"], row["new"]
@@ -553,7 +556,10 @@ def against_gates(res) -> list:
             continue                                   # informational: not how hooks start the gate
         if name in INFO_SCENARIOS:
             continue                                   # new in 0.3.0: recorded, no target
-        if name in ("startup", "A"):
+        if budget is not None:
+            if med > budget / 100 and p95 > budget / 100:
+                fails.append(f"{name}: median {med * 100:+.1f}% / p95 {p95 * 100:+.1f}% (budget +{budget:g}% for both)")
+        elif name in ("startup", "A"):
             if med > 0.05:
                 fails.append(f"{name}: median {o['median_ms']} -> {n['median_ms']} ms ({med * 100:+.1f}%, limit +5%)")
         elif name in SCENARIOS:
@@ -621,7 +627,7 @@ def run_against(args) -> int:
         for attempt in (1, 2):
             n = pairs * attempt
             res = measure_against(old, new, n, args.python)
-            fails = against_gates(res)
+            fails = against_gates(res, args.budget)
             attempts.append({"pairs": n, "results": res, "failures": fails})
             print(f"\nattempt {attempt} ({n} pairs):")
             print(against_table(res, args.against))
@@ -660,6 +666,8 @@ def main(argv=None) -> int:
     p.add_argument("--markdown", metavar="FILE", help="write a Markdown report (e.g. docs/PERF.md)")
     p.add_argument("--against", metavar="REF", help="interleave runs of the git ref REF with this tree and apply the gates")
     p.add_argument("--pairs", type=int, default=40, help="with --against: pairs per row (at least 40)")
+    p.add_argument("--budget", type=float, metavar="PCT", help="with --against: fail a timed row only when its median AND p95 are "
+                   "more than PCT percent slower (CI uses 20); the default gates are the strict 0.5.x ones")
     args = p.parse_args(argv)
     if args.rebuild:
         build_fixtures(force=True)
