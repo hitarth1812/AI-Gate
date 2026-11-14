@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased: round 2 (version number to be chosen by the maintainer)
+
+### Changed (behaviour you will notice)
+- New `[paths] sensitive_exclude` (default `examples/**`, `docs/**`): a person's finding there is not escalated by the
+  sensitive-path rule, even under `auth/`. An AI agent's finding is still escalated. Set `sensitive_exclude = []` to turn it off.
+- An AI agent is no longer shown the `[[allow]]` route (its configuration is read from HEAD, so it cannot add the entry). For a
+  BLOCK on a key and for the `next:` line of any other BLOCK it is told to stop and ask the human: a person must add the allow
+  entry. The text a person sees is unchanged.
+- A `gate.error` finding (a check that failed internally) is a BLOCK for an AI agent whatever `[gate] fail_closed` says. The
+  setting still softens it to a warning for a person.
+- A person is told, not stopped, for these false positives, all measured on labelled cases: a `user:user` localhost DSN in CI
+  config, a `user:user` DSN built with `%s` in a test, a path-shaped secret name in a test, a prefix literal joined to a call in a
+  test, a value made only of lowercase words (documentation, or a JSON key's value in a test), a word-and-number test id, and
+  `Math.random()` in an e2e or mock file outside sensitive paths. An AI agent's result is unchanged; the same shapes with a real
+  secret still warn or block for everyone.
+
+### Added
+- Python: a provider key written as `"AKIA" + "..."`, `"".join([...])`, a constant-only f-string or adjacent string literals is
+  folded and checked like a plain literal (JavaScript, TypeScript and Go are not covered yet).
+- `tests.skip_added` follows a skip mark kept in a name (`later = pytest.mark.skip(...)`, `from pytest import mark as m`) and
+  reports it at the alias; `security.eval` sees `__builtins__['eval']`, `builtins.eval` and `getattr(builtins, 'eval')`.
+- `schema_version` in `--format json` output (same value as `schema`); exit codes, JSON keys, rule-id stability, SemVer and the
+  deprecation policy are written down in `docs/CONTRACT.md` and tested.
+- `bench/bench.py --budget PCT`, used by the pull-request performance job in CI; property tests for the parsers
+  (`tests/test_fuzz.py`, needs the dev-only `hypothesis`); issue and pull-request templates, `CONTRIBUTING.md`,
+  `docs/FALSE_POSITIVES.md`.
+- The README accuracy section is generated from `eval/scoreboard.json` by `scripts/gen_accuracy.py`.
+
 ## 0.5.2 — unreleased: evaluation harness and round-1 fixes
 
 ### Changed (behaviour you will notice)
