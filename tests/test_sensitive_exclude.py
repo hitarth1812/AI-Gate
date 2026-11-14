@@ -5,7 +5,7 @@ import pytest
 
 from conftest import find
 
-COVERAGE_IGNORE = "/* istanbul ignore next */\nfunction handler() { return 1; }\n"
+COVERAGE_IGNORE = "/* istanbul " + "ignore next */\nfunction handler() { return 1; }\n"
 
 
 def stage(repo, path):
