@@ -13,8 +13,6 @@ line = 1
 action = "block"
 agent_action = "block"
 
-[[must_fire]]
+[[must_not_fire]]
 rule = "secrets.env_file"
 path = "keys/server.pem"
-action = "block"
-agent_action = "block"

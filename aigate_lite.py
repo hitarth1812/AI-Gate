@@ -2803,6 +2803,47 @@ def person_test_context(path) -> bool:
     return hit_
 
 
+def provider_findings(ctx, fc, line_no, text, where, seen) -> list:
+    """The provider-key and private-key patterns on one line (no value or name heuristics)."""
+    import hashlib
+    out = []
+    for label, rx in PROVIDER_SECRETS if PROVIDER_LITERALS.search(text) else ():
+        for m in rx.finditer(text):
+            val = m.group(1)
+            if val in seen:
+                continue
+            if label == "Private key":
+                if DOC_PATH.search(fc.path) or _pem_body(fc, line_no, text[m.end():]):   # docs: a pasted header counts
+                    seen.add(val)
+                    out.append(_provider_finding(fc, line_no, "private key block", val, where, hashlib))
+            elif not DOC_PLACEHOLDER.search(val):
+                seen.add(val)
+                out.append(_provider_finding(fc, line_no, f"{label} ({redact(val)})", val, where, hashlib))
+    return out
+
+
+def _provider_finding(fc, line_no, what, val, where, hashlib):
+    key = hashlib.sha1(val.encode("utf-8", "replace")).hexdigest()
+    f = make("secrets.hardcoded", fc.path, line_no, f"{what}{where}", key=key)
+    f.human = None
+    # 0.5.2 (A5): a ready allow entry for a key that is really a test fixture; the key itself is never printed
+    fp = fingerprint_v2("secrets.hardcoded", fc.path, key)
+    f.hint = ("if this value is not a secret (a test fixture or an example), allow it on purpose in .aigate/lite.toml:\n"
+              "[[allow]]\n"
+              'rule = "secrets.hardcoded"\n'
+              f'path = "{fc.path}"\n'
+              f'fingerprint = "{fp}"\n'
+              'reason = "<why this is not a secret>"')
+    return f
+
+
+def _one_block_per_key_file(findings) -> list:
+    """0.5.2 (A5): a key file gives one BLOCK. When secrets.hardcoded already fires on a path, the secrets.env_file finding for that
+    same path (\"private key file\") is dropped; the provider-key BLOCK names the same file and the same fix."""
+    keyed = {f.path for f in findings if f.rule == "secrets.hardcoded"}
+    return [f for f in findings if not (f.rule == "secrets.env_file" and f.path in keyed)]
+
+
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
     import hashlib
@@ -2817,14 +2858,7 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         f.human = human
         found.append(f)
 
-    for label, rx in PROVIDER_SECRETS if PROVIDER_LITERALS.search(text) else ():
-        for m in rx.finditer(text):
-            val = m.group(1)
-            if label == "Private key":
-                if DOC_PATH.search(fc.path) or _pem_body(fc, line_no, text[m.end():]):   # docs: a pasted header counts
-                    add("secrets.hardcoded", val, "private key block")
-            elif not DOC_PLACEHOLDER.search(val):
-                add("secrets.hardcoded", val, f"{label} ({redact(val)})")
+    found.extend(provider_findings(ctx, fc, line_no, text, where, seen=seen))
     lname = fc.name.lower()
     if found or ctx.ignored(fc.path) or is_lockfile(fc.path) or lname == ".env" or lname.startswith(".env."):
         return found                                              # env files are judged as a whole by secrets.env_file
@@ -2868,6 +2902,10 @@ def _secrets_file(ctx, fc, where) -> list:
     for line_no, text in fc.added.items():
         if len(text) <= 4000:
             out.extend(secret_findings(ctx, fc, line_no, text, where))
+        else:
+            # a line this long is not judged by the value and name patterns (too slow on minified code), but a provider
+            # key is still found: the provider patterns are bounded and anchored (0.5.2, D1)
+            out.extend(provider_findings(ctx, fc, line_no, text, where, seen=set()))
     return out
 
 
@@ -4881,6 +4919,17 @@ def _refine_suppression(rule, fc, text, m, f) -> None:
     elif rule == "suppress.coverage":
         if SUPPRESS_REASON.search(rest) or re.match(r"\s*[:\-—]\s*\S.{2,}", rest):
             f.human = "warn"
+    elif rule == "suppress.security" and fc.ext == ".go" and "gosec" in m.group(0):
+        # decided by the human (0.5.2, A1): a justified //nolint:gosec, a reason of at least 4 words that is not a bare
+        # "false positive", "ok", "ignore" or "intentional", is a fix for a person. person_flat keeps a sensitive-path
+        # escalation from turning that fix back into a block. An agent keeps the block.
+        reason = re.sub(r"^[\s/#\-—:]+", "", rest).strip().rstrip(".").strip()
+        if len(reason.split()) >= 4 and reason.lower() not in BARE_NOLINT_REASONS:
+            f.human = "fix"
+            f.person_flat = True
+
+
+BARE_NOLINT_REASONS = {"false positive", "ok", "ignore", "intentional"}
 
 
 def _suppressions_file(ctx, fc) -> list:
@@ -6117,10 +6166,13 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                        + plain[len(prefix) + 5:])
             shown += 1
             hint = (f.hint or f.meta.hint or "").splitlines()
-            if f.action in ("block", "fix") and hint and f.rule not in hinted:
-                hinted.add(f.rule)
-                out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
-                           f"{s('reset')}")
+            # 0.5.2 (A5): a key's ready [[allow]] snippet is printed whole, once per file (other rules: one line, once per rule)
+            key = (f.rule, f.path) if f.rule == "secrets.hardcoded" else f.rule
+            if f.action in ("block", "fix") and hint and key not in hinted:
+                hinted.add(key)
+                for i, ln in enumerate(hint if f.rule == "secrets.hardcoded" else hint[:1]):
+                    lead = sym['arrow'] + ' ' if i == 0 else '  '
+                    out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + lead + ln, width, sym)}{s('reset')}")
     if cap is not None and len(listed) > shown:
         out.append(f"  +{len(listed) - shown} more {sym['dash']} "
                    + ("run: aigate-lite check" if hook else f"raise --max-findings (now {limit}) or use --summary"))
@@ -8159,7 +8211,7 @@ def run_check(args, env, collect=False):
     notes += registry_notes(registry)
 
     final_ctx = ctx
-    findings = apply_policy(findings, final_ctx, env)
+    findings = apply_policy(_one_block_per_key_file(findings), final_ctx, env)
     risk = risk_score(findings, provenance[0] == "agent")
     verdict, escalated = decide(findings, risk, escalate=not full)
     stats["seconds"] = round(time.monotonic() - started, 2)

@@ -211,8 +211,9 @@ def seed_python():
     py(P + "leak-aws", {"app/config.py": "AWS_KEY = \"@@AWS@@\"\n"}, [F("secrets.hardcoded", "app/config.py", "AWS_KEY", "block", "block")])
     py(P + "leak-github", {"scripts/deploy.py": "TOKEN = \"@@GHTOKEN@@\"\n"}, [F("secrets.hardcoded", "scripts/deploy.py", "TOKEN", "block", "block")])
     py(P + "leak-stripe", {"app/settings.py": "STRIPE_KEY = \"@@STRIPE@@\"\n"}, [F("secrets.hardcoded", "app/settings.py", "STRIPE_KEY", "block", "block")])
-    py(P + "leak-pem", {"keys/server.pem": PEM}, [F("secrets.hardcoded", "keys/server.pem", "BEGIN", "block", "block"),
-                                                  F("secrets.env_file", "keys/server.pem", None, "block", "block")])
+    # 0.5.2 (LABEL_CHANGES A5): one key file gives one BLOCK; the secrets.env_file duplicate is a must_not_fire
+    py(P + "leak-pem", {"keys/server.pem": PEM}, [F("secrets.hardcoded", "keys/server.pem", "BEGIN", "block", "block")],
+       [("secrets.env_file", "keys/server.pem")])
     # weak crypto
     py(P + "weak-md5", {"app/auth.py": "import hashlib\n\n\ndef hash_password(password):\n    return hashlib.md5(password.encode()).hexdigest()\n"},
        [F("security.weak_crypto", "app/auth.py", "hashlib.md5", "warn", "warn")])
@@ -389,7 +390,7 @@ def seed_ts():
        [F("security.weak_crypto", "src/auth.ts", "Math.random", "warn", "warn")])
     ts(P + "claim-add-tests", {"src/lib.ts": TS_BASE["src/lib.ts"].replace("t + t * tax", "Math.round(t + t * tax)")}, [F("review.claim_mismatch", "(commit)", None, "warn", "warn")],
        messages=["add tests for total"])
-    ts(P + "claim-fix-other", {"src/api.ts": a.replace("r.json()", "await r.json()")}, [F("review.claim_mismatch", "(commit)", None, "warn", "warn")], messages=["fix total rounding"])
+    ts(P + "claim-fix-other", {"src/api.ts": a.replace("r.json()", "await r.json()")}, [F("review.claim_mismatch", "(commit)", None, "warn", "warn")], messages=["fix the total() rounding"])   # LABEL_CHANGES E
     ts(P + "claim-refactor-signature", {"src/lib.ts": TS_BASE["src/lib.ts"].replace("tax: number)", "tax: number, round: boolean)")},
        [F("review.claim_mismatch", "(commit)", None, "warn", "warn")], messages=["refactor only, no behaviour change"])
 
@@ -418,8 +419,8 @@ def seed_real():
     p = "internal/auth/credentials/screener.go"
     real(R + "go-hibp-sha1-nolint-reason", "go", f"{p}:77",
          {p: go_file("func Check(password string) [20]byte {\n\tsum := sha1.Sum([]byte(password)) //nolint:gosec // SHA-1 is the breach-check protocol, not a security control here\n\treturn sum\n}\n", ['"crypto/sha1"'])},
-         [F("suppress.security", p, "nolint:gosec", "fix", "block")], contested=True,
-         note="CONTESTED: a justified //nolint:gosec is BLOCK today; the human asked to propose FIX-with-reason for people, agents unchanged. See eval/LABEL_CHANGES.md")
+         [F("suppress.security", p, "nolint:gosec", "fix", "block")],
+         note="DECIDED (LABEL_CHANGES A1): a justified //nolint:gosec (reason of 4+ words) is FIX for a person; agent BLOCK")
     p = "internal/auth/credentials/screener_test.go"
     real(R + "go-sha1-in-test-file", "go", f"{p}:15", {p: go_file("func TestSum(t *testing.T) {\n\tsum := sha1.Sum([]byte(password))\n\t_ = sum\n}\n", ['"crypto/sha1"', '"testing"'])},
          [F("security.weak_crypto", p, "sha1.Sum", "warn", "fix")], note="SHA-1 of a fixed test input in a _test.go file: warn for people")
@@ -440,7 +441,7 @@ def seed_real():
     # -- skips
     skips = [("go-skip-data-fixture", "internal/api/drift_test.go:165", "internal/api/drift_test.go", "t.Skip(\"no undocumented routes in current fixture — skip sanity check\")", ("warn", "fix"),
               "data-gated skip: warn with the hint 'assert the precondition instead of skipping'"),
-             ("go-skip-data-routes", "internal/api/drift_test.go:175", "internal/api/drift_test.go", "t.Skip(\"no registered routes to patch\")", ("warn", "fix"), "data-gated skip"),
+             ("go-skip-data-routes", "internal/api/drift_test.go:175", "internal/api/drift_test.go", "t.Skip(\"no registered routes to patch\")", ("fix", "fix"), "DECIDED (LABEL_CHANGES F a): an unconditional Go skip stays FIX for a person"),
              ("go-skip-goos", "cmd/atlas/graceful_shutdown_other_test.go:18", "cmd/atlas/graceful_shutdown_other_test.go",
               "t.Skipf(\"Linux-only graceful-shutdown assertions run in CI, not on %s\", runtime.GOOS)", ("warn", "fix"), "environment-gated"),
              ("go-skip-env-var", "cmd/atlas/router_integration_test.go:51", "cmd/atlas/router_integration_test.go",

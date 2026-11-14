@@ -85,3 +85,22 @@ independent verifiers rejected a message-text heuristic because it softens uncon
 Options: (a) keep today's FIX for a person and change the label to FIX (proposal: the skip is not provably conditional); (b) only
 soften when the `t.Skip` is the body of an `if` whose condition reads a length/count/emptiness (the JS rule), which needs the Go
 lexer's block structure. Recommend (a) now, (b) as a later round. Needs your decision before the label changes.
+
+## G. Decisions applied (human, 2026-11-14), with status
+
+| Item | Decision | Status |
+|---|---|---|
+| A1 | justified `//nolint:gosec` (reason >= 4 words, not a bare false positive / ok / ignore / intentional) is FIX for a person; agent BLOCK | applied: `_refine_suppression` + `person_flat`; tests/test_nolint_reason.py; case real-go-hibp-sha1-nolint-reason un-contested |
+| A2 | no change to sensitive-path escalation | nothing to apply |
+| A3 | SHA-1 in a `_test.go` is WARN for a person, FIX for an agent | applied in round 1 (commit c0f981e) |
+| A4 | footer wording fixed | applied in round 1 (commit 121cfbb) |
+| A5 | keep BLOCK for private keys; BLOCK prints a ready `[[allow]]` snippet; allow works for secrets.hardcoded; one key file gives one BLOCK | applied: `_one_block_per_key_file`, snippet hint, tests/test_key_file_block.py; seed-py-leak-pem relabelled (env_file must_not_fire); tests/test_secrets_deps.py expectation changed to match (one BLOCK, no env_file) |
+| A6 | remove `examples/**` and `docs/**` from the default `[paths] sensitive` | NOT APPLIED: neither glob is in the default sensitive list (`aigate_lite.py`, `DEFAULT_CONFIG["paths"]["sensitive"]`). The express case matches `**/auth/**` through `examples/auth/index.js`. Question for the human: exclude `examples/**` from the auth match, or keep the case as a known BLOCK? |
+| B | pre-freeze corrections accepted; each must cite README or docs/RULES.md, not tool output | accepted; citations to be added to section B in the next pass (the api.* and error_check rows already match the README table) |
+| C | dated registry snapshot per clean repo; nightly uses the snapshot | NOT APPLIED in this pass (larger change, needs a snapshot format and a script) |
+| D | order: long-line secrets, empty JSON/SARIF, camelCase Math.random, TS claim_mismatch | long-line: applied (`provider_findings`, tests/test_secret_coverage.py). The big-file item was dropped: a key in a 1.1, 2.1 or 5 MB file is already found (verified), so there is no gap. Empty JSON, camelCase and TS were applied in round 1 |
+| E | change `seed-ts-claim-fix-other`'s message to `fix the total() rounding` | applied (case message and generator) |
+| F | keep FIX for a person (label changed to FIX) | applied to real-go-skip-data-routes (person and generator) |
+
+Note on A1 and the verifier brief: the verifier brief for a future round must confirm that every A-item change is done
+through the decided wording, not a looser one.

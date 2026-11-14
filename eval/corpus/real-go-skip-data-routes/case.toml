@@ -5,11 +5,11 @@ origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/api/d
 who = "both"
 mode = "staged"
 label_status = "proposed"
-note = "data-gated skip"
+note = "DECIDED (LABEL_CHANGES F a): an unconditional Go skip stays FIX for a person"
 
 [[must_fire]]
 rule = "tests.skip_added"
 path = "internal/api/drift_test.go"
 line = 4
-action = "warn"
+action = "fix"
 agent_action = "fix"

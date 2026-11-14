@@ -5,8 +5,7 @@ origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/auth/
 who = "both"
 mode = "staged"
 label_status = "proposed"
-contested = true
-note = "CONTESTED: a justified //nolint:gosec is BLOCK today; the human asked to propose FIX-with-reason for people, agents unchanged. See eval/LABEL_CHANGES.md"
+note = "DECIDED (LABEL_CHANGES A1): a justified //nolint:gosec (reason of 4+ words) is FIX for a person; agent BLOCK"
 
 [[must_fire]]
 rule = "suppress.security"
