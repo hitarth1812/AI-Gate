@@ -154,3 +154,19 @@ def test_eval_negatives(repo, env):
            "import builtins\n\n\ndef f(d, s):\n    a = d['eval'](s)\n    b = __builtins__['len'](s)\n"
            "    c = getattr(d, 'eval')(s)\n    return a, b, c, builtins.len(s)\n")
     assert find(repo.check(env=env), "security.eval") == []
+
+
+# ---------------------------------------------------------------- the fold stays linear in the size of the file
+
+@pytest.mark.parametrize("env", WHO)
+@pytest.mark.parametrize("piece,count", [("a", 60000), ("é", 20000)], ids=["ascii-60k", "non-ascii-20k"])
+def test_fold_is_linear_on_a_line_with_many_constants(repo, env, piece, count):
+    import time
+    items = ", ".join([repr(piece)] * count)
+    src = f"G = 'a' + 'b'\nL = [{items}]\nKEY = 'AKIA' + '{TAIL}'\n"      # a gate line, one huge line, then a split key
+    staged(repo, "app.py", src)
+    start = time.perf_counter()
+    res = repo.check(env=env)
+    elapsed = time.perf_counter() - start
+    assert lines(res, "secrets.hardcoded") == [(3, "block")]
+    assert elapsed < 5, f"{elapsed:.1f} s"

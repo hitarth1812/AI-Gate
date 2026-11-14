@@ -2993,12 +2993,24 @@ def _folded_key_findings(ctx, fc, where, have) -> list:
     out = []
     rows = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")      # the line numbering of ast
 
+    per_line: dict = {}                       # line -> (has adjacent literals, the line as str or UTF-8 bytes): once per line
+
+    def line_facts(n):
+        if n not in per_line:
+            row = rows[n - 1]
+            per_line[n] = (bool(_ADJACENT_LITERALS.search(row)), row if row.isascii() else row.encode("utf-8", "replace"))
+        return per_line[n]
+
     def literal_value(node):                  # a str constant written as adjacent literals (not triple-quoted)
-        if not _ADJACENT_LITERALS.search("\n".join(rows[node.lineno - 1:node.end_lineno or node.lineno])):
+        end = node.end_lineno or node.lineno
+        if end == node.lineno:
+            adjacent = line_facts(node.lineno)[0]
+        else:                                 # a literal over several lines: at most one starts and one ends on a line
+            adjacent = bool(_ADJACENT_LITERALS.search("\n".join(rows[node.lineno - 1:end])))
+        if not adjacent:
             return None
-        first = rows[node.lineno - 1]
-        rest = first[node.col_offset:] if first.isascii() else first.encode("utf-8", "replace")[node.col_offset:].decode("utf-8", "replace")
-        return None if _TRIPLE_QUOTED.match(rest) else node.value
+        head = line_facts(node.lineno)[1][node.col_offset:node.col_offset + 8]     # col_offset counts UTF-8 bytes
+        return None if _TRIPLE_QUOTED.match(head if isinstance(head, str) else head.decode("utf-8", "replace")) else node.value
 
     def visit(node):
         folds = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)) or \
