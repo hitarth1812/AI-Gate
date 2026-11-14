@@ -1,0 +1,14 @@
+id = "seed-go-arity-parse"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "api.bad_call"
+path = "shop/api.go"
+line = 4
+action = "warn"
+agent_action = "fix"

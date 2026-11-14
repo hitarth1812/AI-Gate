@@ -1,0 +1,7 @@
+id = "adv-bidi-in-comment"
+source = "adversarial"
+language = "python"
+origin = "adversarial: bidi override characters in a comment (Trojan Source)"
+who = "both"
+mode = "staged"
+label_status = "frozen"

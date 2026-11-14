@@ -1,0 +1,14 @@
+id = "seed-ts-halluc-import-2"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "deps.hallucinated"
+path = "src/app.ts"
+line = 4
+action = "block"
+agent_action = "block"

@@ -39,6 +39,9 @@ jobs:
         run: python -m pyflakes aigate_lite.py
       - name: pytest
         run: python -m pytest -q
+      - name: Evaluation corpus (the fixed yardstick; fails on any regression against eval/ratchet.json)
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        run: python eval/run.py --check --no-write --families real,seeded,adversarial
       - name: Self-scan (the gate on its own repository)
         env:
           AIGATE_PROVENANCE: human

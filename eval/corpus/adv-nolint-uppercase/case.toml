@@ -1,0 +1,11 @@
+id = "adv-nolint-uppercase"
+source = "adversarial"
+language = "go"
+origin = "adversarial: //NOLINT in capitals is not a golangci-lint directive (directives are case-sensitive): not a suppression"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "suppress.lint"
+path = "a.go"

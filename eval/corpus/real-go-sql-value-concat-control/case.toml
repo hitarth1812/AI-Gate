@@ -1,0 +1,15 @@
+id = "real-go-sql-value-concat-control"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): pattern: a value concatenated into SQL (control) (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "control: a user value in SQL stays a fix"
+
+[[must_fire]]
+rule = "security.sql_injection"
+path = "internal/store/orders.go"
+line = 4
+action = "fix"
+agent_action = "fix"

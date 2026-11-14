@@ -1,0 +1,7 @@
+id = "adv-dash-filename"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a file named like an option"
+who = "both"
+mode = "staged"
+label_status = "frozen"

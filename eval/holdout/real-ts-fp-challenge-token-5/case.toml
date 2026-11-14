@@ -1,0 +1,12 @@
+id = "real-ts-fp-challenge-token-5"
+source = "real"
+language = "typescript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): src/lib/api/errors.test.ts:49 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "a short identifier-like test value named *token (proposed FP for people)"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "src/lib/api/errors.test.ts"

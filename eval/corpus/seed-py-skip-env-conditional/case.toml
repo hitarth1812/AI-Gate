@@ -1,0 +1,16 @@
+id = "seed-py-skip-env-conditional"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+note = "environment-gated: a warning for a person"
+
+[[must_fire]]
+rule = "tests.skip_added"
+path = "tests/test_orders.py"
+line = 8
+tol = 2
+action = "warn"
+agent_action = "fix"

@@ -1,0 +1,12 @@
+id = "real-go-fp-secretid-path"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/platform/secrets/awskeys/provider_test.go:61 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "an identifier, a path or a generated name, not a credential (proposed FP for people; agents keep the finding)"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "internal/platform/secrets/awskeys/provider_test.go"

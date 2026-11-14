@@ -1,0 +1,11 @@
+id = "seed-py-test-deleted"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "tests.deleted"
+path = "tests/test_orders.py"

@@ -1,0 +1,12 @@
+id = "adv-deep-python-expr"
+source = "adversarial"
+language = "python"
+origin = "adversarial: an expression nested 5,000 parentheses deep"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "deep.py"
+kind = "deep_python"
+size = 5000

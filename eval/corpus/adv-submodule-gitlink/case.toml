@@ -1,0 +1,11 @@
+id = "adv-submodule-gitlink"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a submodule entry"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[gitlink]]
+path = "lib"
+sha = "1111111111111111111111111111111111111111"

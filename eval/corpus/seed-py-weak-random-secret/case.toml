@@ -1,0 +1,14 @@
+id = "seed-py-weak-random-secret"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "app/auth.py"
+line = 5
+action = "warn"
+agent_action = "warn"

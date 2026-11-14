@@ -1,0 +1,12 @@
+id = "real-go-conn-sprintf-test"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/auth/identity/resolver_diagnostics_test.go:36 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "the password is user=atlas in a test DSN built from an address: not a secret (proposed FP)"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "internal/auth/identity/resolver_diagnostics_test.go"

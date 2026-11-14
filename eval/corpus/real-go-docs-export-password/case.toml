@@ -1,0 +1,12 @@
+id = "real-go-docs-export-password"
+source = "real"
+language = "markdown"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): infra/vault/README.md:61 (pattern rewritten; no ATLAS code)"
+who = "person"
+mode = "staged"
+label_status = "proposed"
+note = "a placeholder in a runbook: information only for people (proposed); the agent keeps the finding"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "infra/vault/README.md"

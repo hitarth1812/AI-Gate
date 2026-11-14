@@ -1,0 +1,8 @@
+id = "adv-delete-everything"
+source = "adversarial"
+language = "python"
+origin = "adversarial: every tracked file deleted"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+delete = ["README.md", "a.py", "b.py"]

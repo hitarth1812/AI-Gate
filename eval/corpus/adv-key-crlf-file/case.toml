@@ -1,0 +1,18 @@
+id = "adv-key-crlf-file"
+source = "adversarial"
+language = "python"
+origin = "adversarial: key in a CRLF file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "app.py"
+line = 2
+action = "block"
+agent_action = "block"
+
+[[transform]]
+path = "app.py"
+kind = "crlf"

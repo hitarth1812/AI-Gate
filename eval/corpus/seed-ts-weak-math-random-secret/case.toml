@@ -1,0 +1,14 @@
+id = "seed-ts-weak-math-random-secret"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/auth.ts"
+line = 2
+action = "warn"
+agent_action = "warn"

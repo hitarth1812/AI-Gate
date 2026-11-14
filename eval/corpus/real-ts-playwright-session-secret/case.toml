@@ -1,0 +1,15 @@
+id = "real-ts-playwright-session-secret"
+source = "real"
+language = "typescript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): playwright.config.ts:47 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "a fixture credential in an e2e / mock / test-runner file: test context for people (a *.spec.* file is a test file for everyone)"
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "playwright.config.ts"
+line = 1
+action = "warn"
+agent_action = "fix"

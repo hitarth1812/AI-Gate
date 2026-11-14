@@ -1,0 +1,14 @@
+id = "seed-go-halluc-mod-2"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "deps.hallucinated"
+path = "go.mod"
+line = 5
+action = "block"
+agent_action = "block"

@@ -1,0 +1,12 @@
+id = "adv-go-generated-huge"
+source = "adversarial"
+language = "go"
+origin = "adversarial: a huge generated Go file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "gen/big.go"
+kind = "many_lines"
+size = 100000

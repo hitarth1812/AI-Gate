@@ -1,0 +1,14 @@
+id = "seed-py-broken-caller-dropped-kw"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "api.broken_caller"
+path = "app/report.py"
+line = 10
+action = "warn"
+agent_action = "fix"

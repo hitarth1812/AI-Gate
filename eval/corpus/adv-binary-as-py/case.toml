@@ -1,0 +1,12 @@
+id = "adv-binary-as-py"
+source = "adversarial"
+language = "python"
+origin = "adversarial: binary content named .py"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "app2.py"
+kind = "binary"
+size = 4096

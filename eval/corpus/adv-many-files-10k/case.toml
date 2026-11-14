@@ -1,0 +1,12 @@
+id = "adv-many-files-10k"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a 10,000-file diff"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "gen"
+kind = "many_files"
+size = 10000

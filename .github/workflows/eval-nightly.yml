@@ -1,0 +1,70 @@
+name: eval-nightly
+
+# The full evaluation corpus (real, seeded, adversarial and the cloned clean repositories) on every OS and two
+# Pythons. No LLM and no secret: it runs `python eval/run.py --check`, which compares with eval/ratchet.json.
+# On a regression the `report` job opens (or comments on) one issue. See eval/README.md.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eval-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  eval:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    if: github.repository == 'hitarth1812/AI-Gate'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Evaluation (regression check, includes the clean repositories)
+        env:
+          EVAL_CACHE: ${{ runner.temp }}/eval-cache
+        run: python eval/run.py --check --jobs 2
+      - name: Upload the scoreboard
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scoreboard-${{ matrix.os }}-py${{ matrix.python }}
+          path: eval/scoreboard.json
+          if-no-files-found: ignore
+
+  report:
+    name: open an issue on regression
+    needs: eval
+    if: ${{ always() && needs.eval.result == 'failure' && github.repository == 'hitarth1812/AI-Gate' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the regression issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Nightly evaluation regression"
+          BODY="The nightly evaluation failed (see the failing matrix legs and their logs): $RUN_URL"
+          N="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$N" ]; then
+            gh issue comment "$N" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi

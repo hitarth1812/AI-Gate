@@ -1,0 +1,13 @@
+id = "adv-env-production-committed"
+source = "adversarial"
+language = "dotenv"
+origin = "adversarial: a .env.production with real-looking values"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.env_file"
+path = ".env.production"
+action = "block"
+agent_action = "block"

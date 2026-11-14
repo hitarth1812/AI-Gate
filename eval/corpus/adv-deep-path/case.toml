@@ -1,0 +1,7 @@
+id = "adv-deep-path"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a path 60 directories deep"
+who = "both"
+mode = "staged"
+label_status = "frozen"

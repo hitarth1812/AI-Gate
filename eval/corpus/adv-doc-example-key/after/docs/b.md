@@ -1,0 +1,1 @@
+Use AKIAIOSFODNN7EXAMPLE as the example.

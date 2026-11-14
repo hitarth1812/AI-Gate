@@ -1,0 +1,14 @@
+id = "seed-py-claim-add-tests"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["add tests for compute_total"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

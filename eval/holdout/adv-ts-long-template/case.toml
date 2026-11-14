@@ -1,0 +1,7 @@
+id = "adv-ts-long-template"
+source = "adversarial"
+language = "typescript"
+origin = "adversarial: a very long template literal"
+who = "both"
+mode = "staged"
+label_status = "frozen"

@@ -1,0 +1,14 @@
+id = "seed-ts-claim-refactor-signature"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["refactor only, no behaviour change"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

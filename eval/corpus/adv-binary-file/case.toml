@@ -1,0 +1,12 @@
+id = "adv-binary-file"
+source = "adversarial"
+language = "binary"
+origin = "adversarial: a binary file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "assets/blob.bin"
+kind = "binary"
+size = 4096

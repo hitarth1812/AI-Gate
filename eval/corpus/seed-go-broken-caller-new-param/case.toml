@@ -1,0 +1,14 @@
+id = "seed-go-broken-caller-new-param"
+source = "seeded"
+language = "go"
+origin = "seeded: clean go base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "api.broken_caller"
+path = "cmd/app/main.go"
+line = 9
+action = "warn"
+agent_action = "fix"

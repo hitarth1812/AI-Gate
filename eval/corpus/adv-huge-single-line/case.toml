@@ -1,0 +1,12 @@
+id = "adv-huge-single-line"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a 5 MB single line"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "huge.py"
+kind = "long_line"
+size = 5000000

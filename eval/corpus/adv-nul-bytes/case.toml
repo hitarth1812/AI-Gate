@@ -1,0 +1,11 @@
+id = "adv-nul-bytes"
+source = "adversarial"
+language = "python"
+origin = "adversarial: NUL bytes inside a source file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[transform]]
+path = "app.py"
+kind = "nul"

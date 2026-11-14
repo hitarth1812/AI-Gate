@@ -1,0 +1,15 @@
+id = "real-go-hibp-sha1-nolint-reason"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): internal/auth/credentials/screener.go:77 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "DECIDED (LABEL_CHANGES A1): a justified //nolint:gosec (reason of 4+ words) is FIX for a person; agent BLOCK"
+
+[[must_fire]]
+rule = "suppress.security"
+path = "internal/auth/credentials/screener.go"
+line = 6
+action = "fix"
+agent_action = "block"

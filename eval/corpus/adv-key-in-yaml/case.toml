@@ -1,0 +1,14 @@
+id = "adv-key-in-yaml"
+source = "adversarial"
+language = "yaml"
+origin = "adversarial: provider key in YAML"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "deploy/values.yaml"
+line = 1
+action = "block"
+agent_action = "block"

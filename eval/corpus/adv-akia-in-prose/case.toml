@@ -1,0 +1,11 @@
+id = "adv-akia-in-prose"
+source = "adversarial"
+language = "markdown"
+origin = "adversarial: AKIA inside a word (not a key)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "docs/a.md"

@@ -1,0 +1,15 @@
+id = "real-go-skip-flaky-control"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): pattern: flaky skip (control) (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "control: a skip that says flaky stays a fix"
+
+[[must_fire]]
+rule = "tests.skip_added"
+path = "internal/x/y_test.go"
+line = 4
+action = "fix"
+agent_action = "fix"

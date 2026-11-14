@@ -1,0 +1,11 @@
+id = "adv-zero-width-in-key"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a zero-width space inside a key shape (not a key)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "app.py"

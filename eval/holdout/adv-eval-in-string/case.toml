@@ -1,0 +1,11 @@
+id = "adv-eval-in-string"
+source = "adversarial"
+language = "python"
+origin = "adversarial: eval( inside a string literal (not a call)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.eval"
+path = "app.py"

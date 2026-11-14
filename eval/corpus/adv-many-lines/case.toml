@@ -1,0 +1,12 @@
+id = "adv-many-lines"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a 200,000-line file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[generate]]
+path = "big_table.py"
+kind = "many_lines"
+size = 200000

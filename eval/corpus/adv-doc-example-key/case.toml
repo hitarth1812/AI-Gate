@@ -1,0 +1,11 @@
+id = "adv-doc-example-key"
+source = "adversarial"
+language = "markdown"
+origin = "adversarial: the documented AWS example key"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "docs/b.md"

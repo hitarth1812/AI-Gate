@@ -1,0 +1,15 @@
+id = "real-ts-skip-data-conditional-2"
+source = "real"
+language = "typescript"
+origin = "ATLAS_WEB_APPLICATION audit (aigate-lite 0.5.1 `audit`, 2026-11-13): e2e/real-backend.spec.ts:73 (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "a conditional skip (environment or data gated): a warning for people"
+
+[[must_fire]]
+rule = "tests.skip_added"
+path = "e2e/real-backend.spec.ts"
+line = 3
+action = "warn"
+agent_action = "fix"

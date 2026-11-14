@@ -1,0 +1,11 @@
+id = "adv-todo-in-string"
+source = "adversarial"
+language = "python"
+origin = "adversarial: TODO inside a string (not a comment)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "code.todo"
+path = "app.py"

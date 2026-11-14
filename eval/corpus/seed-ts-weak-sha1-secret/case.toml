@@ -1,0 +1,14 @@
+id = "seed-ts-weak-sha1-secret"
+source = "seeded"
+language = "typescript"
+origin = "seeded: clean typescript base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/auth.ts"
+line = 3
+action = "warn"
+agent_action = "warn"

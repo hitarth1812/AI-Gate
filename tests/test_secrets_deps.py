@@ -49,8 +49,9 @@ def test_private_key_file_blocks_but_certificate_passes(repo):
     repo.write("keys/deploy.key", "-----BEGIN " + "OPENSSH PRIVATE KEY-----\nb3Bl\n-----END OPENSSH PRIVATE KEY-----\n")
     repo.add()
     res = repo.check()
-    assert [f["path"] for f in find(res, "secrets.env_file")] == ["keys/deploy.key"]
-    assert find(res, "secrets.hardcoded")                       # the key header itself
+    # 0.5.2 (A5): one key file gives one BLOCK: the provider-key BLOCK (secrets.hardcoded) is the one; no duplicate env_file
+    assert [f["path"] for f in find(res, "secrets.env_file")] == []
+    assert [f["path"] for f in find(res, "secrets.hardcoded")] == ["keys/deploy.key"]   # the key header itself
 
 
 def test_local_connection_string_is_warning(repo):

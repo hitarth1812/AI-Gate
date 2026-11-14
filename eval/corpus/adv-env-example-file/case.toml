@@ -1,0 +1,11 @@
+id = "adv-env-example-file"
+source = "adversarial"
+language = "dotenv"
+origin = "adversarial: .env.example with placeholders"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.env_file"
+path = ".env.example"

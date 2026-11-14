@@ -1,0 +1,11 @@
+id = "adv-symlink-added"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a symlink to a file outside the repository"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[symlink]]
+path = "link.py"
+target = "../../etc/passwd"

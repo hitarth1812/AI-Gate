@@ -1,0 +1,13 @@
+id = "seed-py-error-reraise-removed"
+source = "seeded"
+language = "python"
+origin = "seeded: clean python base + one injected AI failure"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.error_check_removed"
+path = "app/store.py"
+action = "warn"
+agent_action = "fix"

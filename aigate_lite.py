@@ -53,7 +53,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
@@ -1167,6 +1167,7 @@ class Finding:
     base_key: str | None = None    # key before twin numbering (set by number_twins)
     twin: int = 1                  # 1 for the first finding with this rule, file and key; 2, 3, ... after it
     human: str | None = None       # the action for a human's change, when softer than `action` (agents keep `action`)
+    person_flat: bool = False      # a person's `human` action is final: no sensitive-path escalation (an agent still gets it)
 
     @property
     def meta(self) -> Rule:
@@ -2802,6 +2803,47 @@ def person_test_context(path) -> bool:
     return hit_
 
 
+def provider_findings(ctx, fc, line_no, text, where, seen) -> list:
+    """The provider-key and private-key patterns on one line (no value or name heuristics)."""
+    import hashlib
+    out = []
+    for label, rx in PROVIDER_SECRETS if PROVIDER_LITERALS.search(text) else ():
+        for m in rx.finditer(text):
+            val = m.group(1)
+            if val in seen:
+                continue
+            if label == "Private key":
+                if DOC_PATH.search(fc.path) or _pem_body(fc, line_no, text[m.end():]):   # docs: a pasted header counts
+                    seen.add(val)
+                    out.append(_provider_finding(fc, line_no, "private key block", val, where, hashlib))
+            elif not DOC_PLACEHOLDER.search(val):
+                seen.add(val)
+                out.append(_provider_finding(fc, line_no, f"{label} ({redact(val)})", val, where, hashlib))
+    return out
+
+
+def _provider_finding(fc, line_no, what, val, where, hashlib):
+    key = hashlib.sha1(val.encode("utf-8", "replace")).hexdigest()
+    f = make("secrets.hardcoded", fc.path, line_no, f"{what}{where}", key=key)
+    f.human = None
+    # 0.5.2 (A5): a ready allow entry for a key that is really a test fixture; the key itself is never printed
+    fp = fingerprint_v2("secrets.hardcoded", fc.path, key)
+    f.hint = ("if this value is not a secret (a test fixture or an example), allow it on purpose in .aigate/lite.toml:\n"
+              "[[allow]]\n"
+              'rule = "secrets.hardcoded"\n'
+              f'path = "{fc.path}"\n'
+              f'fingerprint = "{fp}"\n'
+              'reason = "<why this is not a secret>"')
+    return f
+
+
+def _one_block_per_key_file(findings) -> list:
+    """0.5.2 (A5): a key file gives one BLOCK. When secrets.hardcoded already fires on a path, the secrets.env_file finding for that
+    same path (\"private key file\") is dropped; the provider-key BLOCK names the same file and the same fix."""
+    keyed = {f.path for f in findings if f.rule == "secrets.hardcoded"}
+    return [f for f in findings if not (f.rule == "secrets.env_file" and f.path in keyed)]
+
+
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
     import hashlib
@@ -2816,14 +2858,7 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         f.human = human
         found.append(f)
 
-    for label, rx in PROVIDER_SECRETS if PROVIDER_LITERALS.search(text) else ():
-        for m in rx.finditer(text):
-            val = m.group(1)
-            if label == "Private key":
-                if DOC_PATH.search(fc.path) or _pem_body(fc, line_no, text[m.end():]):   # docs: a pasted header counts
-                    add("secrets.hardcoded", val, "private key block")
-            elif not DOC_PLACEHOLDER.search(val):
-                add("secrets.hardcoded", val, f"{label} ({redact(val)})")
+    found.extend(provider_findings(ctx, fc, line_no, text, where, seen=seen))
     lname = fc.name.lower()
     if found or ctx.ignored(fc.path) or is_lockfile(fc.path) or lname == ".env" or lname.startswith(".env."):
         return found                                              # env files are judged as a whole by secrets.env_file
@@ -2867,6 +2902,10 @@ def _secrets_file(ctx, fc, where) -> list:
     for line_no, text in fc.added.items():
         if len(text) <= 4000:
             out.extend(secret_findings(ctx, fc, line_no, text, where))
+        else:
+            # a line this long is not judged by the value and name patterns (too slow on minified code), but a provider
+            # key is still found: the provider patterns are bounded and anchored (0.5.2, D1)
+            out.extend(provider_findings(ctx, fc, line_no, text, where, seen=set()))
     return out
 
 
@@ -4880,6 +4919,17 @@ def _refine_suppression(rule, fc, text, m, f) -> None:
     elif rule == "suppress.coverage":
         if SUPPRESS_REASON.search(rest) or re.match(r"\s*[:\-—]\s*\S.{2,}", rest):
             f.human = "warn"
+    elif rule == "suppress.security" and fc.ext == ".go" and "gosec" in m.group(0):
+        # decided by the human (0.5.2, A1): a justified Go nolint directive for gosec, a reason of at least 4 words that is not a bare
+        # "false positive", "ok", "ignore" or "intentional", is a fix for a person. person_flat keeps a sensitive-path
+        # escalation from turning that fix back into a block. An agent keeps the block.
+        reason = re.sub(r"^[\s/#\-—:]+", "", rest).strip().rstrip(".").strip()
+        if len(reason.split()) >= 4 and reason.lower() not in BARE_NOLINT_REASONS:
+            f.human = "fix"
+            f.person_flat = True
+
+
+BARE_NOLINT_REASONS = {"false positive", "ok", "ignore", "intentional"}
 
 
 def _suppressions_file(ctx, fc) -> list:
@@ -4929,10 +4979,14 @@ PLACEHOLDER_RE = re.compile(
 JS_PLACEHOLDER = re.compile(r"""throw\s+new\s+Error\(\s*['"`](?:not\s+(?:yet\s+)?implemented|todo|implement)""", re.I)
 TODO_RE = re.compile(r"(?:#|//|/\*|\*)\s*(?:TODO|FIXME|XXX|HACK)\b")
 SECRET_WORDS = r"(?:password|passwd|pwd|secret|token|otp|nonce|salt|session|api_?key)"
+# A secret word is delimited by \b or, inside a camelCase identifier (`sessionToken`, `newToken`), by a lower->Upper hump;
+# `tokenizer`, `passwordless` and `SESSION_TOKEN`-style names are unchanged (the hump tests are case-sensitive).
+_HUMP = r"(?-i:(?<=[a-z0-9])(?=[A-Z]))"
+_SECRET_AT = r"(?:\b|" + _HUMP + r")%s(?:\b|" + _HUMP + r")"
 WEAK_CRYPTO = re.compile(
-    r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*\b(?:password|passwd|pwd|secret|token)\b)|"
+    r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*" + _SECRET_AT % r"(?:password|passwd|pwd|secret|token)" + r")|"
     r"(?=.*(?:\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(|Math\.random\(\)))"
-    r"(?=.*\b" + SECRET_WORDS + r"\b)")
+    r"(?=.*" + _SECRET_AT % SECRET_WORDS + r")")
 # HMAC with SHA-1 (or MD5) is not a weak hash for a secret: its security does not rest on collision resistance. Not
 # flagged for people; an agent's change keeps the finding. Plain SHA-1/MD5 hashing of a secret is still flagged.
 HMAC_SHA1 = re.compile(r"(?i)createHmac\(\s*['\"](?:sha1|md5)['\"]|\bhmac\.new\([^)]*\bhashlib\.(?:sha1|md5)\b|"
@@ -5011,6 +5065,9 @@ def _code_lines_file(ctx, fc) -> list:
         if weak:
             f = make("security.weak_crypto", fc.path, line, text.strip()[:80], key=text.strip())
             f.human = "off" if HMAC_SHA1.search(text) and not WEAK_RANDOM.search(text) else None   # HMAC-SHA1 is sound
+            if f.human is None and test and not WEAK_RANDOM.search(text):   # a hash of a test input: a person's warning, even under auth/
+                f.human = "warn"
+                f.person_flat = True
             out.append(f)
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
@@ -5787,7 +5844,7 @@ def apply_policy(findings, ctx, env) -> list:
         if f.action == "off":
             continue
         f.sensitive = not f.path.startswith("(") and ctx.sensitive(f.path)
-        if f.sensitive and f.meta.escalate:
+        if f.sensitive and f.meta.escalate and not (f.person_flat and not ctx.agent):
             f.action = {"warn": "fix", "fix": "block"}.get(f.action, f.action)
         legacy_id = (f.rule, f.path, f.legacy_fingerprint)
         if f.action == "pass":
@@ -5881,6 +5938,19 @@ def _summary(res: Result, active, allowed, baselined, stage, sym, s) -> str:
             f" {dot} {res.stats['seconds']:.1f}s{stopped}")
 
 
+def _block_advice(rule: str) -> str:
+    """What to do about a BLOCK, by kind of rule (the `next:` line must be true for what actually blocks)."""
+    if rule.startswith("secrets."):
+        return "remove the secret and rotate it"
+    if rule.startswith("suppress."):
+        return "remove the suppression and fix the cause it hides"
+    if rule.startswith("deps."):
+        return "check the package name and version, a made-up name can be a typosquat"
+    if rule.startswith("scope."):
+        return "keep the change out of the forbidden paths"
+    return "fix the cause"
+
+
 def _next_line(res: Result, active, baselined, stage) -> str | None:
     hidden = f" ({len(baselined)} baseline finding{'' if len(baselined) == 1 else 's'} hidden)" if baselined else ""
     act = "push" if stage == "push" else "commit"
@@ -5888,10 +5958,21 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
     fixes = [f for f in active if f.action == "fix"]
     if res.verdict == "block" and blocks:
         n = len(blocks)
-        if stage == "scan":
-            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then adopt " \
-                   f"a baseline so only new findings count: aigate-lite baseline{hidden}"
-        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+        rules = list(dict.fromkeys(f.rule for f in blocks))
+        if all(r.startswith("secrets.") for r in rules):
+            if stage == "scan":
+                return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then " \
+                       f"adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+            return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
+        # something other than a secret blocks: say what to do for that kind, never call it a secret
+        advice = list(dict.fromkeys(_block_advice(r) for r in rules))
+        other = [r for r in rules if not r.startswith("secrets.")]
+        pointer = other[0] if len(other) == 1 else "<rule>"
+        base = ", then adopt a baseline so only new findings count: aigate-lite baseline" \
+            if stage == "scan" and not any(r.startswith(BASELINE_NEVER) for r in rules) else ""
+        return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above ({'; '.join(advice)}){base}; or allow " \
+               f"{'it' if n == 1 else 'one'} with a reason via an [[allow]] entry in .aigate/lite.toml: " \
+               f"aigate-lite explain {pointer}{hidden}"
     if res.verdict in ("block", "fix"):
         n, rules = len(fixes), sorted({f.rule for f in fixes})
         if stage == "scan":
@@ -6085,10 +6166,13 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                        + plain[len(prefix) + 5:])
             shown += 1
             hint = (f.hint or f.meta.hint or "").splitlines()
-            if f.action in ("block", "fix") and hint and f.rule not in hinted:
-                hinted.add(f.rule)
-                out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + sym['arrow'] + ' ' + hint[0], width, sym)}"
-                           f"{s('reset')}")
+            # 0.5.2 (A5): a key's ready [[allow]] snippet is printed whole, once per file (other rules: one line, once per rule)
+            key = (f.rule, f.path) if f.rule == "secrets.hardcoded" else f.rule
+            if f.action in ("block", "fix") and hint and key not in hinted:
+                hinted.add(key)
+                for i, ln in enumerate(hint if f.rule == "secrets.hardcoded" else hint[:1]):
+                    lead = sym['arrow'] + ' ' if i == 0 else '  '
+                    out.append(f"{s('dim')}{_fit(' ' * (len(prefix) + 7) + lead + ln, width, sym)}{s('reset')}")
     if cap is not None and len(listed) > shown:
         out.append(f"  +{len(listed) - shown} more {sym['dash']} "
                    + ("run: aigate-lite check" if hook else f"raise --max-findings (now {limit}) or use --summary"))
@@ -7176,15 +7260,25 @@ def top_level_sigs(tree) -> dict:
 
 def signature_changes(ctx) -> list:
     """Functions of changed files whose parameters differ between the old and the new version:
-    [{"path", "name", "lang", "old", "new", "line"}]. Python: module-level functions; Go: package-level functions."""
+    [{"path", "name", "lang", "old", "new", "line"}]. Python: module-level functions; Go: package-level functions;
+    JS/TS: exported functions (`export function f(...)`, `export const f = (...) =>`), by parameter count."""
     if "sigchanges" in ctx.cache:
         return ctx.cache["sigchanges"]
     out = []
-    for fc in ctx.code_changes(PY_EXTS | {".go"}):
+    for fc in ctx.code_changes(PY_EXTS | JS_FAMILY | {".go"}):
         if not (fc.old_spec and fc.new_spec):
             continue
         try:
-            if fc.ext in PY_EXTS:
+            if fc.ext in JS_FAMILY:
+                a, b = js_symbols(ctx.old_text(fc) or "", fc.path), js_symbols(ctx.new_text(fc) or "", fc.path)
+                if a is None or b is None:
+                    continue
+                for name, info in b["names"].items():
+                    was = a["names"].get(name)
+                    if info["t"] == "f" and was and was["t"] == "f" and info["n"] is not None and was["n"] is not None \
+                            and was["n"] != info["n"]:
+                        out.append({"path": fc.path, "name": name, "lang": "js", "old": was, "new": info, "line": 1})
+            elif fc.ext in PY_EXTS:
                 old, new = ctx.py_tree(fc, "old")[0], ctx.py_tree(fc, "new")[0]
                 if old is None or new is None:
                     continue
@@ -7314,6 +7408,8 @@ CALLER_LIMIT = 15
 def broken_caller_findings(ctx, rp, idx) -> list:
     out = []
     for change in signature_changes(ctx):
+        if change["lang"] == "js":      # JS/TS signatures feed review.claim_mismatch only; callers are not checked
+            continue
         found = (py_callers if change["lang"] == "py" else go_callers)(ctx, rp, idx, change, CALLER_LIMIT)
         for path, line, call in found:
             out.append(rv("api.broken_caller", path, line,
@@ -8051,6 +8147,14 @@ def run_check(args, env, collect=False):
                 print("aigate-lite: nothing staged to check")
             elif args.format == "agent":
                 print("AIGATE verdict=pass risk=0 exit=0\n" + agent_tool_line() + "\nEND")
+            elif args.format in ("json", "sarif", "github") and not collect:   # a machine reader still gets a document
+                empty = Result([], "pass", False, 0.0, provenance, run_label,
+                               {"files": 0, "added": 0, "removed": 0, "seconds": round(time.monotonic() - started, 2)},
+                               cfg.origin, [])
+                if args.format == "json":
+                    report_json(empty, {"summary": getattr(args, "summary", False)})
+                else:
+                    (report_github if args.format == "github" else report_sarif)(empty)
             return 0
         merge = head is None and os.path.exists(repo.private_path("MERGE_HEAD"))
         ctx = Context(repo, cfg, changes, mode="staged" if head is None else "range", base=base, head=head,
@@ -8107,7 +8211,7 @@ def run_check(args, env, collect=False):
     notes += registry_notes(registry)
 
     final_ctx = ctx
-    findings = apply_policy(findings, final_ctx, env)
+    findings = apply_policy(_one_block_per_key_file(findings), final_ctx, env)
     risk = risk_score(findings, provenance[0] == "agent")
     verdict, escalated = decide(findings, risk, escalate=not full)
     stats["seconds"] = round(time.monotonic() - started, 2)

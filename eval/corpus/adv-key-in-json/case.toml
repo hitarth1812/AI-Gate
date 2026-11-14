@@ -1,0 +1,14 @@
+id = "adv-key-in-json"
+source = "adversarial"
+language = "json"
+origin = "adversarial: provider key inside a JSON value"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "config/app.json"
+line = 1
+action = "block"
+agent_action = "block"

@@ -1,0 +1,15 @@
+id = "real-go-vuln-indirect-1"
+source = "real"
+language = "go"
+origin = "ATLAS_OS audit (aigate-lite 0.5.1 `audit`, 2026-11-13): go.mod:80 (// indirect) (pattern rewritten; no ATLAS code)"
+who = "both"
+mode = "staged"
+label_status = "proposed"
+note = "an indirect dependency (go mod tidy added it): a warning for people, the agent keeps fix"
+
+[[must_fire]]
+rule = "deps.vulnerable"
+path = "go.mod"
+line = 6
+action = "warn"
+agent_action = "fix"

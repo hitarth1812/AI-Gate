@@ -1,0 +1,18 @@
+id = "adv-rename-with-edit"
+source = "adversarial"
+language = "python"
+origin = "adversarial: a rename that also edits the file"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[rename]]
+from = "old_name.py"
+to = "new_name.py"
+
+[[must_fire]]
+rule = "security.eval"
+path = "new_name.py"
+line = 6
+action = "fix"
+agent_action = "fix"

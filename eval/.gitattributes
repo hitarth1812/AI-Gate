@@ -1,0 +1,3 @@
+# Corpus files are test data: git must never rewrite their bytes (line endings, BOMs).
+corpus/** -text
+holdout/** -text

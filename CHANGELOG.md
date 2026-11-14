@@ -1,6 +1,40 @@
 # Changelog
 
-## 0.5.1 — unreleased: fix every known error (network/TLS, Windows, JS/TS precision, metadata, docs, tests)
+## 0.5.2 — unreleased: evaluation harness and round-1 fixes
+
+### Changed (behaviour you will notice)
+- A justified `//nolint:gosec` (a reason of 4 or more words that is not a bare "false positive", "ok", "ignore" or
+  "intentional") is a FIX for a person. It stays a BLOCK for an AI agent, and a bare directive stays a BLOCK for everyone.
+- A private key file gives one BLOCK. The BLOCK prints a ready `[[allow]]` snippet with the fingerprint to fill in; an allow
+  entry for `secrets.hardcoded` removes it. The duplicate `secrets.env_file` finding for the same file is gone.
+- The `next:` line for a BLOCK that is not a secret no longer says "secrets cannot be baselined". It gives advice for that
+  kind of finding, with the `[[allow]]` route and an `aigate-lite explain` pointer. Secret-only wording is unchanged.
+- `check --format json`, `sarif` and `github` with nothing staged print a valid empty report (they printed nothing before).
+  Exit code is still 0; text and agent output are unchanged.
+- `security.weak_crypto` also matches camelCase names (`sessionToken = Math.random()`, `sha1(userToken)`). Names such as
+  `tokenizer` and `passwordless` stay quiet.
+- SHA-1 or MD5 of a secret-word variable in a test file is a WARN for a person, including under sensitive paths. An AI agent's
+  result is unchanged.
+- `review.claim_mismatch` counts a change to a TypeScript or JavaScript exported function's parameter count as a signature
+  change (review command only; the commit hook does not run it).
+
+### Fixed
+- A provider key on a line longer than 4,000 characters is found again (only the provider-key patterns run on such lines).
+
+### Added
+- An evaluation harness in `eval/`: a fixed corpus of real, seeded, adversarial and clean cases with frozen labels, a runner
+  (`py eval/run.py`), a scoreboard, and a ratchet that fails on any regression. CI runs the offline families; a nightly workflow
+  runs the full corpus on three operating systems.
+
+### Tests
+- `tests/test_secrets_deps.py` expectation changed to match the one-BLOCK-per-key-file behaviour (intended).
+
+### Not in this release
+- A Go data-gated `t.Skip` is still a FIX for a person. A message-text rule was rejected by two independent reviews.
+- Clean-repository scoring with an allow entry for a known key fixture, and dated registry snapshots for clean repositories.
+- Whether `examples/` and `docs/` should be outside the sensitive-path escalation (open question for the owner).
+
+## 0.5.1 — 2026-11-13: fix every known error (network/TLS, Windows, JS/TS precision, metadata, docs, tests)
 
 ### Fixed
 - **Correctness: a local error no longer hides real findings.** With `SSLKEYLOGFILE` pointing at a file that cannot be
