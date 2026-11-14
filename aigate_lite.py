@@ -3709,7 +3709,7 @@ def _dist_tops(dist) -> set:
     for p in paths:
         parts = p.split("/")                 # no "\\" handling, exactly like the stdlib (keeps results identical)
         name = parts[0] if len(parts) > 1 else (inspect.getmodulename(parts[0]) or parts[0])
-        if name and "." not in name:
+        if name and "." not in name and name != "__pycache__":      # compiled files, not a module (3.11 leaves it out too)
             names.add(name)
     return names
 
