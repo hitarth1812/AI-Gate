@@ -254,7 +254,7 @@ def test_a_string_or_comment_that_looks_like_a_main_guard_does_not_hide_a_functi
 def test_the_version_matches_the_changelog():
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     first = re.search(r"^## \[?v?(\d+\.\d+\.\d+)", changelog, re.M).group(1)
-    assert aigate.__version__ == first == "0.5.1"
+    assert aigate.__version__ == first == "0.5.2"
 
 
 def doctor_version(repo):

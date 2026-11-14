@@ -53,7 +53,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.5.1"
+__version__ = "0.5.2"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
