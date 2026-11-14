@@ -2765,15 +2765,15 @@ CI_PATH = re.compile(r"(?i)(?:^|/)(?:\.github/workflows|\.circleci|\.buildkite)/
 def _soft_value(val, docs, test=False, rest="", json_key=False) -> str | None:
     """"pass" (information only) for people when a credential-named value is an identifier label such as `reset_password`
     or, in documentation, a `dev-...` placeholder. An AI agent's change keeps the finding: a passphrase of lowercase words
-    looks the same as a label. Also: the path-shaped name of a secret (`atlas/jwt-signing-keys`), a prefix literal that is
-    concatenated with a call (`"uac-token-" + unique("t")`, `rest` is the text after the literal), and, in documentation or
-    a test, a value that is only lowercase words (`a-strong-dev-password`; in a test only as a JSON key's value, never
+    looks the same as a label. Also, in a test: the path-shaped name of a secret (`atlas/jwt-signing-keys`) and a prefix
+    literal that is concatenated with a call (`"uac-token-" + unique("t")`, `rest` is the text after the literal); and, in
+    documentation or a test, a value that is only lowercase words (`a-strong-dev-password`; in a test only as a JSON key's value, never
     `cfg.Secret = "a-sufficiently-long-secret"`) or, in a test, a word and a number (`challenge-1`)."""
     if len(val) <= 40 and LABEL_VALUE.fullmatch(val):
         return "pass"
-    if len(val) <= 60 and PATH_ID_VALUE.fullmatch(val):
+    if test and len(val) <= 60 and PATH_ID_VALUE.fullmatch(val):
         return "pass"
-    if len(val) <= 40 and CONCAT_PREFIX.fullmatch(val) and CALL_AFTER.match(rest):
+    if test and len(val) <= 40 and CONCAT_PREFIX.fullmatch(val) and CALL_AFTER.match(rest):
         return "pass"
     if (docs or (test and json_key)) and len(val) <= 40 and WORDS_VALUE.fullmatch(val):
         return "pass"

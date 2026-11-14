@@ -98,7 +98,18 @@ NEGATIVES = {
     "json-real-token": ("internal/x_test.go", f'func T() {{\n\tu := post(t, `{{"token":"{REAL}"}}`)\n}}\n'),
     "challenge-real-token": ("src/lib/api/errors.test.ts", f"const v = {{ challenge_token: '{REAL}' }};\n"),
     "short-id-not-in-a-test": ("src/lib/auth.ts", "const v = { password: 'challenge-1' };\n"),
+    # the path-shaped and concatenated shapes are softened in test files only, never in ordinary source
+    "path-id-in-source": ("src/main.go", 'var o = Options{SecretID: "prod/db/master-password"}\n'),
+    "path-value-in-python-source": ("src/a.py", 'password = "hunter/two/three"\n'),
+    "concat-in-source": ("src/main.go", 'var token = "uac-token-" + unique("t")\n'),
 }
+
+
+@pytest.mark.parametrize("name", ["path-id-in-source", "path-value-in-python-source", "concat-in-source"])
+def test_path_and_concat_shapes_in_source_stay_fix_for_a_person_and_an_agent(repo, name):
+    path, text = NEGATIVES[name]
+    person, agent = person_and_agent(repo, path, text)
+    assert person == ["fix"] and agent == ["fix"]
 
 
 @pytest.mark.parametrize("name", sorted(NEGATIVES))
