@@ -8,7 +8,7 @@ from conftest import aigate
 SNAP = Path(__file__).with_name("snapshots")
 UPDATE = os.environ.get("AIGATE_UPDATE_SNAPSHOTS") == "1"
 make = aigate.make
-AWS_LIKE = "AKIA" + "QWERTYUIOPASDFGH"
+AWS_LIKE = "AKIA" + "qwertyuiopasdfgh".upper()
 
 
 def result(findings, verdict, risk, *, escalated=False, agent=False):

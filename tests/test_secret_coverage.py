@@ -6,7 +6,7 @@ import pytest
 
 from conftest import find
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()
 
 
 def stage(repo, rel, text):

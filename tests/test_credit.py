@@ -12,7 +12,7 @@ from conftest import ROOT, aigate, project_files
 from test_review_api import base, change
 from test_review_rest import review
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()
 AUTHOR = "Hitarth Khatiwala"
 URL = "https://github.com/hitarth1812/AI-Gate"
 TOOL = f"TOOL aigate-lite {aigate.__version__} {URL}"

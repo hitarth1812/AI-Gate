@@ -3,7 +3,7 @@ import json
 from conftest import find
 
 SHELL = "import subprocess\n\n\ndef f{i}(x):\n    return subprocess.run(x, shell=True)\n"
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 
 
 def shells(repo, n=4):

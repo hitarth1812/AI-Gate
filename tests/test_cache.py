@@ -5,7 +5,7 @@ import sys
 
 from conftest import SCRIPT, aigate, find
 
-AWS = "AKIA" + "QWERTYUIOPASDFGH"                 # split so this file is not itself a finding
+AWS = "AKIA" + "qwertyuiopasdfgh".upper()                 # split so this file is not itself a finding
 CLEAN = "import json\n\n\ndef dump(x):\n    return json.dumps(x)\n"
 
 

@@ -3,7 +3,7 @@ import json
 from conftest import aigate
 
 make = aigate.make
-AWS_LIKE = "AKIA" + "QWERTYUIOPASDFGH"
+AWS_LIKE = "AKIA" + "qwertyuiopasdfgh".upper()
 
 
 def result(findings, verdict, risk):

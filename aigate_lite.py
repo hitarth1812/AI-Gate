@@ -2939,6 +2939,90 @@ def _secrets_file(ctx, fc, where) -> list:
             # a line this long is not judged by the value and name patterns (too slow on minified code), but a provider
             # key is still found: the provider patterns are bounded and anchored (0.5.2, D1)
             out.extend(provider_findings(ctx, fc, line_no, text, where, seen=set()))
+    if fc.ext in PY_EXTS and _may_fold(fc.added):
+        out.extend(_folded_key_findings(ctx, fc, where, {(f.line, f.key) for f in out}))
+    return out
+
+
+# A provider key written as a constant string operation (`'AKIA' + 'QWERTY...'`, `''.join([...])`, adjacent literals) is
+# one key at run time. Only a file with an added line that has such an operation is parsed again for it.
+_FOLD_GATE = re.compile(r"""['"]\s*\+\s*(?:[A-Za-z]{0,2}['"]|$)|^\s*\+\s*[A-Za-z]{0,2}['"]|"""
+                        r"""\.join\s*\(\s*[\[(]?\s*(?:[A-Za-z]{0,2}['"]|$)|['"]\s+[A-Za-z]{0,2}['"]""")
+_ADJACENT_LITERALS = re.compile(r"""['"]\s+[A-Za-z]{0,2}['"]""")
+_TRIPLE_QUOTED = re.compile(r"""[A-Za-z]{0,2}(?:'''|\"\"\")""")
+
+
+def _may_fold(added) -> bool:
+    for line_no, text in added.items():
+        if len(text) <= 4000 and _FOLD_GATE.search(text):
+            return True
+        nxt = added.get(line_no + 1)                                  # adjacent literals over two lines
+        if nxt is not None and text.rstrip()[-1:] in ("'", '"') and re.match(r"""\s*[A-Za-z]{0,2}['"]""", nxt):
+            return True
+    return False
+
+
+def _fold_str(node):
+    """The value of a constant string expression: str constants, `+` of them, `''.join([...])` / `join((...))` of them,
+    an f-string with only constant parts. None when any piece is not constant."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _fold_str(node.left)
+        right = _fold_str(node.right) if left is not None else None
+        return None if right is None else left + right
+    if isinstance(node, ast.JoinedStr):
+        parts = [v.value if isinstance(v, ast.Constant) else
+                 (_fold_str(v.value) if isinstance(v, ast.FormattedValue) and v.conversion == -1 and v.format_spec is None
+                  else None) for v in node.values]
+        return None if None in parts else "".join(parts)
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join" \
+            and len(node.args) == 1 and not node.keywords and isinstance(node.args[0], (ast.List, ast.Tuple)):
+        sep = _fold_str(node.func.value)
+        items = [_fold_str(e) for e in node.args[0].elts]
+        return None if sep is None or None in items else sep.join(items)
+    return None
+
+
+def _folded_key_findings(ctx, fc, where, have) -> list:
+    text = ctx.new_text(fc)
+    try:
+        tree = ast.parse(text or "")
+    except (SyntaxError, ValueError, RecursionError, MemoryError):
+        return []
+    out = []
+    rows = (text or "").replace("\r\n", "\n").replace("\r", "\n").split("\n")      # the line numbering of ast
+
+    def literal_value(node):                  # a str constant written as adjacent literals (not triple-quoted)
+        if not _ADJACENT_LITERALS.search("\n".join(rows[node.lineno - 1:node.end_lineno or node.lineno])):
+            return None
+        first = rows[node.lineno - 1]
+        rest = first[node.col_offset:] if first.isascii() else first.encode("utf-8", "replace")[node.col_offset:].decode("utf-8", "replace")
+        return None if _TRIPLE_QUOTED.match(rest) else node.value
+
+    def visit(node):
+        folds = (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)) or \
+                (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "join")
+        if folds or (isinstance(node, ast.Constant) and isinstance(node.value, str)):
+            val = _fold_str(node) if folds else literal_value(node)
+            if val is not None:
+                hit_lines = [n for n in range(node.lineno, (node.end_lineno or node.lineno) + 1) if n in fc.added]
+                if hit_lines:
+                    line = node.lineno if node.lineno in fc.added else hit_lines[0]
+                    for f in provider_findings(ctx, fc, line, val, where, seen=set()):
+                        if (f.line, f.key) not in have:
+                            have.add((f.line, f.key))
+                            out.append(f)
+                return
+        for child in ast.iter_child_nodes(node):
+            visit(child)
+
+    try:
+        for stmt in ast.walk(tree):
+            if isinstance(stmt, ast.stmt) and not hasattr(stmt, "body") and not isinstance(stmt, ast.Match):
+                visit(stmt)
+    except RecursionError:                                       # a pathological chain: what was found so far stands
+        pass
     return out
 
 
@@ -4588,22 +4672,56 @@ class TInfo:
     marks: set
     cases: int | None
     body: str
+    mark_line: int | None = None       # where an aliased skip is spelled (the decorator, or the variable's assignment)
 
 
-def _marks(nodes) -> set:
+def _marks(nodes, aliases=None) -> set:
     out = set()
     for d in nodes:
-        last = (dotted_name(d.func if isinstance(d, ast.Call) else d) or "").split(".")[-1].lower()
+        name = dotted_name(d.func if isinstance(d, ast.Call) else d) or ""
+        last = name.split(".")[-1].lower()
         if last in SKIP_MARKS:
             out.add(last)
+        elif aliases and name in aliases:
+            out.add(aliases[name][1])
     return out
 
 
-def _pytestmark(body) -> set:
+def _mark_aliases(tree) -> dict:
+    """Module-level `later = pytest.mark.skip` (or `m.skip(...)` after `from pytest import mark as m`):
+    {name: (line, mark)}. The value must be a skip mark reached through pytest / unittest or a name imported from them."""
+    roots = {"pytest", "unittest"}
+    for n in tree.body:
+        if isinstance(n, ast.ImportFrom) and (n.module or "").split(".")[0] in ("pytest", "unittest"):
+            roots |= {a.asname or a.name for a in n.names}
+        elif isinstance(n, ast.Import):
+            roots |= {a.asname for a in n.names if a.asname and a.name.split(".")[0] in ("pytest", "unittest")}
+    out = {}
+    for n in tree.body:
+        if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name):
+            name = dotted_name(n.value.func if isinstance(n.value, ast.Call) else n.value) or ""
+            last = name.split(".")[-1].lower()
+            if last in SKIP_MARKS and "." in name and name.split(".")[0] in roots:
+                out[n.targets[0].id] = (n.lineno, last)
+    return out
+
+
+def _mark_line(decorators, aliases) -> int | None:
+    """Line of the first skip decorator that is not spelled `pytest.mark.x` / `unittest.x`, else None."""
+    for d in decorators:
+        name = dotted_name(d.func if isinstance(d, ast.Call) else d) or ""
+        if name in aliases:
+            return aliases[name][0]
+        if name.split(".")[-1].lower() in SKIP_MARKS and name.split(".")[0] not in ("pytest", "unittest"):
+            return d.lineno
+    return None
+
+
+def _pytestmark(body, aliases=None) -> set:
     out = set()
     for n in body:
         if isinstance(n, ast.Assign) and any(isinstance(t, ast.Name) and t.id == "pytestmark" for t in n.targets):
-            out |= _marks(n.value.elts if isinstance(n.value, (ast.List, ast.Tuple)) else [n.value])
+            out |= _marks(n.value.elts if isinstance(n.value, (ast.List, ast.Tuple)) else [n.value], aliases)
     return out
 
 
@@ -4647,20 +4765,21 @@ def python_tests(tree) -> dict:
     out = {}
     if tree is None:
         return out
-    module_marks = _pytestmark(tree.body)
+    aliases = _mark_aliases(tree)
+    module_marks = _pytestmark(tree.body, aliases)
 
     def info(fn, qual, inherited):
         count, consts = _assert_info(fn)
         body = hashlib.sha1(ast.dump(ast.Module(body=fn.body, type_ignores=[])).encode()).hexdigest()
-        return TInfo(qual, fn.lineno, count, consts, inherited | _marks(fn.decorator_list) | _body_skips(fn),
-                     _cases(fn), body)
+        return TInfo(qual, fn.lineno, count, consts, inherited | _marks(fn.decorator_list, aliases) | _body_skips(fn),
+                     _cases(fn), body, _mark_line(fn.decorator_list, aliases))
 
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             out[node.name] = info(node, node.name, module_marks)
         elif isinstance(node, ast.ClassDef) and (node.name.startswith("Test") or any(
                 (dotted_name(b) or "").endswith("TestCase") for b in node.bases)):
-            cls_marks = module_marks | _marks(node.decorator_list) | _pytestmark(node.body)
+            cls_marks = module_marks | _marks(node.decorator_list, aliases) | _pytestmark(node.body, aliases)
             for item in node.body:
                 if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
                     out[f"{node.name}.{item.name}"] = info(item, f"{node.name}.{item.name}", cls_marks)
@@ -4768,7 +4887,8 @@ def check_tests(ctx) -> list:
             o = old.get(q)
             if o is None:
                 if n.marks:
-                    f = make("tests.skip_added", fc.path, n.line, f"new test {q} is marked {', '.join(sorted(n.marks))}", key=q)
+                    f = make("tests.skip_added", fc.path, n.mark_line if n.mark_line in fc.added else n.line,
+                             f"new test {q} is marked {', '.join(sorted(n.marks))}", key=q)
                     if n.marks <= {"skipif"}:
                         f.human, f.hint = "warn", SKIP_HINT
                     out.append(f)
@@ -4781,7 +4901,8 @@ def check_tests(ctx) -> list:
                 out.append(make("tests.assertions_removed", fc.path, n.line,
                                 f"{q}: parametrized cases {o.cases} → {n.cases}", key=q + ":cases"))
             if n.marks - o.marks:
-                f = make("tests.skip_added", fc.path, n.line, f"{q}: now {', '.join(sorted(n.marks - o.marks))}", key=q)
+                f = make("tests.skip_added", fc.path, n.mark_line if n.mark_line in fc.added else n.line,
+                         f"{q}: now {', '.join(sorted(n.marks - o.marks))}", key=q)
                 if (n.marks - o.marks) <= {"skipif"}:
                     f.human, f.hint = "warn", SKIP_HINT
                 out.append(f)
@@ -5527,9 +5648,28 @@ def _python_nodes(ctx, fc, tree, test) -> list:
     return out
 
 
+_BUILTINS_MAPS = {"__builtins__", "builtins"}
+
+
+def _builtin_call_name(func) -> str | None:
+    """`eval` / `exec` reached through the builtins mapping: `__builtins__['eval']`, `builtins.eval`,
+    `getattr(builtins, 'eval')`. None for anything else (an unrelated dict with an 'eval' key included)."""
+    def key(node):
+        return node.value if isinstance(node, ast.Constant) and node.value in ("eval", "exec") else None
+    if isinstance(func, ast.Subscript) and isinstance(func.value, ast.Name) and func.value.id in _BUILTINS_MAPS:
+        return key(func.slice)
+    if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in _BUILTINS_MAPS \
+            and func.attr in ("eval", "exec"):
+        return func.attr
+    if isinstance(func, ast.Call) and dotted_name(func.func) == "getattr" and len(func.args) >= 2 \
+            and isinstance(func.args[0], ast.Name) and func.args[0].id in _BUILTINS_MAPS:
+        return key(func.args[1])
+    return None
+
+
 def _python_call(fc, node, line, imported_embed, qual=lambda n: "<module>") -> list:
     out = []
-    name = dotted_name(node.func) or ""
+    name = _builtin_call_name(node.func) or dotted_name(node.func) or ""
     last = name.split(".")[-1]
     kw = {k.arg: k.value for k in node.keywords if k.arg}
 

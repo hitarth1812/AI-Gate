@@ -286,7 +286,7 @@ def test_an_agent_never_runs_a_command_found_by_name_and_runs_python_isolated(re
 @needs_sh
 def test_an_agent_with_the_pinned_python_gone_never_searches_path(repo, tmp_path):
     install_installed(repo, pinned="/nonexistent/pinned/python")
-    repo.write("leak.py", 'KEY = "' + "AKIA" + 'QWERTYUIOPASDFGH"\n')                 # a commit that must be blocked
+    repo.write("leak.py", 'KEY = "' + "AKIA" + "qwertyuiopasdfgh".upper() + '"\n')                 # a commit that must be blocked
     repo.add()
     log = tmp_path / "calls.log"
     fake = f"echo \"python3 $*\" >> '{log.as_posix()}'\nexit 0"                         # a stand-in that passes everything
@@ -566,7 +566,7 @@ def test_an_agent_commit_runs_the_installed_package_through_the_pinned_python(ve
     shim = "exit 0"                                       # a planted `aigate-lite` that would pass everything
     proc = run_installed(repo, "pre-commit", fake_bin(tmp_path, {"aigate-lite": shim}), env=AGENT)
     assert proc.returncode == 0, proc.stdout + proc.stderr
-    repo.write("leak.py", 'KEY = "' + "AKIA" + 'QWERTYUIOPASDFGH"\n')
+    repo.write("leak.py", 'KEY = "' + "AKIA" + "qwertyuiopasdfgh".upper() + '"\n')
     repo.add()
     other = tmp_path / "other"
     other.mkdir()
