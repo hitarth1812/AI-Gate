@@ -16,6 +16,13 @@
   `Math.random()` in an e2e or mock file outside sensitive paths. An AI agent's result is unchanged; the same shapes with a real
   secret still warn or block for everyone.
 
+### Fixed
+- `deps.hallucinated` no longer blocks, for a person or an AI agent: `import annotationlib` and `compression` (standard library
+  from Python 3.14, on a running Python that is older); the words `from "x"` inside a JavaScript string or comment (a test title);
+  a module that a test file writes to a temporary directory and then imports. A made-up package in real code still blocks, and a
+  line the lexer cannot read (an unterminated quote) now counts its imports as code.
+- `tests.skip_added`, `secrets.hardcoded` and `security.eval` miss fewer disguised cases (see Added).
+
 ### Added
 - Python: a provider key written as `"AKIA" + "..."`, `"".join([...])`, a constant-only f-string or adjacent string literals is
   folded and checked like a plain literal (JavaScript, TypeScript and Go are not covered yet).
