@@ -139,6 +139,8 @@ def apply_generators(case: Case, repo: Path):
             continue
         elif kind == "empty":
             p.write_bytes(b"")
+        elif kind == "text":                          # a file whose NAME would trip the repository's own self-scan (.env.local)
+            p.write_bytes(fill(g["text"].encode()))
         else:
             raise SystemExit(f"{case.id}: unknown generator {kind}")
     for t in case.meta.get("transform", []):
@@ -280,7 +282,20 @@ def run_case(case: Case, script: Path, who: str, cache: Path, tmp_root: Path, cl
         env["AIGATE_REGISTRY_FIXTURE"] = ""            # real projects: the fixture knows nothing about their packages
         if repo is None:
             return {"skipped": why, "findings": [], "ms": 0, "crash": None, "verdict": None}
-        res = gate(script, repo, env, ["check", "--all", "--offline", "--no-cache", "--format", "json"])
+        args = ["check", "--all", "--offline", "--no-cache", "--format", "json"]
+        snap = HERE / "snapshots" / f"{case.id}.json"
+        if snap.is_file():               # decided (C): replay a dated registry snapshot (no network) so the dependency checks run
+            env["AIGATE_REGISTRY_FIXTURE"] = str(snap)
+            env["AIGATE_NOW"] = json.loads(snap.read_text(encoding="utf-8"))["_meta"]["now"]
+            args.remove("--offline")
+        allows = case.meta.get("allow", [])
+        if allows:                       # decided (A5): a committed private-key fixture is BLOCK until allowed; the case lists
+            cfg = tmp / "lite.toml"      # its allow entries (path + reason) and is scored with them, as a person would
+            cfg.write_text("version = 1\n" + "".join(
+                f'\n[[allow]]\nrule = {json.dumps(a["rule"])}\npath = {json.dumps(a["path"])}\nreason = {json.dumps(a["reason"])}\n'
+                for a in allows), encoding="utf-8")
+            args += ["--config", str(cfg)]
+        res = gate(script, repo, env, args)
         return res
     try:
         repo = build_repo(case, tmp, env)
@@ -447,6 +462,11 @@ def main(argv=None):
     ap.add_argument("--failures", action="store_true", help="list every failing key of the training set")
     ap.add_argument("--perf", action="store_true", help="with --check: also fail when p95 runtime is >25%% over the ratchet")
     args = ap.parse_args(argv)
+    for stream in (sys.stdout, sys.stderr):                  # a finding message may hold characters a legacy console cannot print
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     families = set(args.families.split(",")) if args.families else None
     cases = load_cases(families, set(args.case) if args.case else None)
     if not cases:

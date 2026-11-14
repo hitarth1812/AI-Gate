@@ -1,0 +1,11 @@
+{
+  "name": "shop",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest-super-matchers-pro": "^2.0.0"
+  }
+}

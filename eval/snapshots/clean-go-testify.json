@@ -1,0 +1,89 @@
+{
+ "_meta": {
+  "case": "clean-go-testify",
+  "date": "2026-11-14",
+  "lookups": 15,
+  "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
+  "now": "2026-11-14T09:45:22+00:00",
+  "sha": "bb548d0473d4e1c9b7bbfd6602c7bf12f7a84dd2",
+  "tool_version": "0.5.2"
+ },
+ "go": {
+  "github.com/davecgh/go-spew": {
+   "created": "2016-08-16T17:40:47Z",
+   "deprecated": null,
+   "latest": "v1.1.1",
+   "versions": {
+    "v1.0.0": null,
+    "v1.1.0": null,
+    "v1.1.1": "2018-02-21T23:26:28Z"
+   },
+   "vulns": {
+    "v1.1.1": []
+   },
+   "yanked": []
+  },
+  "github.com/ernesto-jimenez/gogen": {
+   "created": "2018-01-25T22:02:32Z",
+   "deprecated": null,
+   "latest": "v0.0.0-20180125220232-d7d4131e6607",
+   "versions": {
+    "v0.0.0-20180125220232-d7d4131e6607": "2018-01-25T22:02:32Z"
+   },
+   "vulns": {
+    "v0.0.0-20180125220232-d7d4131e6607": []
+   },
+   "yanked": []
+  },
+  "github.com/pmezard/go-difflib": {
+   "created": "2016-01-10T10:55:54Z",
+   "deprecated": null,
+   "latest": "v1.0.0",
+   "versions": {
+    "v1.0.0": "2016-01-10T10:55:54Z"
+   },
+   "vulns": {
+    "v1.0.0": []
+   },
+   "yanked": []
+  },
+  "github.com/stretchr/objx": {
+   "created": "2018-01-06T01:13:53Z",
+   "deprecated": null,
+   "latest": "v0.8.0",
+   "versions": {
+    "v0.1.0": null,
+    "v0.1.1": null,
+    "v0.2.0": null,
+    "v0.3.0": null,
+    "v0.4.0": null,
+    "v0.5.0": null,
+    "v0.5.1": null,
+    "v0.5.2": "2024-02-29T09:57:51Z",
+    "v0.5.3": null,
+    "v0.6.0": null,
+    "v0.7.0": null,
+    "v0.8.0": null
+   },
+   "vulns": {
+    "v0.5.2": []
+   },
+   "yanked": []
+  },
+  "gopkg.in/yaml.v3": {
+   "created": "2022-05-21T10:33:21Z",
+   "deprecated": null,
+   "latest": "v3.0.1",
+   "versions": {
+    "v3.0.0": null,
+    "v3.0.1": "2022-05-27T08:35:30Z"
+   },
+   "vulns": {
+    "v3.0.1": []
+   },
+   "yanked": []
+  }
+ },
+ "npm": {},
+ "pypi": {}
+}

@@ -1,0 +1,85 @@
+{
+ "_meta": {
+  "case": "clean-go-cobra",
+  "date": "2026-11-14",
+  "lookups": 12,
+  "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
+  "now": "2026-11-14T09:45:22+00:00",
+  "sha": "e94f6d0dd9a5e5738dca6bce03c4b1207ffbc0ec",
+  "tool_version": "0.5.2"
+ },
+ "go": {
+  "github.com/cpuguy83/go-md2man/v2": {
+   "created": "2019-03-14T23:30:15Z",
+   "deprecated": null,
+   "latest": "v2.0.7",
+   "versions": {
+    "v2.0.0": null,
+    "v2.0.1": null,
+    "v2.0.2": null,
+    "v2.0.3": null,
+    "v2.0.4": "2024-03-18T16:06:27Z",
+    "v2.0.5": null,
+    "v2.0.6": null,
+    "v2.0.7": null
+   },
+   "vulns": {
+    "v2.0.4": []
+   },
+   "yanked": []
+  },
+  "github.com/inconshreveable/mousetrap": {
+   "created": "2014-10-17T20:07:13Z",
+   "deprecated": null,
+   "latest": "v1.1.0",
+   "versions": {
+    "v1.0.0": null,
+    "v1.0.1": null,
+    "v1.1.0": "2022-11-27T22:01:53Z"
+   },
+   "vulns": {
+    "v1.1.0": []
+   },
+   "yanked": []
+  },
+  "github.com/spf13/pflag": {
+   "created": "2017-05-08T18:44:08Z",
+   "deprecated": null,
+   "latest": "v1.1.0",
+   "versions": {
+    "v1.0.0": null,
+    "v1.0.1": null,
+    "v1.0.10": null,
+    "v1.0.2": null,
+    "v1.0.3": null,
+    "v1.0.4": null,
+    "v1.0.5": "2019-09-18T19:59:20Z",
+    "v1.0.5-rc1": null,
+    "v1.0.6": null,
+    "v1.0.7": null,
+    "v1.0.8": null,
+    "v1.0.9": null,
+    "v1.1.0": null
+   },
+   "vulns": {
+    "v1.0.5": []
+   },
+   "yanked": []
+  },
+  "gopkg.in/yaml.v3": {
+   "created": "2022-05-21T10:33:21Z",
+   "deprecated": null,
+   "latest": "v3.0.1",
+   "versions": {
+    "v3.0.0": null,
+    "v3.0.1": "2022-05-27T08:35:30Z"
+   },
+   "vulns": {
+    "v3.0.1": []
+   },
+   "yanked": []
+  }
+ },
+ "npm": {},
+ "pypi": {}
+}

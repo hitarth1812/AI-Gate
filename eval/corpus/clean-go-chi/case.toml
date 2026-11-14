@@ -8,3 +8,9 @@ label_status = "frozen"
 repo = "https://github.com/go-chi/chi"
 sha = "67be7d9cafdaeb4e04e887ff78d09e030ee43b00"
 note = "a popular, well-maintained project: a person must see 0 BLOCK"
+
+# decided (LABEL_CHANGES A5): a committed test key is BLOCK until allowed; scored with the entry a person would add
+[[allow]]
+rule = "secrets.hardcoded"
+path = "testdata/key.pem"
+reason = "throwaway private key used by the TLS tests (test fixture)"
