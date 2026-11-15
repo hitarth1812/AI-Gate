@@ -59,6 +59,10 @@ POSITIVE = {
     "name-default-password": ("app/m.py", 'DEFAULT_PASSWORD = "winter garden lantern"\n'),
     "name-default-secret": ("app/m.py", 'default_secret = "correct horse battery staple"\n'),
     "name-empty-token": ("app/m.py", 'EMPTY_TOKEN = "winter garden lantern"\n'),
+    # a directory merely NAMED testing/ is not test code: it can be a production package or an environment config
+    "testing-go-pkg": ("pkg/testing/auth.go", 'package testing\n\nconst authToken = "tiger lily ocean breeze"\n'),
+    "testing-env-config": ("config/testing/settings.py", 'db_password = "correct horse battery staple"\n'),
+    "testing-prod-package": ("packages/testing/app.yml", 'db_password: "correct horse battery staple"\n'),
     "examples-dir":("examples/app.py", 'db_password = "correct horse battery staple"\n'),
     "samples-dir": ("samples/app.py", 'db_password = "correct horse battery staple"\n'),
     "scripts-dir": ("scripts/app.py", 'db_password = "correct horse battery staple"\n'),
@@ -199,7 +203,6 @@ NEGATIVE = {
     "sup-testutil": ("internal/testutil/auth.go", 'package testutil\n\nconst authToken = "tiger lily ocean breeze"\n'),
     "sup-testutils": ("internal/testutils/auth.go", 'package testutils\n\nconst authToken = "tiger lily ocean breeze"\n'),
     "sup-test-utils": ("app/test_utils/auth.py", 'db_password = "correct horse battery staple"\n'),
-    "sup-testing": ("pkg/testing/auth.go", 'package testing\n\nconst authToken = "tiger lily ocean breeze"\n'),
     "sup-tests-helpers": ("app/tests_helpers/auth.py", 'db_password = "correct horse battery staple"\n'),
     "sup-suffix-fixtures": ("app/user_fixtures.py", 'db_password = "correct horse battery staple"\n'),
     "sup-fixtures-py": ("app/fixtures.py", 'db_password = "correct horse battery staple"\n'),

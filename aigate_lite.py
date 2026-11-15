@@ -2776,7 +2776,7 @@ PHRASE_MESSAGE = re.compile(
 # examples/, samples/, scripts/ and seeds/ are deliberately not listed)
 PHRASE_SKIP_PATH = re.compile(r"(?i)(?:^|/)(?:locales?|i18n|l10n|lang|languages|translations?|intl)/|"
                               r"\.(?:po|pot|xlf|xliff|resx|strings|arb)$|"
-                              r"(?:^|/)(?:testdata|fixtures?|testutils?|test_utils|testing|tests?_helpers?|mocks?|__mocks__)/|"
+                              r"(?:^|/)(?:testdata|fixtures?|testutils?|test_utils|tests?_helpers?|mocks?|__mocks__)/|"
                               r"(?:^|/)(?:fixtures?\.[^/]+|[^/]*[_.-]fixtures?\.[^/]+|mock_[^/]*\.py)$")
 
 
