@@ -4,7 +4,7 @@
 
 Measured 2026-11-02T12:42:50 on Windows-11-10.0.26300-SP0, Python 3.12.10, `--offline`, warm OS cache. Command:
 
-    python bench/bench.py --against main --markdown docs/PERF.md --json C:/Users/HITART~1/AppData/Local/Temp/claude/d--aigate-lite/825dbe85-13d9-4e03-b0e5-ff168bf9d757/scratchpad/against_final.json
+    python bench/bench.py --against main --markdown docs/PERF.md --json against.json
 
 Each row alternates runs of `main` (checked out into a temporary worktree) and the working tree, so slow drift on the machine hits both sides equally. Scenarios: A = 1 file / 20 lines; B = 20 files / 400 lines (Python + JS); C = 300-file change; D = the A change in a 50,000-file repo; E = A with a 1,000-entry baseline present. Rows run the way an installed hook starts the gate (through the bytecode loader when the build has one for this OS); `startup-direct` is `python aigate_lite.py --version` as typed by a person and is not gated. E blob counts are not gated: only E has a baseline file, which older builds do not read.
 
