@@ -2762,7 +2762,6 @@ PHRASE_GATE = re.compile(r"(?i)password|passwd|pwd|passphrase|secret|token|api_?
 PHRASE_ASSIGN = re.compile(
     r"(?P<name>[A-Za-z0-9_.\-]*(?i:password|passwd|pwd|passphrase|secret|token|api_?key)[A-Za-z0-9_.\-]*)['\"]?\]?\s*"
     r"(?P<op>:=|=>|=(?!=)|:)\s*(?:[rbuf]{1,2})?(?P<q>['\"`])(?P<val>[\w-]+(?: [\w-]+){1,7})(?P=q)")
-PHRASE_NAME_SENTINEL = re.compile(r"(?:^|_)(?:no|empty|default|none|unset|missing|invalid)_")
 PHRASE_NAME_WORD = re.compile(r"(?:^|_)(?:password|passwd|pwd|passphrase|secret|token|api_?key)(?:_(?:key|value|phrase))?$")
 PHRASE_OPENER = re.compile(r"(?i)(?:enter|please|your|type|choose|confirm|select|forgot|reset)\b")
 PHRASE_MESSAGE = re.compile(
@@ -2783,8 +2782,7 @@ PHRASE_SKIP_PATH = re.compile(r"(?i)(?:^|/)(?:locales?|i18n|l10n|lang|languages|
 
 def _phrase_secret_name(name: str) -> bool:
     words = "_".join(w for w in re.split(r"[^a-z0-9]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()) if w)
-    return (bool(PHRASE_NAME_WORD.search(words)) and not PHRASE_NAME_SENTINEL.search(words)
-            and not NAME_EXCLUDE.search(name))
+    return bool(PHRASE_NAME_WORD.search(words)) and not NAME_EXCLUDE.search(name)
 
 
 def _looks_like_phrase(val: str) -> bool:
@@ -2945,9 +2943,6 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
             and not PHRASE_SKIP_PATH.search(fc.path):
         for m in PHRASE_ASSIGN.finditer(text):
             if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")):
-                before = text[:m.start()]
-                if m.group("op") == "=" and before.count("(") > before.count(")"):
-                    continue                                         # a keyword argument or a parameter default
                 val = m.group("val")
                 add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", None, fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):

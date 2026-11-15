@@ -12,9 +12,12 @@ function word (the, is, not, must, invalid, ...) or the secret word itself; a ra
 is a missed passphrase made of such words, which the entropy and provider rules do not catch either.
 
 Also silent (second commit): text that says the value lives elsewhere ("stored in vault", "injected at deploy time"), a
-sentinel name (NO_/EMPTY_/DEFAULT_ ...), a comparison (`==`), a keyword argument inside a call, and test-support
-directories and files (testdata, fixtures, testutil, mocks ...) for a person and an agent alike. examples/, samples/,
+comparison (`==`), and test-support directories and files (testdata, fixtures, testutil, mocks ...) for a person and an agent alike. examples/, samples/,
 scripts/ and seeds/ are NOT excluded.
+
+A real passphrase is a leak wherever it sits, so a keyword argument, a parameter default and a name such as DEFAULT_PASSWORD,
+EMPTY_TOKEN or default_secret all fire. The smaller rule: no name-based sentinel list. Absence is read from the VALUE
+stop-words only (`NO_TOKEN = "no value given"` is silent, `EMPTY_TOKEN = "winter garden lantern"` fires).
 
 Known limit: UI text in another language ("Mot de passe actuel" assigned to `password` outside a translation file) cannot
 be told from a passphrase by a word list and still fires, equally for a person and an agent."""
@@ -49,7 +52,14 @@ POSITIVE = {
     "hyphen-word": ("app/config.py", 'passphrase = "correct-horse battery staple"\n'),
     "yaml": ("config/app.yml", 'password: "correct horse battery staple"\n'),
     "java": ("src/Config.java", 'String dbPassword = "correct horse battery staple";\n'),
-    "examples-dir": ("examples/app.py", 'db_password = "correct horse battery staple"\n'),
+    # a real passphrase is a leak wherever it sits: a keyword argument, a parameter default, a default_/empty_ name
+    "kwarg-call": ("app/m.py", 'connect(host, password="correct horse battery staple")\n'),
+    "kwarg-nested": ("app/m.py", 'foo(bar(1), password="blue falcon sings at noon")\n'),
+    "param-default": ("app/m.py", 'def connect(host, password="winter garden lantern"):\n    pass\n'),
+    "name-default-password": ("app/m.py", 'DEFAULT_PASSWORD = "winter garden lantern"\n'),
+    "name-default-secret": ("app/m.py", 'default_secret = "correct horse battery staple"\n'),
+    "name-empty-token": ("app/m.py", 'EMPTY_TOKEN = "winter garden lantern"\n'),
+    "examples-dir":("examples/app.py", 'db_password = "correct horse battery staple"\n'),
     "samples-dir": ("samples/app.py", 'db_password = "correct horse battery staple"\n'),
     "scripts-dir": ("scripts/app.py", 'db_password = "correct horse battery staple"\n'),
     "seeds-dir": ("db/seeds/app.py", 'db_password = "correct horse battery staple"\n'),
@@ -165,8 +175,8 @@ NEGATIVE = {
     "ptr-sh": ("deploy/run.sh", 'export TOKEN="injected at deploy time"\n'),
     "ptr-yaml": ("config/app.yml", 'password: "injected at deploy time"\n'),
     "sentinel-no": ("app/m.py", 'NO_TOKEN = "no value given"\n'),
-    "sentinel-empty": ("app/m.py", 'EMPTY_TOKEN = "winter garden lantern"\n'),
-    "sentinel-default": ("app/m.py", 'DEFAULT_PASSWORD = "winter garden lantern"\n'),
+    "sentinel-empty-words": ("app/m.py", 'EMPTY_TOKEN = "empty value given"\n'),
+    "sentinel-invalid-words": ("app/m.py", 'INVALID_TOKEN = "none value set"\n'),
     "shared-store-yaml": ("config/app.yml", 'secret: "projects shared store"\n'),
     "shared-store-tf": ("infra/main.tf", 'secret = "projects shared store"\n'),
     "shared-store-toml": ("config/app.toml", 'secret = "projects shared store"\n'),
@@ -183,9 +193,6 @@ NEGATIVE = {
     "cmp-ne": ("app/m.py", 'if password != "winter garden lantern":\n    pass\n'),
     "dict-no-value": ("app/m.py", 'def f():\n    return {"token": "no value given"}\n'),
     "kwarg-no-value": ("app/m.py", 'foo(password="no value given")\n'),
-    "kwarg-passphrase": ("app/m.py", 'foo(password="winter garden lantern")\n'),
-    "kwarg-nested": ("app/m.py", 'foo(bar(1), password="winter garden lantern")\n'),
-    "param-default": ("app/m.py", 'def connect(host, password="winter garden lantern"):\n    pass\n'),
     # test-support directories and files are test code for this rule, for a person and an agent
     "sup-testdata": ("shop/testdata/auth.go", 'package shop\n\nconst authToken = "tiger lily ocean breeze"\n'),
     "sup-fixtures-dir": ("shop/fixtures/users.py", 'db_password = "correct horse battery staple"\n'),
