@@ -3896,6 +3896,14 @@ def python_imports(ctx):
                 if fc.path not in made:
                     made[fc.path] = py_created_modules(ctx.py_tree(fc)[0])
                 if any(a <= line <= b and c <= line and top == name for a, b, c, name in made[fc.path]):
+                    # a person is not told. An agent could fake this excuse (write a file named like a made-up package and import
+                    # it), so it gets a warning that names it; `human = "off"` keeps the person's result as it was.
+                    warn = make("deps.hallucinated", fc.path, line,
+                                f"`import {dotted}`: this test writes `{top}` itself in the same function before importing it, so "
+                                f"it is not looked up on PyPI; check that it is a module you meant to create, not a made-up package",
+                                action="warn", key=top)
+                    warn.human = "off"
+                    findings.append(warn)
                     continue
             declared, has_manifest, _req_py = python_declared(ctx)
             env_names, env_map = python_environment(ctx)

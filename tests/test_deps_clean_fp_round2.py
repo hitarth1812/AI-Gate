@@ -170,7 +170,10 @@ def py_findings(repo, path, text):
     repo.write("pyproject.toml", PYPROJECT)
     repo.write(path, text)
     person, agent = both(repo)
-    assert person == agent
+    # round 3 (item 4): for a module the test writes itself, an AI agent additionally gets a WARN naming the excuse
+    # (tests/test_agent_excuse_warn.py); every other finding is identical for both
+    extra = [f for f in agent if f not in person and f[0] == "deps.hallucinated" and f[3] == "warn"]
+    assert [f for f in agent if f not in extra] == person
     return blocked(person)
 
 
