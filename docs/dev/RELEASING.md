@@ -1,6 +1,6 @@
 # Releasing aigate-lite to PyPI
 
-Releases are published by [`.github/workflows/release.yml`](../.github/workflows/release.yml) with PyPI
+Releases are published by [`.github/workflows/release.yml`](../../.github/workflows/release.yml) with PyPI
 [Trusted Publishing](https://docs.pypi.org/trusted-publishers/) (OIDC). There is no API token, password or secret anywhere:
 PyPI trusts one workflow of one repository, and only the `publish` job can ask GitHub for the short-lived identity token
 (`id-token: write`).

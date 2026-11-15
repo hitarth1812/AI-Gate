@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """One-shot generator of corpus v1 (the families REAL, SEEDED and ADVERSARIAL) and eval/registry_fixture.json.
 
-    py eval/tools/seed_v1.py            # (re)write eval/corpus/ and eval/holdout/ and the fixture
+    py eval/tools/seeds/seed_v1.py            # (re)write eval/corpus/ and eval/holdout/ and the fixture
 
 After this ran and a human approved the labels, the case directories are the source of truth and labels are FROZEN:
 this script is kept only so v1 is reproducible and new rounds can copy its helpers. Do not re-run it over a corpus whose
-labels were changed on purpose (it would overwrite them). New cases go in by hand or by a new tools/seed_vN.py.
+labels were changed on purpose (it would overwrite them). New cases go in by hand or by a new tools/seeds/seed_vN.py.
 
 Every expectation is written from the intent of the case ("this injected mistake should be caught", "this look-alike is
 fine"), never copied from what the tool printed. Provider-shaped secrets are written as @@AWS@@ etc. (see run.py).
@@ -18,7 +18,7 @@ import sys
 import zlib
 from pathlib import Path
 
-HERE = Path(__file__).resolve().parent.parent
+HERE = Path(__file__).resolve().parents[2]                 # eval/ (this file is eval/tools/seeds/seed_v1.py)
 CORPUS, HOLDOUT = HERE / "corpus", HERE / "holdout"
 TESTS_FIXTURE = HERE.parent / "tests" / "registry_fixture.json"
 CASES = []

@@ -1,6 +1,6 @@
 # Roadmap
 
-Phase 1 (performance, safety and CI) is tracked in PROGRESS.md. Later phases each start in a new
+Phase 1 (performance, safety and CI) is tracked in docs/dev/PROGRESS.md. Later phases each start in a new
 session after a human review of the previous one. Do not start them early.
 
 ## Phase 2 — Usability

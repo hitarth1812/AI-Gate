@@ -83,5 +83,5 @@ on any failure that is not in it, on a higher holdout failure count, and (with `
 
 Do not change a label to make a number go up. A label that looks wrong is proposed in `eval/LABEL_CHANGES.md`; the
 human decides. `eval/TRIAGE_SHEET.md` lists every real case with its proposed label for approval.
-`eval/tools/seed_v1.py` and `eval/tools/pin_clean.py` made corpus v1 and are kept for reproducibility only (never re-run
+`eval/tools/seeds/seed_v1.py` and `eval/tools/pin_clean.py` made corpus v1 and are kept for reproducibility only (never re-run
 them over a corpus whose labels were changed on purpose).

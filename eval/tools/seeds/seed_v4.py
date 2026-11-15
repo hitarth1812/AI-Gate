@@ -2,7 +2,7 @@
 """Corpus v4 (round 3): 10 fresh HOLDOUT cases, authored from the README / docs/RULES.md rule descriptions only. Every label
 says what the rule SHOULD do; nothing was copied from what the tool printed. All cases go to eval/holdout/ (force_holdout).
 
-    py eval/tools/seed_v4.py
+    py eval/tools/seeds/seed_v4.py
 
 Same bases and helpers as seed_v1.py / seed_v2.py. Provider-shaped keys are written as @@NAME@@ (filled in by run.py) or as
 pieces that are not provider-shaped on their own, so no tracked file holds one.

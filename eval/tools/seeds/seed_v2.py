@@ -3,7 +3,7 @@
 the existing training cases do not move and the holdout rises to about 20% of the corpus. They use the same bases and helpers as
 seed_v1.py. Every expectation is written from the intent of the injected mistake, never copied from what the tool printed.
 
-    py eval/tools/seed_v2.py
+    py eval/tools/seeds/seed_v2.py
 
 Do not re-run seed_v1.py over a corpus that has v2 cases (it clears eval/corpus and eval/holdout except clean-*); run this one
 after it if both are ever needed.

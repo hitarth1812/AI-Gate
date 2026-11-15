@@ -3,7 +3,7 @@ name: release
 # Publishes to PyPI with Trusted Publishing (OIDC): no token, password or secret is used anywhere in this file.
 # PyPI project: aigate-lite - repo: hitarth1812/AI-Gate - workflow: release.yml - environment: pypi
 # A tag vX.Y.Z builds, tests the wheel, and (after the `pypi` environment is approved) publishes.
-# workflow_dispatch builds and tests only; it never publishes. See docs/RELEASING.md.
+# workflow_dispatch builds and tests only; it never publishes. See docs/dev/RELEASING.md.
 
 on:
   push:

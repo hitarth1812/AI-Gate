@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Corpus v3 (round 3): 37 labelled TRAINING cases written to eval/corpus/ (never to eval/holdout/).
 
-    py eval/tools/seed_v3.py
+    py eval/tools/seeds/seed_v3.py
 
 They were written from what README.md and docs/RULES.md say each rule should do, NOT from what the tool prints today, and no
 tool output was looked at. Some of them are meant to FAIL today (constant-folded provider keys in JS/TS/Go, the multi-word

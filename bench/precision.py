@@ -1,5 +1,5 @@
 """Run a copy of aigate_lite.py over the synthetic precision fixtures (tests/precision_fixtures.py) and compare each
-case with its expectation. Used for the before/after counts in PROGRESS.md:
+case with its expectation. Used for the before/after counts in docs/dev/PROGRESS.md:
 
     python bench/precision.py                          # this checkout, as a human
     python bench/precision.py --agent                  # this checkout, with an AI agent's provenance

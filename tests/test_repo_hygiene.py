@@ -59,5 +59,5 @@ def test_a_key_planted_in_a_copied_doc_is_found(tmp_path):
 
 def test_doc_set_covers_progress_readme_and_examples():
     files = doc_files()
-    assert {"PROGRESS.md", "README.md", "CHANGELOG.md", "pyproject.toml"} <= set(files)
+    assert {"docs/dev/PROGRESS.md", "README.md", "CHANGELOG.md", "pyproject.toml"} <= set(files)
     assert any(p.startswith("examples/") for p in files)
