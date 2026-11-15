@@ -104,3 +104,16 @@ lexer's block structure. Recommend (a) now, (b) as a later round. Needs your dec
 
 Note on A1 and the verifier brief: the verifier brief for a future round must confirm that every A-item change is done
 through the decided wording, not a looser one.
+
+## H. Round 3 proposals (engineer, awaiting the human)
+
+1. **`r3-properties-key` expects `secrets.hardcoded` BLOCK, but the token it writes is a documentation placeholder.** Not a
+   `.properties` problem: the case token `@@SLACK@@` (see `SUBST` in `eval/run.py`; it is not written out here) matches the
+   Slack pattern, then `provider_findings` drops it because `DOC_PLACEHOLDER` finds `12345678` (inside the digit runs) and
+   `AbCdEfGh` (the alphabet, case-insensitive). The same token in a `.py` file gives no `secrets.hardcoded` either, and the
+   `.properties` line then falls through to `secrets.generic` (FIX), for a person and an agent. A non-placeholder Slack token in
+   `application.properties` is BLOCK for both (tests/test_properties_provider_key.py). Options: (a) change `@@SLACK@@` in
+   `eval/run.py` to a token without a placeholder run (the label stays; a one-line change in the generator, not a label); (b)
+   keep the token and change the label to `secrets.generic` fix; (c) narrow `DOC_PLACEHOLDER`, which would turn BLOCK every
+   fake-looking token with a digit run or the alphabet in it (a wide change that needs its own FP run). Recommend **(a)**. No
+   tool change was made: weakening or widening the placeholder rule for one case is not a root-cause fix.
