@@ -1,0 +1,15 @@
+id = "h3-ts-generic-phrase-in-test"
+source = "adversarial"
+language = "typescript"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "src/login.test.ts"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "src/login.test.ts"
