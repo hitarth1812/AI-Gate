@@ -1,0 +1,15 @@
+id = "h3-py-readme-placeholder-keys"
+source = "adversarial"
+language = "python"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "README.md"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "README.md"

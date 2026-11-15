@@ -1,0 +1,12 @@
+id = "h3-go-claim-true-fix-and-test"
+source = "adversarial"
+language = "go"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["fix Total rounding and add a test for it"]
+
+[[must_not_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"

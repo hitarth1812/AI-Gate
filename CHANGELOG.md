@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: round 2 (version number to be chosen by the maintainer)
+## 0.6.0 — 2026-11-15: the evaluation harness, two rounds of fixes measured against it, and a written contract
 
 ### Changed (behaviour you will notice)
 - New `[paths] sensitive_exclude` (default `examples/**`, `docs/**`): a person's finding there is not escalated by the
@@ -15,33 +15,12 @@
   test, a value made only of lowercase words (documentation, or a JSON key's value in a test), a word-and-number test id, and
   `Math.random()` in an e2e or mock file outside sensitive paths. An AI agent's result is unchanged; the same shapes with a real
   secret still warn or block for everyone.
-
-### Fixed
-- `deps.hallucinated` no longer blocks, for a person or an AI agent: `import annotationlib` and `compression` (standard library
-  from Python 3.14, on a running Python that is older); the words `from "x"` inside a JavaScript string or comment (a test title);
-  a module that a test file writes to a temporary directory and then imports. A made-up package in real code still blocks, and a
-  line the lexer cannot read (an unterminated quote) now counts its imports as code.
-- `tests.skip_added`, `secrets.hardcoded` and `security.eval` miss fewer disguised cases (see Added).
-
-### Added
-- Python: a provider key written as `"AKIA" + "..."`, `"".join([...])`, a constant-only f-string or adjacent string literals is
-  folded and checked like a plain literal (JavaScript, TypeScript and Go are not covered yet).
-- `tests.skip_added` follows a skip mark kept in a name (`later = pytest.mark.skip(...)`, `from pytest import mark as m`) and
-  reports it at the alias; `security.eval` sees `__builtins__['eval']`, `builtins.eval` and `getattr(builtins, 'eval')`.
-- `schema_version` in `--format json` output (same value as `schema`); exit codes, JSON keys, rule-id stability, SemVer and the
-  deprecation policy are written down in `docs/CONTRACT.md` and tested.
-- `bench/bench.py --budget PCT`, used by the pull-request performance job in CI; property tests for the parsers
-  (`tests/test_fuzz.py`, needs the dev-only `hypothesis`); issue and pull-request templates, `CONTRIBUTING.md`,
-  `docs/FALSE_POSITIVES.md`.
-- The README accuracy section is generated from `eval/scoreboard.json` by `scripts/gen_accuracy.py`.
-
-## 0.5.2 — unreleased: evaluation harness and round-1 fixes
-
-### Changed (behaviour you will notice)
-- A justified `//nolint:gosec` (a reason of 4 or more words that is not a bare "false positive", "ok", "ignore" or
-  "intentional") is a FIX for a person. It stays a BLOCK for an AI agent, and a bare directive stays a BLOCK for everyone.
-- A private key file gives one BLOCK. The BLOCK prints a ready `[[allow]]` snippet with the fingerprint to fill in; an allow
-  entry for `secrets.hardcoded` removes it. The duplicate `secrets.env_file` finding for the same file is gone.
+- `suppress.security` for a Go `//nolint:gosec`: a justified directive (a reason of 4 or more words that is not a bare "false
+  positive", "ok", "ignore" or "intentional") is a FIX for a person under a sensitive path, where a bare one is a BLOCK. An AI
+  agent's result is the same as before: FIX elsewhere, BLOCK under a sensitive path, whether the directive is justified or bare.
+  Outside sensitive paths a bare or a justified directive is a FIX for everyone.
+- A private key file gives one BLOCK. The BLOCK prints a ready `[[allow]]` snippet with the fingerprint to fill in (to a person);
+  an allow entry for `secrets.hardcoded` removes it. The duplicate `secrets.env_file` finding for the same file is gone.
 - The `next:` line for a BLOCK that is not a secret no longer says "secrets cannot be baselined". It gives advice for that
   kind of finding, with the `[[allow]]` route and an `aigate-lite explain` pointer. Secret-only wording is unchanged.
 - `check --format json`, `sarif` and `github` with nothing staged print a valid empty report (they printed nothing before).
@@ -55,19 +34,45 @@
 
 ### Fixed
 - A provider key on a line longer than 4,000 characters is found again (only the provider-key patterns run on such lines).
+- `deps.hallucinated` no longer blocks, for a person or an AI agent: `import annotationlib` and `compression` (standard library
+  from Python 3.14, on a running Python that is older); the words `from "x"` inside a JavaScript string or comment (a test title);
+  a module that a test file writes to a temporary directory and then imports. A made-up package in real code still blocks, and a
+  line the lexer cannot read (an unterminated quote) now counts its imports as code.
+- The environment scan no longer reports `__pycache__` as an importable name.
+- `tests.skip_added`, `secrets.hardcoded` and `security.eval` miss fewer disguised cases (see Added).
 
 ### Added
-- An evaluation harness in `eval/`: a fixed corpus of real, seeded, adversarial and clean cases with frozen labels, a runner
-  (`py eval/run.py`), a scoreboard, and a ratchet that fails on any regression. CI runs the offline families; a nightly workflow
-  runs the full corpus on three operating systems.
+- A provider key split over constants is folded and checked like a plain literal. Python: `"AKIA" + "..."`, `"".join([...])`, a
+  constant-only f-string, adjacent string literals. JavaScript and TypeScript: `"A" + "B"`, a template literal whose `${}` holds
+  only a string literal, `["A", "B"].join("")`. Go: `"A" + "B"`, `strings.Join([]string{...}, "")`, `fmt.Sprintf` with constant
+  arguments. A line with 60,000 constants is checked in about a second.
+- `secrets.generic` also reports a secret-word name (`password`, `secret`, `token`, `api_key`, ...) assigned a multi-word string
+  literal with spaces, such as `db_password = "correct horse battery staple"`, in source that is not a test, documentation or a
+  translation file: FIX for a person and for an AI agent. A value that reads as a sentence, a label, a placeholder, a message or a
+  pointer to where the value lives ("stored in vault") is not reported. Known limit: it is English-only.
+- An AI agent gets a WARN when a made-up import in a test file is excused because the same function writes that module; a person
+  is still told nothing (the excuse is real for a person, and an agent could fake it).
+- `review.claim_mismatch` also checks four kinds of claim in a commit message, warning only when the diff clearly contradicts
+  them: "add tests" (the test files gain no test code), "remove the unused X" (the diff removes nothing), "handle the error" (no
+  error-handling line anywhere), and "fix the nil check in F" (no nil check anywhere). Reverts and messages about tests are
+  skipped. It stays silent when unsure.
+- `tests.skip_added` follows a skip mark kept in a name (`later = pytest.mark.skip(...)`, `from pytest import mark as m`) and
+  reports it at the alias; `security.eval` sees `__builtins__['eval']`, `builtins.eval` and `getattr(builtins, 'eval')`.
+- `schema_version` in `--format json` output (same value as `schema`); exit codes, JSON keys, rule-id stability, SemVer and the
+  deprecation policy are written down in `docs/CONTRACT.md` and tested.
+- An evaluation harness in `eval/`: a fixed corpus of real, seeded, adversarial and clean cases with frozen labels, a held-back
+  holdout set, dated registry snapshots for the clean repositories, a runner (`py eval/run.py`), a scoreboard, and a ratchet that
+  fails on any regression. CI runs the offline families; a nightly workflow runs the full corpus on three operating systems.
+- `bench/bench.py --budget PCT`, used by the pull-request performance job in CI; property tests for the parsers
+  (`tests/test_fuzz.py`, needs the dev-only `hypothesis`); issue and pull-request templates, `CONTRIBUTING.md`,
+  `docs/FALSE_POSITIVES.md`, `SECURITY.md`.
+- The README accuracy section is generated from `eval/scoreboard.json` by `scripts/gen_accuracy.py`.
 
 ### Tests
 - `tests/test_secrets_deps.py` expectation changed to match the one-BLOCK-per-key-file behaviour (intended).
 
 ### Not in this release
 - A Go data-gated `t.Skip` is still a FIX for a person. A message-text rule was rejected by two independent reviews.
-- Clean-repository scoring with an allow entry for a known key fixture, and dated registry snapshots for clean repositories.
-- Whether `examples/` and `docs/` should be outside the sensitive-path escalation (open question for the owner).
 
 ## 0.5.1 — 2026-11-13: fix every known error (network/TLS, Windows, JS/TS precision, metadata, docs, tests)
 

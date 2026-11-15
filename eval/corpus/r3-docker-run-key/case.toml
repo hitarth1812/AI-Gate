@@ -1,0 +1,14 @@
+id = "r3-docker-run-key"
+source = "adversarial"
+language = "dockerfile"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "Dockerfile"
+line = 2
+action = "block"
+agent_action = "block"

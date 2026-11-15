@@ -1,0 +1,14 @@
+id = "h3-ts-claim-tests-not-in-diff"
+source = "seeded"
+language = "typescript"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["add tests for the fetchAll retry logic"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

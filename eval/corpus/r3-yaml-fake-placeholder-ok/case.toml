@@ -1,0 +1,11 @@
+id = "r3-yaml-fake-placeholder-ok"
+source = "adversarial"
+language = "yaml"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "deploy/values.yaml"

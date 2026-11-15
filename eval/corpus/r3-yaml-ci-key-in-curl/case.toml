@@ -1,0 +1,14 @@
+id = "r3-yaml-ci-key-in-curl"
+source = "adversarial"
+language = "yaml"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "ci/pipeline.yml"
+line = 8
+action = "block"
+agent_action = "block"

@@ -1,0 +1,14 @@
+id = "h3-go-generate-directive"
+source = "seeded"
+language = "go"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.generate_directive"
+path = "shop/status.go"
+line = 3
+action = "warn"
+agent_action = "warn"

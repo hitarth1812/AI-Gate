@@ -53,7 +53,7 @@ from collections import Counter, defaultdict
 # concurrent.futures, configparser, glob, gzip, hashlib, importlib.metadata, importlib.util, shlex,
 # shutil, urllib.
 
-__version__ = "0.5.2"
+__version__ = "0.6.0"
 __author__ = "Hitarth Khatiwala"
 __license__ = "Apache-2.0"
 __url__ = "https://github.com/hitarth1812/AI-Gate"
@@ -2753,6 +2753,43 @@ def _looks_like_secret(name: str, val: str) -> bool:
     return entropy(val) >= 3.0
 
 
+# A secret-word name assigned a multi-word literal (a db password set to a four-word passphrase). The value must read as a
+# passphrase, not a message: words only (no punctuation, so no sentence, quote, template or SQL), 12+ characters, 2..8 words,
+# no UI-prompt opener, no function word of a message, no credential word inside it ("my secret santa list"), no placeholder.
+# The secret word must END the name (`db_password`, `apiSecret`, `secret_key`), never lead it: jinja's
+# `TOKEN_COMMENT_BEGIN = "begin of comment"` is a token type, not a secret.
+PHRASE_GATE = re.compile(r"(?i)password|passwd|pwd|passphrase|secret|token|api_?key")
+PHRASE_ASSIGN = re.compile(
+    r"(?P<name>[A-Za-z0-9_.\-]*(?i:password|passwd|pwd|passphrase|secret|token|api_?key)[A-Za-z0-9_.\-]*)['\"]?\]?\s*"
+    r"(?P<op>:=|=>|=(?!=)|:)\s*(?:[rbuf]{1,2})?(?P<q>['\"`])(?P<val>[\w-]+(?: [\w-]+){1,7})(?P=q)")
+PHRASE_NAME_WORD = re.compile(r"(?:^|_)(?:password|passwd|pwd|passphrase|secret|token|api_?key)(?:_(?:key|value|phrase))?$")
+PHRASE_OPENER = re.compile(r"(?i)(?:enter|please|your|type|choose|confirm|select|forgot|reset)\b")
+PHRASE_MESSAGE = re.compile(
+    r"(?i)\b(?:the|is|are|was|were|been|has|have|had|not|do|does|did|must|should|would|could|cannot|can|will|this|that|"
+    r"these|those|invalid|expired|missing|required|failed|incorrect|wrong|unable|supplied|provided|denied|error|you|"
+    r"password|passwords|passwd|pwd|passphrase|secret|secrets|token|tokens|key|keys|credential|credentials|login|"
+    r"username|user|email|account|session|"
+    # text that says the value lives elsewhere, or a UI toggle / label
+    r"stored|store|vault|keychain|injected|deploy|environment|env|variable|stdin|file|entry|see|later|defined|given|none|"
+    r"empty|unset|default|toggle|link|read|from|via|set|no|free|my|shared|tier)\b")
+# translation files, and test-support directories and files (test code for this rule, for a person and an agent alike;
+# examples/, samples/, scripts/ and seeds/ are deliberately not listed)
+PHRASE_SKIP_PATH = re.compile(r"(?i)(?:^|/)(?:locales?|i18n|l10n|lang|languages|translations?|intl)/|"
+                              r"\.(?:po|pot|xlf|xliff|resx|strings|arb)$|"
+                              r"(?:^|/)(?:testdata|fixtures?|testutils?|test_utils|tests?_helpers?|mocks?|__mocks__)/|"
+                              r"(?:^|/)(?:fixtures?\.[^/]+|[^/]*[_.-]fixtures?\.[^/]+|mock_[^/]*\.py)$")
+
+
+def _phrase_secret_name(name: str) -> bool:
+    words = "_".join(w for w in re.split(r"[^a-z0-9]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()) if w)
+    return bool(PHRASE_NAME_WORD.search(words)) and not NAME_EXCLUDE.search(name)
+
+
+def _looks_like_phrase(val: str) -> bool:
+    return (len(val) >= 12 and not PHRASE_OPENER.match(val) and not PHRASE_MESSAGE.search(val)
+            and not PLACEHOLDER_VALUE.search(val) and not DOC_PLACEHOLDER.search(val))
+
+
 WORDS_VALUE = re.compile(r"[a-z]+(?:[_-][a-z]+){2,}")                   # a-strong-dev-password, definitely-not-a-token
 SHORT_ID_VALUE = re.compile(r"[a-z]{3,}(?:-[a-z]+)*-\d{1,3}")             # challenge-1: a test id, not a secret
 PATH_ID_VALUE = re.compile(r"[a-z][a-z_-]*(?:/[a-z][a-z_-]*)+")           # atlas/jwt-signing-keys: the name of a secret
@@ -2900,6 +2937,14 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
                 _soft_value(val, docs, soft is not None, text[m.end():],
                             bool(re.match(r"['\"]\s*:", text[m.end("name"):]))) or fixture())
+    # a multi-word passphrase (stricter than before: a person and an agent both get "fix"); never in a test, in
+    # documentation or in a translation file, which keep today's behaviour
+    if soft is None and " " in text and PHRASE_GATE.search(text) and not DOC_PATH.search(fc.path) \
+            and not PHRASE_SKIP_PATH.search(fc.path):
+        for m in PHRASE_ASSIGN.finditer(text):
+            if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")):
+                val = m.group("val")
+                add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", None, fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
@@ -2941,6 +2986,8 @@ def _secrets_file(ctx, fc, where) -> list:
             out.extend(provider_findings(ctx, fc, line_no, text, where, seen=set()))
     if fc.ext in PY_EXTS and _may_fold(fc.added):
         out.extend(_folded_key_findings(ctx, fc, where, {(f.line, f.key) for f in out}))
+    elif fc.ext in _FOLD_LANG_EXTS and _may_fold_js_go(fc.added, _SPEC_EXT[fc.ext] == "go"):
+        out.extend(_folded_key_findings_js_go(ctx, fc, where, {(f.line, f.key) for f in out}, _SPEC_EXT[fc.ext] == "go"))
     return out
 
 
@@ -3034,6 +3081,245 @@ def _folded_key_findings(ctx, fc, where, have) -> list:
             if isinstance(stmt, ast.stmt) and not hasattr(stmt, "body") and not isinstance(stmt, ast.Match):
                 visit(stmt)
     except RecursionError:                                       # a pathological chain: what was found so far stands
+        pass
+    return out
+
+
+# The same fold for JavaScript / TypeScript and Go, on the lexer's view of the file (no parser): `"A" + "B"` chains,
+# a template literal whose `${}` holds only a string literal, `["A", "B"].join("")`, Go `strings.Join([]string{...}, "")` and
+# `fmt.Sprintf("%s%s", "A", "B")` with constant arguments. Any piece that is not a constant means no fold of that expression.
+_FOLD_LANG_EXTS = frozenset(_SPEC_EXT)
+_FOLD_GATE_JS = re.compile(r"""['"`]\s*\+|\+\s*['"`]|\.\s*join\s*\(\s*(?:['"`]|$)|\$\{\s*['"]""")
+_FOLD_GATE_GO = re.compile(r"""["`]\s*\+|\+\s*["`]|\bstrings\s*\.\s*Join\s*\(\s*(?:\[\]\s*string\s*\{|$)|"""
+                           r"""\bSprintf\s*\(\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`)\s*,\s*(?:["`]|$)""")
+_FOLD_TOK_BASE = (r"""(?P<q>["'`])|(?P<p>\+)|(?P<o>[(\[\]),{}])|(?P<x>\w+|[^\w\s"'`+()\[\],{}.]+|\.)""")
+_FOLD_TOK_JS = re.compile(r"""(?P<j>\.\s*join\s*\()|""" + _FOLD_TOK_BASE)
+_FOLD_TOK_GO = re.compile(r"""(?P<g>\bstrings\s*\.\s*Join\s*\()|(?P<f>\bfmt\s*\.\s*Sprintf\s*\()|"""
+                          r"""(?P<l>\[\]\s*string\s*\{)|""" + _FOLD_TOK_BASE)
+_FOLD_QUOTED = {'"': re.compile(r'"((?:[^"\\\n]++|\\[\s\S])*+)"'), "'": re.compile(r"'((?:[^'\\\n]++|\\[\s\S])*+)'"),
+                "`": re.compile(r"`([^`]*)`")}
+_FOLD_TEMPLATE_PIECE = re.compile(r"""\\[\s\S]|\$\{\s*(?:"((?:[^"\\\n]++|\\[\s\S])*+)"|'((?:[^'\\\n]++|\\[\s\S])*+)')\s*\}|\$\{""")
+_FOLD_TEMPLATE = re.compile(r"""`((?:[^`\\$]++|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"(?:[^"\\\n]++|\\[\s\S])*+"|'(?:[^'\\\n]++|\\[\s\S])*+')\s*\})*+)`""")
+_FOLD_ESCAPE = re.compile(r"\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|([0-7]{1,3})|(\r\n|[\s\S]))")
+_FOLD_ESCAPED = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "\n": "", "\r\n": ""}
+_FOLD_VERB = re.compile(r"(%.)", re.S)
+
+
+def _may_fold_js_go(added, go) -> bool:
+    gate = _FOLD_GATE_GO if go else _FOLD_GATE_JS
+    return any(len(text) <= 4000 and gate.search(text) for text in added.values())
+
+
+def _fold_unescape(s):
+    if "\\" not in s:
+        return s
+
+    def one(m):
+        wide, unit, hexa, octal, c = m.groups()
+        try:
+            if wide or unit or hexa:
+                return chr(int(wide or unit or hexa, 16))
+            if octal:
+                return chr(int(octal, 8))
+        except (ValueError, OverflowError):
+            return ""
+        return _FOLD_ESCAPED.get(c, c)
+    return _FOLD_ESCAPE.sub(one, s)
+
+
+def _fold_template(body):
+    """(value, had an interpolation) of a JS template literal whose interpolations are all string literals; None otherwise."""
+    parts, pos, interp = [], 0, False
+    for m in _FOLD_TEMPLATE_PIECE.finditer(body):
+        parts.append(body[pos:m.start()])
+        pos = m.end()
+        if m.group(0)[0] == "\\":
+            parts.append(_fold_unescape(m.group(0)))
+        elif m.group(0) == "${":
+            return None, False
+        else:
+            parts.append(_fold_unescape(m.group(1) if m.group(1) is not None else m.group(2)))
+            interp = True
+    parts.append(body[pos:])
+    return "".join(parts), interp
+
+
+def _fold_sprintf(fmt, args):
+    """fmt.Sprintf with only %s / %v verbs (and %%) and exactly as many constant arguments as verbs; else None."""
+    out, used = [], 0
+    for piece in _FOLD_VERB.split(fmt):
+        if piece[:1] != "%" or len(piece) != 2:
+            out.append(piece)
+        elif piece == "%%":
+            out.append("%")
+        elif piece in ("%s", "%v") and used < len(args):
+            out.append(args[used])
+            used += 1
+        else:
+            return None
+    return "".join(out) if used == len(args) else None
+
+
+def _fold_tokens(text, kinds, go):
+    """The constant-relevant tokens of a file: (kind, value, start, end, folded). kinds: s string constant, + , ( ) [ ] , { }
+    themselves, j .join( / g strings.Join( / f fmt.Sprintf( / l []string{, x anything else. A quote the lexer did not see as the
+    start of a string (inside a regular expression) is not a constant; comments are blanked by the caller."""
+    toks, pos, search = [], 0, (_FOLD_TOK_GO if go else _FOLD_TOK_JS).search
+    while True:
+        m = search(text, pos)
+        if m is None:
+            return toks
+        g, p, pos = m.lastgroup, m.start(), m.end()
+        if g == "q":
+            tok = None
+            if kinds[p] == STR and (p == 0 or kinds[p - 1] != STR):
+                ch = text[p]
+                if ch == "`" and not go:                          # a template whose interpolations are all string literals
+                    q = _FOLD_TEMPLATE.match(text, p)
+                    if q is not None:
+                        pos = q.end()
+                        val, interp = _fold_template(q.group(1))
+                        tok = ("s", val, p, pos, interp)
+                elif ch != "'" or not go:
+                    q = _FOLD_QUOTED[ch].match(text, p)
+                    if q is not None:
+                        pos = q.end()
+                        tok = ("s", q.group(1) if ch == "`" else _fold_unescape(q.group(1)), p, pos, False)
+            if tok is None:
+                tok = ("x", None, p, pos, False)
+        elif g == "p":
+            tok = ("+", None, p, pos, False) if kinds[p] != STR else ("x", None, p, pos, False)
+        elif g == "o":
+            tok = (m.group(0), None, p, pos, False) if kinds[p] != STR else ("x", None, p, pos, False)
+        elif kinds[p] == STR or g == "x":
+            tok = ("x", None, p, pos, False)
+        else:
+            tok = (g, None, p, pos, False)
+        if tok[0] == "x" and toks and toks[-1][0] == "x":
+            toks[-1] = ("x", None, toks[-1][2], pos, False)
+        else:
+            toks.append(tok)
+
+
+def _folded_key_findings_js_go(ctx, fc, where, have, go) -> list:
+    lx = ctx.lexed(fc)
+    if lx is None:                                                # no lexer view (it gave up): not folded
+        return []
+    import bisect
+    text, out, added = lx.code_text((COM,)), [], fc.added
+    try:
+        T = _fold_tokens(text, lx.kinds, go)
+    except (RecursionError, MemoryError, IndexError):
+        return []
+    n, starts, DEPTH = len(T), lx.starts, 25
+
+    def emit(val, a, b):
+        first, last = bisect.bisect_right(starts, T[a][2]), bisect.bisect_right(starts, T[b][3] - 1)
+        line = next((ln for ln in range(first, last + 1) if ln in added), None)
+        if line is not None:
+            for f in provider_findings(ctx, fc, line, val, where, seen=set()):
+                if (f.line, f.key) not in have:
+                    have.add((f.line, f.key))
+                    out.append(f)
+
+    def chain(i, depth):                                          # operand ('+' operand)*  ->  (value | None, next index, folded)
+        v, j, folded = operand(i, depth)
+        if v is None:
+            return None, j, False
+        parts = [v]
+        while j < n and T[j][0] == "+":
+            v2, j2, f2 = operand(j + 1, depth)
+            if v2 is None:                                        # a constant prefix of a chain that is not constant stands
+                if len(parts) > 1 or folded:
+                    emit("".join(parts), i, j - 1)
+                return None, j2, False
+            parts.append(v2)
+            folded, j = folded or f2, j2
+        val = parts[0] if len(parts) == 1 else "".join(parts)
+        if len(parts) > 1 or folded:
+            emit(val, i, j - 1)
+        return val, j, folded
+
+    def items(i, close, depth):                                   # a comma separated list of constants up to `close`
+        vals = []
+        while True:
+            if i >= n:
+                return None, i
+            if T[i][0] == close:
+                return vals, i
+            v, i, _ = chain(i, depth)
+            if v is None:
+                return None, i
+            vals.append(v)
+            if i < n and T[i][0] == ",":
+                i += 1
+            elif i >= n or T[i][0] != close:
+                return None, i
+
+    def operand(i, depth):
+        if i >= n:
+            return None, i + 1, False
+        kind = T[i][0]
+        if kind == "s":
+            return T[i][1], i + 1, T[i][4]
+        if depth >= DEPTH:
+            return None, i + 1, False
+        if kind == "(":
+            v, j, _ = chain(i + 1, depth + 1)
+            if j < n and T[j][0] == ")":
+                return v, j + 1, False
+            return None, j, False
+        if kind == "[" and not go:                                # [ ... ].join(sep)
+            vals, j = items(i + 1, "]", depth + 1)
+            if vals is None:
+                return None, max(j, i + 1), False
+            if j + 1 >= n or T[j + 1][0] != "j":
+                return None, j + 1, False
+            j += 2
+            if j < n and T[j][0] == ")":
+                return ",".join(vals), j + 1, True
+            sep, j, _ = chain(j, depth + 1)
+            if sep is not None and j < n and T[j][0] == ")":
+                return sep.join(vals), j + 1, True
+            return None, j, False
+        if kind == "g":                                           # strings.Join([]string{...}, sep)
+            if i + 1 >= n or T[i + 1][0] != "l":
+                return None, i + 1, False
+            vals, j = items(i + 2, "}", depth + 1)
+            if vals is None:
+                return None, max(j, i + 2), False
+            if j + 1 >= n or T[j + 1][0] != ",":
+                return None, j + 1, False
+            sep, j, _ = chain(j + 2, depth + 1)
+            if sep is not None and j < n and T[j][0] == ")":
+                return sep.join(vals), j + 1, True
+            return None, j, False
+        if kind == "f":                                           # fmt.Sprintf(format, constants...)
+            fmt, j, _ = chain(i + 1, depth + 1)
+            if fmt is None:
+                return None, j, False
+            args = []
+            while j < n and T[j][0] == ",":
+                if j + 1 < n and T[j + 1][0] == ")":              # a trailing comma
+                    j += 1
+                    break
+                arg, j, _ = chain(j + 1, depth + 1)
+                if arg is None:
+                    return None, j, False
+                args.append(arg)
+            if j < n and T[j][0] == ")":
+                return _fold_sprintf(fmt, args), j + 1, True
+            return None, j, False
+        return None, i + 1, False
+
+    i = 0
+    try:
+        while i < n:
+            if i and T[i - 1][0] == "+":                          # the right side of a chain that was not constant: no fold
+                i = operand(i, 0)[1]
+            else:
+                i = chain(i, 0)[1]
+    except RecursionError:                                        # a pathological nesting: what was found so far stands
         pass
     return out
 
@@ -3896,6 +4182,14 @@ def python_imports(ctx):
                 if fc.path not in made:
                     made[fc.path] = py_created_modules(ctx.py_tree(fc)[0])
                 if any(a <= line <= b and c <= line and top == name for a, b, c, name in made[fc.path]):
+                    # a person is not told. An agent could fake this excuse (write a file named like a made-up package and import
+                    # it), so it gets a warning that names it; `human = "off"` keeps the person's result as it was.
+                    warn = make("deps.hallucinated", fc.path, line,
+                                f"`import {dotted}`: this test writes `{top}` itself in the same function before importing it, so "
+                                f"it is not looked up on PyPI; check that it is a module you meant to create, not a made-up package",
+                                action="warn", key=top)
+                    warn.human = "off"
+                    findings.append(warn)
                     continue
             declared, has_manifest, _req_py = python_declared(ctx)
             env_names, env_map = python_environment(ctx)
@@ -7843,6 +8137,175 @@ def identifier_like(token: str, quoted: bool) -> bool:
     return quoted or token.endswith("()") or any(c in bare for c in "_./:") or bool(re.search(r"[a-z][A-Z]", bare))
 
 
+REMOVE_CLAIM = _lazy(r"\b(?:remov(?:e|es|ed|ing)|delet(?:e|es|ed|ing)|drop(?:s|ped|ping)?)\s+"
+                          r"(?:the\s+|an?\s+|some\s+|all\s+(?:the\s+)?)?(?:unused|dead)\b(?P<rest>[^\n.;:,]*)", re.I)
+ERROR_CLAIM = _lazy(r"\b(?:(?:handl(?:e|es|ed|ing)|catch(?:es|ing)?)\s+(?:(?:the|an?|any|all|some|more|missing|possible|"
+                         r"unexpected)\s+)*(?:errors?|exceptions?|failures?)|(?:add(?:s|ed|ing)?|implement(?:s|ed|ing)?)\s+"
+                         r"(?:(?:the|some|more|proper|better|basic)\s+)*error[- ]handling)\b", re.I)
+NIL_CLAIM = _lazy(r"\b(?:fix(?:es|ed|ing)?|add(?:s|ed|ing)?|restor(?:e|es|ed|ing))\s+(?:(?:the|an?|missing)\s+)*"
+                       r"(?:nil|none|null|undefined)[- ](?:checks?|guards?|comparisons?)\s+(?:in|of|for|on|to|inside)\s+"
+                       r"(?:the\s+)?(?:(?:function|method)\s+)?[`'\"]?(?P<x>[A-Za-z_]\w*(?:\.\w+)*)", re.I)
+NOT_A_CLAIM = _lazy(r"(?:n't|\b(?:not|never|cannot|unable|without|should|shall|will|would|could|can|may|might|must|need|needs|"
+                         r"want|wants|todo|if|whether|how))\b[^.\n]*$", re.I)
+# a line that adds or removes something a test, an error path or a guard could be made of (anything here keeps a claim safe)
+TEST_LINE = _lazy(r"\b(?:def|func|fn|function)\s+(?:\([^)]*\)\s*)?\w*(?:test|bench|fuzz|example|spec|should)\w*|\bassert|\bexpect\b|"
+                       r"\b(?:it|test|describe|context|specify|suite|scenario)\s*(?:\.\w+)*\s*\(|\bt\.\w+\(|@Test\b|#\[\w*test|"
+                       r"\[(?:Test|Fact|Theory)\]|\bclass\s+\w*test|\.should\b|\b(?:verify|check)\w*\(|pytest\.raises|parametrize|"
+                       r"\.to(?:be|equal|have|throw)|\bwant\b|\bgot\b|\bcase\b|\brequire\b|\bis\.\w+\(|\w*equal\w*\(|\bshould|>>>", re.I)
+GUARD_LINE = _lazy(r"\b(?:try|except|catch|finally|rescue|recover|raise|throw|panic|defer|if|elif|else|unless|switch|match|case|when|"
+                        r"guard|assert|with|for|while|and|or|not|is|in|err|errors?|exceptions?|fail\w*|invalid|fault|suppress|retry|"
+                        r"fallback|default|abort|exit|log|warn\w*|status|reject\w*|settled|exists?|isfile|isdir|nil|none|null|"
+                        r"undefined|isinstance|typeof|ok|result|option\w*|unwrap\w*|rejected|errback)\b|[?!]|[=!]=|&&|\|\||"
+                        r"\.get\(|getattr|\bcheck\s*=|\.then\(|\.catch\b|nullsafe|"
+                        # any of these as a substring: handling idioms hide in names (ignore_errors, missing_ok, errorHandler, ...)
+                        r"err|exception|catch|except|ok|ignore|missing|fallback|handler|handle|boundary|guard|check|valid|try|"
+                        r"raise|retry|timeout|fail|reject|rescue|recover|finally|default|sentry|signal|wait|status|assert|if|"
+                        r"else|switch|getenv|environ", re.I)
+# what a nil/None check or a fix of one could be made of (no error words: `err := f()` is not a nil check)
+NIL_LINE = _lazy(r"\b(?:nil|none|null|undefined|if|elif|else|unless|not|is|and|or|assert|isinstance|typeof|guard|panic|raise|throw|"
+                      r"switch|match|case|when|try|except|catch|ok|optional)\b|[?!]|[=!]=|&&|\|\||\bget\w*\(|getattr|recover|nullsafe",
+                 re.I)
+# "add tests" is about tests, not what supports them; "remove unused X" is about code, not rows, files or packages
+NOT_THE_OBJECT = _lazy(r"\s+(?:fixtures?|helpers?|data|config\w*|utilit\w*|utils?|setup|harness|infra\w*|mocks?|stubs?|files?|"
+                            r"dirs?|directory|folders?|environments?|env|runner|scaffold\w*|coverage|plugins?|dependenc\w*|deps|"
+                            r"logging|logs?|timeouts?|jobs?|reporting|reports?|tooling|tools?|ci|workflow\w*|badge\w*|markers?|"
+                            r"flags?|options?|settings?|parallel\w*|caching|cache|retr\w+)\b", re.I)
+CODE_NOUN = frozenset("function functions method methods class classes helper helpers variable variables var vars const consts "
+                      "constant constants import imports code type types struct structs param params parameter parameters "
+                      "argument arguments def func funcs".split())
+DATA_NOUN = frozenset("column columns table tables file files folder folders dir directory directories package packages entry "
+                      "entries record records row rows index indexes indices dependency dependencies setting settings key keys "
+                      "config cache data branch branches tag tags image images volume volumes user users account accounts "
+                      "permission permissions endpoint route routes flag flags asset assets resource resources secret secrets "
+                      "label labels".split())
+# "add tests" fires only if the test files gain no test-like code: blank, comment, import, fixture and helper lines are not
+TEST_BLOCK = _lazy(r"#\[(?:[\w:]+::)?test\b|#\[cfg\(test\)\]|>>>|\bdef\s+test_|@Test\b")
+SETUP_LINE = _lazy(r"\s*(?:@(?:pytest\.)?fixture\b|import\b|from\s+\S+\s+import\b|package\b|use\s+[\w:{]|"
+                        r"(?:const|let|var)\s+(?:\w+|\{[^}]*\})\s*=\s*require\(|\"[^\"]*\"\s*$|\w+\s+\"[^\"]*\"\s*$|\)\s*$)")
+HELPER_HEAD = _lazy(r"\s*(?:(?:async\s+)?(?:def|function|func)\s+(?:\([^)]*\)\s*)?(?P<n>\w+)|"
+                         r"(?:beforeEach|afterEach|beforeAll|afterAll|setUp|tearDown|setup|teardown)\b)")
+TEST_NAME = _lazy(r"(?:test|Test|Benchmark|Fuzz|Example)")
+TESTY = _lazy(r"\b(?:tests?|testing|specs?)\b", re.I)
+MIGRATION_PATH = _lazy(r"(?:^|/)(?:migrations?|alembic|versions|schema|db)/", re.I)
+
+
+def _claimed(prose: str, m) -> bool:
+    """False when the words before a match make it a wish, a doubt or a denial rather than a statement."""
+    return not NOT_A_CLAIM.search(prose[max(0, m.start() - 28):m.start()])
+
+
+def _only_plain_edits(ctx) -> bool:
+    """Every changed file is an ordinary added or modified text file (no deletion, rename, copy, mode or binary change)."""
+    return bool(ctx.changes) and all(fc.status in ("A", "M") and not fc.binary and not fc.symlink for fc in ctx.changes)
+
+
+def _judgeable_sources(ctx) -> bool:
+    """Every changed file is a plain Python/Go/JS/TS source edit outside migrations: only then is "nothing was removed" or
+    "no error handling was added" a statement about the whole change (a manifest, ignore file, sql or ui file says more)."""
+    return _only_plain_edits(ctx) and all(fc.ext in REVIEW_EXTS and not MIGRATION_PATH.search(fc.path) for fc in ctx.changes)
+
+
+def tests_added_nothing(ctx) -> bool:
+    """True when the diff changes test files, all of them ordinary Python/Go/JS/TS edits, and adds no test function,
+    test case, assertion or data row to any of them."""
+    files = [fc for fc in ctx.changes if ctx.is_test(fc.path) and not fc.deleted]
+    if not files or any(fc.status not in ("A", "M") or fc.binary or fc.symlink or fc.ext not in REVIEW_EXTS for fc in files):
+        return False
+    if any(TEST_BLOCK.search(t) for fc in ctx.changes for t in fc.added.values()):     # test code anywhere in the diff
+        return False
+    for fc in files:
+        head, prev = None, None                 # indent of the fixture/helper being added, previous added line number
+        for n in sorted(fc.added):
+            t = fc.added[n]
+            head = None if prev is not None and n != prev + 1 else head
+            prev = n
+            if not t.strip() or COMMENT_LINE.match(t) or SETUP_LINE.match(t):
+                continue
+            indent = len(t) - len(t.lstrip())
+            if head is not None and (indent > head or t.strip() in ("}", "})", "});", ")")):
+                if TEST_LINE.search(t):
+                    return False
+                continue
+            h = HELPER_HEAD.match(t)
+            if h and not (h.group("n") and TEST_NAME.match(h.group("n"))) and not TEST_LINE.search(t):
+                head = indent
+                continue
+            return False                                                              # any other code line is test-like
+    return True
+
+
+def removal_contradicts(ctx, rest: str):
+    """Why a "remove the unused ..." claim is false, or None: only when no line is removed anywhere (any removal keeps
+    it silent: the removed thing may be a member, a neighbour or a spelling the message does not use)."""
+    if not _judgeable_sources(ctx):
+        return None
+    words = [w.lower() for w in re.findall(r"[A-Za-z_]\w*", rest)][:8]
+    if DATA_NOUN.intersection(words) or any(fc.removed for fc in ctx.changes):
+        return None
+    return "removes no line" if CODE_NOUN.intersection(words[:4]) else None
+
+
+def adds_no_error_handling(ctx) -> bool:
+    """True when non-test Python/Go/JS/TS changes exist and nothing any changed file adds or removes is a branch, an error
+    word, a handling idiom, a nil/None/null mention or a guard of any kind (see GUARD_LINE); false (silent) with any
+    other kind of file in the change."""
+    if not _judgeable_sources(ctx):
+        return False
+    code = [fc for fc in ctx.code_changes(REVIEW_EXTS, tests=False) if fc.added]
+    lines = [t for fc in ctx.changes for t in list(fc.added.values()) + [t for _n, t in fc.removed] if not COMMENT_LINE.match(t)]
+    return bool(code) and not any(GUARD_LINE.search(t) for t in lines)
+
+
+def _symbol_spans(ctx, fc, which: str, name: str):
+    """[(first, last)] line spans (1-based) of every function called `name` in the new or old version of a Python or Go
+    file; None when the file is another language, unreadable or unparsable (then nothing is claimed)."""
+    text = ctx.new_text(fc) if which == "new" else ctx.old_text(fc)
+    if text is None:
+        return None
+    if fc.ext in PY_EXTS:
+        tree = ctx.py_tree(fc, which)[0]
+        if tree is None:
+            return None
+        return [(min([n.lineno] + [d.lineno for d in n.decorator_list]), n.end_lineno) for n in ast.walk(tree)
+                if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name]
+    if fc.ext != ".go":
+        return None
+    rows, spans = text.split("\n"), []
+    head = re.compile(r"func\s+(?:\([^)]*\)\s*)?" + re.escape(name) + r"\s*[(\[]")
+    for i, row in enumerate(rows, 1):
+        if head.match(row):
+            if row.rstrip().endswith("}"):
+                spans.append((i, i))
+                continue
+            end = next((j for j in range(i + 1, len(rows) + 1) if rows[j - 1].startswith("}")), None)
+            if end is None:
+                return None
+            spans.append((i, end))
+    return spans
+
+
+def nil_check_contradicted(ctx, name: str) -> bool:
+    """True when `name` is a function defined (before and after) in a changed Python or Go file and no line added or
+    removed anywhere in the diff holds a nil/None/null mention, ok-idiom, recover, conditional, assertion or raise: a fix
+    in a helper, a caller or an idiom stays silent. Anything unclear (a name defined only elsewhere, a new function, a
+    parse failure) is False."""
+    found = False
+    for fc in ctx.changes:
+        if fc.deleted or fc.binary or ctx.is_test(fc.path) or not (fc.ext in PY_EXTS or fc.ext == ".go"):
+            continue
+        new = _symbol_spans(ctx, fc, "new", name)
+        if new is None:
+            return False
+        if not new:
+            continue
+        old = _symbol_spans(ctx, fc, "old", name)
+        if old is None or len(old) != len(new):
+            return False
+        found = True
+    lines = [t for fc in ctx.changes for t in list(fc.added.values()) + [t for _n, t in fc.removed]]
+    return found and not any(NIL_LINE.search(t) for t in lines)
+
+
 def check_claims(ctx) -> list:
     if not ctx.messages:
         return []
@@ -7851,6 +8314,7 @@ def check_claims(ctx) -> list:
     findings, seen = [], set()
     for message in ctx.messages:
         prose = message_claims(message)
+        judged = not (re.match(r"\s*revert\b", message, re.I) or "this reverts commit" in message.lower())
         for m in TESTS_CLAIM.finditer(prose):
             claim = " ".join(m.group(0).lower().split())
             if not tests_changed and ("tests", claim) not in seen:
@@ -7858,6 +8322,36 @@ def check_claims(ctx) -> list:
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but no test file changed in this diff', f"tests:{claim}",
                                    human=None))
+            elif tests_changed and judged and re.match(r"(?:add|writ|wrote)", claim) and ("tests-empty", claim) not in seen \
+                    and _claimed(prose, m) and not NOT_THE_OBJECT.match(prose, m.end()) and "doctest" not in prose.lower() \
+                    and tests_added_nothing(ctx):
+                seen.add(("tests-empty", claim))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{claim}" but no test function or assertion was added in the changed '
+                                   f'test files', f"tests-empty:{claim}", human=None))
+        for m in REMOVE_CLAIM.finditer(prose):
+            claim = " ".join(m.group(0).lower().split())
+            why = removal_contradicts(ctx, m.group("rest")) \
+                if judged and ("remove", claim) not in seen and _claimed(prose, m) else None
+            if why:
+                seen.add(("remove", claim))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{claim}" but the diff {why}', f"remove:{claim}", human=None))
+        for m in ERROR_CLAIM.finditer(prose):
+            claim = " ".join(m.group(0).lower().split())
+            if judged and ("error", claim) not in seen and _claimed(prose, m) and not TESTY.search(prose) \
+                    and adds_no_error_handling(ctx):
+                seen.add(("error", claim))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{claim}" but the diff adds no error handling (no try/except, error check, '
+                                   f'guard or branch in the changed code)', f"error:{claim}", human=None))
+        for m in NIL_CLAIM.finditer(prose):
+            name = m.group("x").split(".")[-1]
+            if judged and ("nil", name) not in seen and _claimed(prose, m) and nil_check_contradicted(ctx, name):
+                seen.add(("nil", name))
+                findings.append(rv("review.claim_mismatch", "(commit)", None,
+                                   f'the message says "{" ".join(m.group(0).lower().split())}" but no nil/None check, guard or '
+                                   f'condition is added or removed anywhere in the diff (`{name}`)', f"nil:{name}", human=None))
         for m in FIX_CLAIM.finditer(prose):
             token = m.group("x")
             if not identifier_like(token, bool(m.group("q"))):

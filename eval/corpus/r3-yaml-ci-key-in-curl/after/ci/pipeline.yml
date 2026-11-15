@@ -1,0 +1,8 @@
+name: deploy
+on: push
+jobs:
+  charge:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          curl -s -u @@STRIPE@@: https://api.stripe.com/v1/balance

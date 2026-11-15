@@ -1,27 +1,28 @@
 {
  "holdout": {
   "cases": {
-   "adversarial": 11,
+   "adversarial": 18,
    "clean": 3,
    "real": 8,
-   "seeded": 35
+   "seeded": 38
   },
   "contested": 0,
+  "failing_cases": 6,
   "failures": {
-   "FN": 8,
+   "FN": 10,
    "OVER": 1
   },
   "overall": {
    "agent_softer": 0,
    "crashes": 0,
    "false_block_clean": 0,
-   "fn": 8,
+   "fn": 10,
    "fp": 0,
    "gate_errors": 0,
    "over": 1,
-   "runs": 114,
-   "runtime_ms_p50": 444.4,
-   "runtime_ms_p95": 945.8,
+   "runs": 134,
+   "runtime_ms_p50": 393.7,
+   "runtime_ms_p95": 861.8,
    "under": 0,
    "unexpected_block": 0
   },
@@ -56,6 +57,16 @@
     "tp": 4,
     "under": 0
    },
+   "code.generate_directive": {
+    "clean": 0,
+    "fn": 0,
+    "fp": 0,
+    "over": 0,
+    "precision": 1.0,
+    "recall": 1.0,
+    "tp": 2,
+    "under": 0
+   },
    "code.todo": {
     "clean": 2,
     "fn": 0,
@@ -87,13 +98,13 @@
     "under": 0
    },
    "review.claim_mismatch": {
-    "clean": 0,
+    "clean": 2,
     "fn": 2,
     "fp": 0,
     "over": 0,
-    "precision": null,
-    "recall": 0.0,
-    "tp": 0,
+    "precision": 1.0,
+    "recall": 0.5,
+    "tp": 2,
     "under": 0
    },
    "secrets.env_file": {
@@ -107,23 +118,23 @@
     "under": 0
    },
    "secrets.generic": {
-    "clean": 1,
+    "clean": 5,
     "fn": 0,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
     "recall": 1.0,
-    "tp": 4,
+    "tp": 6,
     "under": 0
    },
    "secrets.hardcoded": {
-    "clean": 0,
-    "fn": 6,
+    "clean": 4,
+    "fn": 8,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
-    "recall": 0.5,
-    "tp": 6,
+    "recall": 0.556,
+    "tp": 10,
     "under": 0
    },
    "security.deserialization": {
@@ -187,7 +198,7 @@
     "under": 0
    },
    "tests.assertions_removed": {
-    "clean": 0,
+    "clean": 2,
     "fn": 0,
     "fp": 0,
     "over": 0,
@@ -207,7 +218,7 @@
     "under": 0
    },
    "tests.skip_added": {
-    "clean": 0,
+    "clean": 2,
     "fn": 0,
     "fp": 0,
     "over": 1,
@@ -227,34 +238,37 @@
     "under": 0
    }
   },
-  "total_cases": 57
+  "total_cases": 67
  },
  "jobs": 4,
  "platform": "win32",
  "python": "3.12.10",
  "schema": 1,
- "seconds": 158.8,
- "tool_version": "0.5.2",
+ "seconds": 193.7,
+ "tool_version": "0.6.0",
  "train": {
   "cases": {
-   "adversarial": 51,
+   "adversarial": 69,
    "clean": 10,
    "real": 61,
-   "seeded": 88
+   "seeded": 107
   },
   "contested": 0,
-  "failures": {},
+  "failing_cases": 1,
+  "failures": {
+   "FN": 2
+  },
   "overall": {
    "agent_softer": 0,
    "crashes": 0,
    "false_block_clean": 0,
-   "fn": 0,
+   "fn": 2,
    "fp": 0,
    "gate_errors": 0,
    "over": 0,
-   "runs": 420,
-   "runtime_ms_p50": 398.6,
-   "runtime_ms_p95": 2055.8,
+   "runs": 494,
+   "runtime_ms_p50": 396.9,
+   "runtime_ms_p95": 1438.4,
    "under": 0,
    "unexpected_block": 0
   },
@@ -360,13 +374,13 @@
     "under": 0
    },
    "review.claim_mismatch": {
-    "clean": 0,
+    "clean": 4,
     "fn": 0,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
     "recall": 1.0,
-    "tp": 16,
+    "tp": 26,
     "under": 0
    },
    "scope.forbidden_path": {
@@ -390,23 +404,23 @@
     "under": 0
    },
    "secrets.generic": {
-    "clean": 12,
+    "clean": 20,
     "fn": 0,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
     "recall": 1.0,
-    "tp": 20,
+    "tp": 26,
     "under": 0
    },
    "secrets.hardcoded": {
-    "clean": 8,
-    "fn": 0,
+    "clean": 16,
+    "fn": 2,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
-    "recall": 1.0,
-    "tp": 47,
+    "recall": 0.973,
+    "tp": 73,
     "under": 0
    },
    "security.eval": {
@@ -480,17 +494,17 @@
     "under": 0
    },
    "tests.skip_added": {
-    "clean": 2,
+    "clean": 8,
     "fn": 0,
     "fp": 0,
     "over": 0,
     "precision": 1.0,
     "recall": 1.0,
-    "tp": 60,
+    "tp": 64,
     "under": 0
    }
   },
   "skipped": [],
-  "total_cases": 210
+  "total_cases": 247
  }
 }

@@ -60,6 +60,9 @@ SUBST = {
     "@@GHTOKEN@@": _cat("ghp_", "Zx9kQ2vB7mN4pL1wT8yR5uJ3cH6dF0aSeGiO"),
     "@@STRIPE@@": _cat("sk_live_", "4eC39HqLyjWDarjtT1zdp7dc"),
     "@@SLACK@@": _cat("xoxb-", "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
+    # the AWS key in three pieces (round 3): a case that splits a key in its source writes the PIECES as placeholders, so no
+    # tracked file holds the key, nor a constant-foldable expression that adds up to one. "@@AKIA@@" + "@@AKT1@@@@AKT2@@" is @@AWS@@.
+    "@@AKIA@@": "AKIA", "@@AKT1@@": "QWERTYUI", "@@AKT2@@": "OPASDFGH",
     "@@PEMBEGIN@@": "-----BEGIN " + "RSA PRIVATE KEY-----",
     "@@PEMEND@@": "-----END " + "RSA PRIVATE KEY-----",
 }
@@ -445,7 +448,7 @@ def summarize(cases, results) -> dict:
                     "recall": round(tp / (tp + fn + under), 3) if tp + fn + under else None}
     kinds = collections.Counter(f.split("|", 2)[2].split(":", 1)[0] for f in fails)
     return {"cases": dict(per_family), "total_cases": sum(per_family.values()), "skipped": skipped, "contested": contested,
-            "rules": table, "failures": dict(kinds), "failing": sorted(fails),
+            "rules": table, "failures": dict(kinds), "failing": sorted(fails), "failing_cases": len({f.split("|", 1)[0] for f in fails}),
             "overall": {"false_block_clean": kinds.get("FALSE_BLOCK", 0), "unexpected_block": kinds.get("UNEXPECTED_BLOCK", 0),
                         "crashes": kinds.get("CRASH", 0), "gate_errors": kinds.get("GATE_ERROR", 0),
                         "agent_softer": softer, "fn": kinds.get("FN", 0), "fp": kinds.get("FP", 0),

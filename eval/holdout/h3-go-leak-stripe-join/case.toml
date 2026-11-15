@@ -1,0 +1,13 @@
+id = "h3-go-leak-stripe-join"
+source = "adversarial"
+language = "go"
+origin = "round 3 holdout authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/pay.go"
+action = "block"
+agent_action = "block"

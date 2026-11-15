@@ -1,0 +1,14 @@
+id = "r3-ts-key-join"
+source = "adversarial"
+language = "typescript"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "src/config.ts"
+line = 1
+action = "block"
+agent_action = "block"

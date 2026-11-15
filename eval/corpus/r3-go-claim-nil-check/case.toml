@@ -1,0 +1,14 @@
+id = "r3-go-claim-nil-check"
+source = "seeded"
+language = "go"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["fix the nil check in Load"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

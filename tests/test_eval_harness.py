@@ -213,3 +213,11 @@ def test_update_ratchet_refuses_a_new_failure_for_a_known_case(tmp_path, monkeyp
 def test_the_corpus_case_files_parse_as_toml():
     for p in list((EVAL / "corpus").glob("*/case.toml")) + list((EVAL / "holdout").glob("*/case.toml")):
         tomllib.loads(p.read_text(encoding="utf-8"))
+
+
+def test_key_fragment_placeholders_add_up_to_the_aws_key_and_are_not_a_key_alone():
+    # round 3: constant-fold cases write "@@AKIA@@" + "@@AKT1@@@@AKT2@@"; no stored piece is, or adds up to, a provider key
+    pieces = ["@@AKIA@@", "@@AKT1@@", "@@AKT2@@"]
+    assert ev.fill("".join(pieces).encode()) == ev.fill(b"@@AWS@@")
+    assert ev.fill(b'"@@AKIA@@" + "@@AKT1@@@@AKT2@@"').decode() == '"AKIA" + "QWERTYUIOPASDFGH"'
+    assert all(len(ev.SUBST[p]) < 12 for p in pieces)

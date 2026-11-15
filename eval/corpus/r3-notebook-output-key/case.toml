@@ -1,0 +1,14 @@
+id = "r3-notebook-output-key"
+source = "adversarial"
+language = "json"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "notebooks/demo.ipynb"
+line = 15
+action = "block"
+agent_action = "block"

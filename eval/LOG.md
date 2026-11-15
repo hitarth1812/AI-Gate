@@ -102,3 +102,38 @@ Rejected or revised attempts (so nothing is silent):
   (the ratchet refused, as designed).
 - Fixers had to rewrite 18 test files' fake-key construction (`"AKIA" + "..."` became a call) because the new fold sees the literal; no
   assertion changed (verifier read every file).
+
+## Round 3 (2026-11-15)
+
+Same command before and after: `py eval/run.py` (before = the tree with the 37 new training and 10 new holdout cases and none of the round-3 fixes, `b908095`).
+
+| | before | after |
+|---|---|---|
+| training cases | 247 (210 + 37 new) | 247 |
+| training failures (keys, person and agent) | 34 (17 cases, all missed detections) | 2 (1 case: `r3-properties-key`, see LABEL_CHANGES H) |
+| false BLOCK on clean, unexpected BLOCK, crashes, gate.error, agent softer | 0 / 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 / 0 |
+| holdout cases | 67 (57 + 10 new) | 67 |
+| holdout failure keys | 15 (missed 14, too strict 1) | 11 (missed 10, too strict 1) |
+| holdout, original 57 | 9 keys | 9 keys (no movement) |
+| holdout, the 10 new cases (written without sight of the fixes) | 6 keys (3 cases) | 2 keys (1 case) |
+| holdout cases passing | not recorded (the baseline run did not store the failing-case count) | 61 of 67 |
+
+What the numbers say: the fixes transfer to cases written independently from the same README rules (6 keys down to 2), but the 9 failing
+keys of the original holdout (per-rule counts: `secrets.hardcoded` 6, `review.claim_mismatch` 2, `tests.skip_added` 1 too strict)
+did not move at all, so the training cases written for those families did not cover whatever shapes the holdout uses. The
+training zeros are not evidence of generality. Per decision, nobody (fixers included) saw the holdout cases; only these counts.
+
+What changed: key folding for JS/TS/Go; a multi-word `secrets.generic` rule; an agent WARN for the test-writes-the-module excuse;
+four claim checks in `review.claim_mismatch`; SECURITY.md; the README accuracy section leads with the holdout.
+
+Rejected or revised attempts:
+- Claim checks: three verifications. The first fixer commit was rejected for 22 false warnings on true messages; the narrowing was
+  rejected again (ordinary parametrize rows, class members, error idioms); the last narrowing (fire only on unambiguous evidence)
+  was accepted with about 200 probes and one more list of nouns added afterwards. Cost: the checks now miss many false claims.
+- Multi-word rule: first version matched a secret word anywhere in a name (9 false positives in jinja's lexer); the secret word must
+  now end the name. A later narrowing silenced keyword arguments and `DEFAULT_PASSWORD`, which hides real leaks; undone. A
+  `testing/` directory exclusion was removed after the verifier noted production packages can be called that.
+- Fold fixer: its properties test spelled a real-shaped token that the fold itself caught (self-scan failure); rebuilt at run time.
+- The `.properties` case: the case's `@@SLACK@@` token contains `12345678` and `AbCdEfGh`, which the documented-placeholder rule
+  discards in every language, so the label cannot be met without changing that rule. Left failing and proposed in LABEL_CHANGES H.
+- Holdout writer was given the multi-word idea (the spec), not any code or tool output.

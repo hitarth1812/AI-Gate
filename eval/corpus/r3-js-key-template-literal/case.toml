@@ -1,0 +1,14 @@
+id = "r3-js-key-template-literal"
+source = "adversarial"
+language = "javascript"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "src/config.js"
+line = 1
+action = "block"
+agent_action = "block"
