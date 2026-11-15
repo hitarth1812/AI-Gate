@@ -2941,6 +2941,8 @@ def _secrets_file(ctx, fc, where) -> list:
             out.extend(provider_findings(ctx, fc, line_no, text, where, seen=set()))
     if fc.ext in PY_EXTS and _may_fold(fc.added):
         out.extend(_folded_key_findings(ctx, fc, where, {(f.line, f.key) for f in out}))
+    elif fc.ext in _FOLD_LANG_EXTS and _may_fold_js_go(fc.added, _SPEC_EXT[fc.ext] == "go"):
+        out.extend(_folded_key_findings_js_go(ctx, fc, where, {(f.line, f.key) for f in out}, _SPEC_EXT[fc.ext] == "go"))
     return out
 
 
@@ -3034,6 +3036,245 @@ def _folded_key_findings(ctx, fc, where, have) -> list:
             if isinstance(stmt, ast.stmt) and not hasattr(stmt, "body") and not isinstance(stmt, ast.Match):
                 visit(stmt)
     except RecursionError:                                       # a pathological chain: what was found so far stands
+        pass
+    return out
+
+
+# The same fold for JavaScript / TypeScript and Go, on the lexer's view of the file (no parser): `"A" + "B"` chains,
+# a template literal whose `${}` holds only a string literal, `["A", "B"].join("")`, Go `strings.Join([]string{...}, "")` and
+# `fmt.Sprintf("%s%s", "A", "B")` with constant arguments. Any piece that is not a constant means no fold of that expression.
+_FOLD_LANG_EXTS = frozenset(_SPEC_EXT)
+_FOLD_GATE_JS = re.compile(r"""['"`]\s*\+|\+\s*['"`]|\.\s*join\s*\(\s*(?:['"`]|$)|\$\{\s*['"]""")
+_FOLD_GATE_GO = re.compile(r"""["`]\s*\+|\+\s*["`]|\bstrings\s*\.\s*Join\s*\(\s*(?:\[\]\s*string\s*\{|$)|"""
+                           r"""\bSprintf\s*\(\s*(?:"(?:[^"\\]|\\.)*"|`[^`]*`)\s*,\s*(?:["`]|$)""")
+_FOLD_TOK_BASE = (r"""(?P<q>["'`])|(?P<p>\+)|(?P<o>[(\[\]),{}])|(?P<x>\w+|[^\w\s"'`+()\[\],{}.]+|\.)""")
+_FOLD_TOK_JS = re.compile(r"""(?P<j>\.\s*join\s*\()|""" + _FOLD_TOK_BASE)
+_FOLD_TOK_GO = re.compile(r"""(?P<g>\bstrings\s*\.\s*Join\s*\()|(?P<f>\bfmt\s*\.\s*Sprintf\s*\()|"""
+                          r"""(?P<l>\[\]\s*string\s*\{)|""" + _FOLD_TOK_BASE)
+_FOLD_QUOTED = {'"': re.compile(r'"((?:[^"\\\n]++|\\[\s\S])*+)"'), "'": re.compile(r"'((?:[^'\\\n]++|\\[\s\S])*+)'"),
+                "`": re.compile(r"`([^`]*)`")}
+_FOLD_TEMPLATE_PIECE = re.compile(r"""\\[\s\S]|\$\{\s*(?:"((?:[^"\\\n]++|\\[\s\S])*+)"|'((?:[^'\\\n]++|\\[\s\S])*+)')\s*\}|\$\{""")
+_FOLD_TEMPLATE = re.compile(r"""`((?:[^`\\$]++|\\[\s\S]|\$(?!\{)|\$\{\s*(?:"(?:[^"\\\n]++|\\[\s\S])*+"|'(?:[^'\\\n]++|\\[\s\S])*+')\s*\})*+)`""")
+_FOLD_ESCAPE = re.compile(r"\\(?:u\{([0-9A-Fa-f]{1,6})\}|u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|([0-7]{1,3})|(\r\n|[\s\S]))")
+_FOLD_ESCAPED = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "v": "\v", "\n": "", "\r\n": ""}
+_FOLD_VERB = re.compile(r"(%.)", re.S)
+
+
+def _may_fold_js_go(added, go) -> bool:
+    gate = _FOLD_GATE_GO if go else _FOLD_GATE_JS
+    return any(len(text) <= 4000 and gate.search(text) for text in added.values())
+
+
+def _fold_unescape(s):
+    if "\\" not in s:
+        return s
+
+    def one(m):
+        wide, unit, hexa, octal, c = m.groups()
+        try:
+            if wide or unit or hexa:
+                return chr(int(wide or unit or hexa, 16))
+            if octal:
+                return chr(int(octal, 8))
+        except (ValueError, OverflowError):
+            return ""
+        return _FOLD_ESCAPED.get(c, c)
+    return _FOLD_ESCAPE.sub(one, s)
+
+
+def _fold_template(body):
+    """(value, had an interpolation) of a JS template literal whose interpolations are all string literals; None otherwise."""
+    parts, pos, interp = [], 0, False
+    for m in _FOLD_TEMPLATE_PIECE.finditer(body):
+        parts.append(body[pos:m.start()])
+        pos = m.end()
+        if m.group(0)[0] == "\\":
+            parts.append(_fold_unescape(m.group(0)))
+        elif m.group(0) == "${":
+            return None, False
+        else:
+            parts.append(_fold_unescape(m.group(1) if m.group(1) is not None else m.group(2)))
+            interp = True
+    parts.append(body[pos:])
+    return "".join(parts), interp
+
+
+def _fold_sprintf(fmt, args):
+    """fmt.Sprintf with only %s / %v verbs (and %%) and exactly as many constant arguments as verbs; else None."""
+    out, used = [], 0
+    for piece in _FOLD_VERB.split(fmt):
+        if piece[:1] != "%" or len(piece) != 2:
+            out.append(piece)
+        elif piece == "%%":
+            out.append("%")
+        elif piece in ("%s", "%v") and used < len(args):
+            out.append(args[used])
+            used += 1
+        else:
+            return None
+    return "".join(out) if used == len(args) else None
+
+
+def _fold_tokens(text, kinds, go):
+    """The constant-relevant tokens of a file: (kind, value, start, end, folded). kinds: s string constant, + , ( ) [ ] , { }
+    themselves, j .join( / g strings.Join( / f fmt.Sprintf( / l []string{, x anything else. A quote the lexer did not see as the
+    start of a string (inside a regular expression) is not a constant; comments are blanked by the caller."""
+    toks, pos, search = [], 0, (_FOLD_TOK_GO if go else _FOLD_TOK_JS).search
+    while True:
+        m = search(text, pos)
+        if m is None:
+            return toks
+        g, p, pos = m.lastgroup, m.start(), m.end()
+        if g == "q":
+            tok = None
+            if kinds[p] == STR and (p == 0 or kinds[p - 1] != STR):
+                ch = text[p]
+                if ch == "`" and not go:                          # a template whose interpolations are all string literals
+                    q = _FOLD_TEMPLATE.match(text, p)
+                    if q is not None:
+                        pos = q.end()
+                        val, interp = _fold_template(q.group(1))
+                        tok = ("s", val, p, pos, interp)
+                elif ch != "'" or not go:
+                    q = _FOLD_QUOTED[ch].match(text, p)
+                    if q is not None:
+                        pos = q.end()
+                        tok = ("s", q.group(1) if ch == "`" else _fold_unescape(q.group(1)), p, pos, False)
+            if tok is None:
+                tok = ("x", None, p, pos, False)
+        elif g == "p":
+            tok = ("+", None, p, pos, False) if kinds[p] != STR else ("x", None, p, pos, False)
+        elif g == "o":
+            tok = (m.group(0), None, p, pos, False) if kinds[p] != STR else ("x", None, p, pos, False)
+        elif kinds[p] == STR or g == "x":
+            tok = ("x", None, p, pos, False)
+        else:
+            tok = (g, None, p, pos, False)
+        if tok[0] == "x" and toks and toks[-1][0] == "x":
+            toks[-1] = ("x", None, toks[-1][2], pos, False)
+        else:
+            toks.append(tok)
+
+
+def _folded_key_findings_js_go(ctx, fc, where, have, go) -> list:
+    lx = ctx.lexed(fc)
+    if lx is None:                                                # no lexer view (it gave up): not folded
+        return []
+    import bisect
+    text, out, added = lx.code_text((COM,)), [], fc.added
+    try:
+        T = _fold_tokens(text, lx.kinds, go)
+    except (RecursionError, MemoryError, IndexError):
+        return []
+    n, starts, DEPTH = len(T), lx.starts, 25
+
+    def emit(val, a, b):
+        first, last = bisect.bisect_right(starts, T[a][2]), bisect.bisect_right(starts, T[b][3] - 1)
+        line = next((ln for ln in range(first, last + 1) if ln in added), None)
+        if line is not None:
+            for f in provider_findings(ctx, fc, line, val, where, seen=set()):
+                if (f.line, f.key) not in have:
+                    have.add((f.line, f.key))
+                    out.append(f)
+
+    def chain(i, depth):                                          # operand ('+' operand)*  ->  (value | None, next index, folded)
+        v, j, folded = operand(i, depth)
+        if v is None:
+            return None, j, False
+        parts = [v]
+        while j < n and T[j][0] == "+":
+            v2, j2, f2 = operand(j + 1, depth)
+            if v2 is None:                                        # a constant prefix of a chain that is not constant stands
+                if len(parts) > 1 or folded:
+                    emit("".join(parts), i, j - 1)
+                return None, j2, False
+            parts.append(v2)
+            folded, j = folded or f2, j2
+        val = parts[0] if len(parts) == 1 else "".join(parts)
+        if len(parts) > 1 or folded:
+            emit(val, i, j - 1)
+        return val, j, folded
+
+    def items(i, close, depth):                                   # a comma separated list of constants up to `close`
+        vals = []
+        while True:
+            if i >= n:
+                return None, i
+            if T[i][0] == close:
+                return vals, i
+            v, i, _ = chain(i, depth)
+            if v is None:
+                return None, i
+            vals.append(v)
+            if i < n and T[i][0] == ",":
+                i += 1
+            elif i >= n or T[i][0] != close:
+                return None, i
+
+    def operand(i, depth):
+        if i >= n:
+            return None, i + 1, False
+        kind = T[i][0]
+        if kind == "s":
+            return T[i][1], i + 1, T[i][4]
+        if depth >= DEPTH:
+            return None, i + 1, False
+        if kind == "(":
+            v, j, _ = chain(i + 1, depth + 1)
+            if j < n and T[j][0] == ")":
+                return v, j + 1, False
+            return None, j, False
+        if kind == "[" and not go:                                # [ ... ].join(sep)
+            vals, j = items(i + 1, "]", depth + 1)
+            if vals is None:
+                return None, max(j, i + 1), False
+            if j + 1 >= n or T[j + 1][0] != "j":
+                return None, j + 1, False
+            j += 2
+            if j < n and T[j][0] == ")":
+                return ",".join(vals), j + 1, True
+            sep, j, _ = chain(j, depth + 1)
+            if sep is not None and j < n and T[j][0] == ")":
+                return sep.join(vals), j + 1, True
+            return None, j, False
+        if kind == "g":                                           # strings.Join([]string{...}, sep)
+            if i + 1 >= n or T[i + 1][0] != "l":
+                return None, i + 1, False
+            vals, j = items(i + 2, "}", depth + 1)
+            if vals is None:
+                return None, max(j, i + 2), False
+            if j + 1 >= n or T[j + 1][0] != ",":
+                return None, j + 1, False
+            sep, j, _ = chain(j + 2, depth + 1)
+            if sep is not None and j < n and T[j][0] == ")":
+                return sep.join(vals), j + 1, True
+            return None, j, False
+        if kind == "f":                                           # fmt.Sprintf(format, constants...)
+            fmt, j, _ = chain(i + 1, depth + 1)
+            if fmt is None:
+                return None, j, False
+            args = []
+            while j < n and T[j][0] == ",":
+                if j + 1 < n and T[j + 1][0] == ")":              # a trailing comma
+                    j += 1
+                    break
+                arg, j, _ = chain(j + 1, depth + 1)
+                if arg is None:
+                    return None, j, False
+                args.append(arg)
+            if j < n and T[j][0] == ")":
+                return _fold_sprintf(fmt, args), j + 1, True
+            return None, j, False
+        return None, i + 1, False
+
+    i = 0
+    try:
+        while i < n:
+            if i and T[i - 1][0] == "+":                          # the right side of a chain that was not constant: no fold
+                i = operand(i, 0)[1]
+            else:
+                i = chain(i, 0)[1]
+    except RecursionError:                                        # a pathological nesting: what was found so far stands
         pass
     return out
 
