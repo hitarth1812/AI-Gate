@@ -2753,6 +2753,36 @@ def _looks_like_secret(name: str, val: str) -> bool:
     return entropy(val) >= 3.0
 
 
+# A secret-word name assigned a multi-word literal (a db password set to a four-word passphrase). The value must read as a
+# passphrase, not a message: words only (no punctuation, so no sentence, quote, template or SQL), 12+ characters, 2..8 words,
+# no UI-prompt opener, no function word of a message, no credential word inside it ("my secret santa list"), no placeholder.
+# The secret word must END the name (`db_password`, `apiSecret`, `secret_key`), never lead it: jinja's
+# `TOKEN_COMMENT_BEGIN = "begin of comment"` is a token type, not a secret.
+PHRASE_GATE = re.compile(r"(?i)password|passwd|pwd|passphrase|secret|token|api_?key")
+PHRASE_ASSIGN = re.compile(
+    r"(?P<name>[A-Za-z0-9_.\-]*(?i:password|passwd|pwd|passphrase|secret|token|api_?key)[A-Za-z0-9_.\-]*)['\"]?\]?\s*"
+    r"(?::=|=>|==|=|:)\s*(?:[rbuf]{1,2})?(?P<q>['\"`])(?P<val>[\w-]+(?: [\w-]+){1,7})(?P=q)")
+PHRASE_NAME_WORD = re.compile(r"(?:^|_)(?:password|passwd|pwd|passphrase|secret|token|api_?key)(?:_(?:key|value|phrase))?$")
+PHRASE_OPENER = re.compile(r"(?i)(?:enter|please|your|type|choose|confirm|select|forgot|reset)\b")
+PHRASE_MESSAGE = re.compile(
+    r"(?i)\b(?:the|is|are|was|were|been|has|have|had|not|do|does|did|must|should|would|could|cannot|can|will|this|that|"
+    r"these|those|invalid|expired|missing|required|failed|incorrect|wrong|unable|supplied|provided|denied|error|you|"
+    r"password|passwords|passwd|pwd|passphrase|secret|secrets|token|tokens|key|keys|credential|credentials|login|"
+    r"username|user|email|account|session)\b")
+PHRASE_SKIP_PATH = re.compile(r"(?i)(?:^|/)(?:locales?|i18n|l10n|lang|languages|translations?|intl)/|"
+                              r"\.(?:po|pot|xlf|xliff|resx|strings|arb)$")
+
+
+def _phrase_secret_name(name: str) -> bool:
+    words = "_".join(w for w in re.split(r"[^a-z0-9]+", re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name).lower()) if w)
+    return bool(PHRASE_NAME_WORD.search(words)) and not NAME_EXCLUDE.search(name)
+
+
+def _looks_like_phrase(val: str) -> bool:
+    return (len(val) >= 12 and not PHRASE_OPENER.match(val) and not PHRASE_MESSAGE.search(val)
+            and not PLACEHOLDER_VALUE.search(val) and not DOC_PLACEHOLDER.search(val))
+
+
 WORDS_VALUE = re.compile(r"[a-z]+(?:[_-][a-z]+){2,}")                   # a-strong-dev-password, definitely-not-a-token
 SHORT_ID_VALUE = re.compile(r"[a-z]{3,}(?:-[a-z]+)*-\d{1,3}")             # challenge-1: a test id, not a secret
 PATH_ID_VALUE = re.compile(r"[a-z][a-z_-]*(?:/[a-z][a-z_-]*)+")           # atlas/jwt-signing-keys: the name of a secret
@@ -2900,6 +2930,14 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
                 _soft_value(val, docs, soft is not None, text[m.end():],
                             bool(re.match(r"['\"]\s*:", text[m.end("name"):]))) or fixture())
+    # a multi-word passphrase (stricter than before: a person and an agent both get "fix"); never in a test, in
+    # documentation or in a translation file, which keep today's behaviour
+    if soft is None and " " in text and PHRASE_GATE.search(text) and not DOC_PATH.search(fc.path) \
+            and not PHRASE_SKIP_PATH.search(fc.path):
+        for m in PHRASE_ASSIGN.finditer(text):
+            if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")):
+                val = m.group("val")
+                add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", None, fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
         m = GENERIC_UNQUOTED.match(text)
         if m and _looks_like_secret(m.group("name"), m.group("val")):
