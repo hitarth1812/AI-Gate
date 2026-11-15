@@ -28,7 +28,19 @@ aigate-lite review               # read the staged change like a careful reviewe
 - **Tested on:** by hand (the full test suite) on Windows 11 and on Ubuntu under WSL2, each with Python 3.11, 3.12, 3.13
   and 3.14. macOS is covered only by CI (`.github/workflows/ci.yml`: Ubuntu, macOS and Windows on 3.11-3.14, on every push to
   main and every pull request; the results are in the repository's Actions tab). The runs done by hand are listed in
-  [PROGRESS.md](https://github.com/hitarth1812/AI-Gate/blob/main/PROGRESS.md).
+  [docs/dev/PROGRESS.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/dev/PROGRESS.md).
+
+## What it catches
+
+**Actions:** `block` and `fix` stop the commit; `warn` only reports.
+
+The full table (each kind of mistake, its rules and their default actions), what each language gets, and the size and
+copy-paste rules that are off for people by default are in [docs/CHECKS.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CHECKS.md).
+`aigate-lite explain` lists all 75 rules. `aigate-lite explain <rule>` shows how to change or allow one.
+
+When an AI agent commits, the gate is stricter ([docs/AI_AGENTS.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/AI_AGENTS.md)).
+`aigate-lite review` also reads the rest of the repository for invented APIs, broken callers and claims the diff does not
+back up ([docs/REVIEWER.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/REVIEWER.md)).
 
 ## Install
 
@@ -43,12 +55,9 @@ aigate-lite --version            # check the install
 
 On Windows, if `aigate-lite` is not found after `pip install`, use `py -m pip install aigate-lite` and run it as
 `py -m aigate_lite <command>` (or add Python's `Scripts` folder to PATH; `py -m pipx ensurepath` does it for pipx).
-You can also use the single file without installing anything, as in the next section.
+You can also use the single file without installing anything: see [docs/USAGE.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/USAGE.md).
 
-Maintainers: how a release is published (PyPI Trusted Publishing, no token) is in
-[docs/RELEASING.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/RELEASING.md).
-
-## First success in a few commands
+## Quick start
 
 ```bash
 cd your-project                                    # any git repo; needs Python 3.11+ and git
@@ -59,284 +68,8 @@ git add leak.py && git commit -m "try it"          # stopped: secrets.hardcoded
 git rm --cached -q leak.py && rm leak.py           # clean up (PowerShell: git rm --cached -q leak.py; Remove-Item leak.py)
 ```
 
-Without installing anything: `python3 /path/to/aigate_lite.py setup` (Windows: `py C:\path\to\aigate_lite.py setup`)
-copies the gate into `.aigate/`, and the commands become `python3 .aigate/aigate_lite.py <command>`
-(Windows: `py .aigate/aigate_lite.py <command>`).
-
-`setup` is `install` plus `init`; it never overwrites an existing `.aigate/lite.toml`. Run from a loose `aigate_lite.py` (as
-above) it vendors the gate into `.aigate/`, because a loose file cannot be found again by name; run from an installed package
-(`pipx install aigate-lite`) the hooks run the installed tool instead (`--mode installed|vendored` chooses explicitly). A
-repository that already has `.aigate/aigate_lite.py` stays vendored, and `setup` says whether its copy was updated (from which
-version to which) or is unchanged; a copy newer than the running tool is kept, with a warning. `aigate-lite unvendor`
-switches such a repository to the installed tool. `audit` is `check --all`.
-
-On Windows use `py -3` instead of `python3`; the installed hooks use the interpreter that ran `install` (pinned in `.git/hooks`, never committed) and, if
-that is gone, look for `python3`, `python`, `python3.14`..`python3.11`, `py -3.14`..`py -3.11`, then `py -3`.
-
-## Quick start
-
-```bash
-# inside your project
-aigate-lite setup                                  # adds both hooks, writes .aigate/lite.toml
-aigate-lite audit                                  # see what is already in the repo
-aigate-lite baseline                               # optional: accept today's findings so only new ones block
-git add .aigate && git commit -m "add aigate-lite"
-```
-
-**Manual setup** (what `setup` does, step by step):
-
-```bash
-aigate-lite install                                # adds both hooks (they run the installed aigate-lite)
-aigate-lite init                                   # optional: starter .aigate/lite.toml
-git add .aigate && git commit -m "add aigate-lite"
-```
-
-`aigate-lite install --vendor` instead copies the gate into `.aigate/aigate_lite.py`, so teammates need no install.
-
-From then on:
-
-| When | What runs | Checks |
-|---|---|---|
-| `git commit` | `pre-commit` hook | The staged changes |
-| `git push` | `pre-push` hook | Every commit being pushed, one by one for secrets. This catches commits made with `--no-verify`. |
-| Any time | `aigate-lite check` | Staged changes, or `--range origin/main..HEAD` |
-| Audit | `aigate-lite audit` (same as `check --all`) | Every tracked file in HEAD, including the root commit (not used by hooks) |
-
-`--vendor` makes the hooks portable: they run `.aigate/aigate_lite.py` with whatever `python3` is on
-the PATH, so teammates only need to run `python3 .aigate/aigate_lite.py install --vendor`
-(Windows: `py .aigate/aigate_lite.py install --vendor`).
-Without `--vendor`, the hooks point at the script's current location.
-
-**Existing hooks.** If you already use husky or the pre-commit framework, `install` prints the line or
-YAML snippet to add instead. `--force` installs anyway; your old hook is kept as `<hook>.local` and
-still runs first.
-
-## What it catches
-
-**Actions:** `block` and `fix` stop the commit; `warn` only reports.
-
-| Mistake | Rules (default action) |
-|---|---|
-| Exposed secrets | `secrets.hardcoded`: provider keys and private keys (block). `secrets.env_file`: `.env`, key and credential files (block). `secrets.generic`: credential-like literals and JWTs (fix). `secrets.env_not_ignored` (warn). |
-| Hallucinated or risky packages | `deps.hallucinated`: package or version not on PyPI/npm, in a manifest or an import (block). `deps.untrusted_source`: git/URL deps, custom indexes, odd lockfile URLs (block). `deps.new_package`: first release under 30 days (fix). `deps.version_cooldown`: version under 5 days (fix), with security bumps exempt. `deps.vulnerable`: OSV advisories for the pinned version (fix). `deps.undeclared` (fix). `deps.removed_stdlib`, e.g. `distutils` or `cgi` (fix). `deps.typosquat`, `deps.outdated` and `deps.deprecated` (warn). |
-| Weakened tests | Assertions or cases removed, skip/xfail added, tests deleted (renames are detected), `.only` focus, trivial asserts, test-config narrowing (all fix). `sitecustomize.py`, `.pth` files and `pytest11` entry points (block). Result-changing pytest hooks (fix). Expected values changed alongside source (warn). |
-| Placeholder or unsafe code | `... rest of the code` comments, `...` bodies, swallowed exceptions, debugger leftovers, syntax errors (fix). `eval`/`exec`, `shell=True`, pickle and unsafe YAML, SQL built with f-strings, `verify=False` (fix). Debug mode, wildcard CORS, weak crypto, raw HTML (warn). |
-| Silenced checkers | `# nosec`, `# type: ignore`, `@ts-ignore`, `# pragma: no cover`, whole-file disables (fix). `# noqa`, `eslint-disable-line` (warn). In `[paths] sensitive` these are one step stricter. |
-| Bloat and time complexity | Long or complex functions, long files, big diffs, duplicated blocks, unused imports (warn). Loops nested 3 or more deep, nested loops over the same list, `x in list` / `.pop(0)` / sorting inside loops, network or DB calls inside loops, branching recursion without a cache (warn). |
-| Scope creep | `scope.forbidden_path` (block). `scope.out_of_scope` against a declared task scope (fix). `gate.config_changed` (warn). |
-
-`aigate-lite explain` lists all 75 rules. `aigate-lite explain <rule>` shows how to change or allow one.
-
-**Language coverage.** Python gets every check, using its AST. Go and JavaScript/TypeScript are read with a lexer
-(strings and comments are never mistaken for code) and get secrets, dependencies, tests, suppressions,
-placeholders, function length, complexity and loop nesting (estimated from brace structure, not parsed), duplicated
-blocks, and the reviewer rules below (each rule says which languages it covers). Unused imports and the
-quadratic-pattern, call-in-loop and exponential-recursion checks are Python-only. Other languages get secrets,
-placeholders, TODOs and suppressions.
-
-**Size and copy-paste advice is off for people by default.** `size.*` (long functions and files, complexity, big
-diffs), `perf.*` (loop findings) and `code.duplicate_block` are the "core" exception: they are not reported for a
-person's change unless you name them in `[rules]` (`"size.*" = "warn"`) or use `preset = "strict"`. AI agents always get
-them, and so does `aigate-lite audit --strict` (or `check --strict`). On a large existing repository these rules were
-most of what `audit` reported, which is why they are off.
-
-### Declaring a task scope (scope creep)
-
-```bash
-aigate-lite scope set 'src/auth/**' 'tests/auth/**'   # before you start the AI on a task
-aigate-lite scope show
-aigate-lite scope clear                                # when the task is done
-```
-
-The scope is stored inside `.git/`, so it is per-clone and never committed.
-
-## AI agents
-
-When an AI agent runs `git commit` itself, the gate notices it and becomes stricter. It detects agents
-through `CLAUDECODE`, `AI_AGENT`, `GEMINI_CLI` or `AIGATE_AGENT` in the environment, an `(aider)`
-author name, or AI co-author trailers in pushed commits. You can add your own variables under
-`[provenance] agent_env`. For agent commits:
-
-- `forbidden_for_agents` paths are blocked: `.aigate/`, CI workflows and hook configs.
-- The config is read from the last commit, so an agent cannot loosen the gate in the same commit.
-- `AIGATE_ALLOW` and `AIGATE_SKIP` are ignored.
-
-Detection is best effort. An agent that runs with none of these signals looks like a human.
-
-### Using with AI coding agents
-
-`--format agent` prints a short, ASCII-only, stable report an agent can act on line by line:
-
-    AIGATE verdict=fix risk=30 exit=1
-    FIX security.eval app/a.py:7 eval() runs code built at runtime | fix: Avoid eval/exec; parse the input explicitly (ast.literal_eval, JSON.parse).
-    TOOL aigate-lite 0.5.0 https://github.com/hitarth1812/AI-Gate
-    END
-
-At most 50 block/fix lines and 20 warn lines are listed; a `MORE <n>` line says how many were left out.
-The first line and `END` are the contract; `TOOL` (which tool wrote the report) always sits directly before `END`
-and a reader may ignore it.
-Add instructions like these to your agent's instruction file (`CLAUDE.md`, a `.cursor/rules` file,
-`.github/copilot-instructions.md`, …):
-
-```text
-Before every commit, run: aigate-lite check --format agent
-(in a repository with a vendored copy: python3 .aigate/aigate_lite.py check --format agent; on Windows: py .aigate/aigate_lite.py check --format agent)
-Fix every BLOCK and FIX line it prints, then run it again until the first line says exit=0.
-Never use `git commit --no-verify` and never edit files under .aigate/ (the gate's config and baseline).
-If a finding looks wrong, stop and tell the user instead of working around it.
-```
-
-These instructions ask; the hooks enforce. Keep the hooks installed (`aigate-lite install`) and run the gate in
-CI, because an agent can ignore instructions.
-
-## The reviewer: `aigate-lite review`
-
-The gate asks "may this commit go in?". The reviewer reads the same change the way a careful senior reviewer would and
-answers "what changed, what must be fixed, what should I look at, what looks good":
-
-```bash
-aigate-lite review                       # what is staged
-aigate-lite review --range origin/main..HEAD
-aigate-lite review --pr                  # the pull request in CI: range against its target branch, plus its title and text
-aigate-lite review --format md           # or text (default), json (versioned schema), agent
-aigate-lite check --deep                 # the gate's normal report, with the reviewer's findings added
-```
-
-It runs the gate's checks and six more that look at the rest of the repository, not only the changed lines:
-
-| rule | catches | people / AI agents |
-|---|---|---|
-| `api.unknown_symbol` | `from app.utils import parse_date` when there is no `parse_date`; a missing module; `pkg.DoThing()` with no such function (Python, Go, relative JS/TS imports) | warn / fix |
-| `api.bad_call` | a call with an unknown keyword or the wrong number of arguments to a function defined in the repo (Python, Go) | warn / fix |
-| `api.broken_caller` | a function's parameters changed and callers elsewhere were not updated (reported at each stale caller) | warn / fix |
-| `tests.missing_for_change` | functions changed with no related test changed (`[review] test_map` maps your layout) | warn / fix |
-| `review.claim_mismatch` | the commit message or PR text says "add tests", "fix `parse_date`" or "no behaviour change" and the diff says otherwise | warn / warn |
-| `code.error_check_removed` | an `if err != nil` removed, `except ValueError` turned into `except Exception: pass`, a `.catch` or `await` dropped, `_ = f()` where `f` returns an error | warn / fix |
-
-How much to trust it:
-
-- Everything is read with `ast` (Python) or the lexer (Go, JS/TS). Your code is never imported or run.
-- A file that does not parse, or a module that is dynamic (`__getattr__`, star imports, `getattr`/`hasattr` on the module,
-  `globals()`, `__dict__`, `exec`), produces no claim: the reviewer says nothing it cannot prove from the source.
-- Only names inside this repository are judged. Standard library, installed packages and path aliases are left alone.
-- These checks run only in `review` and `check --deep`, never in the commit hook, so a commit is not slower.
-  Measured costs are in [PROGRESS.md](https://github.com/hitarth1812/AI-Gate/blob/main/PROGRESS.md).
-- The symbol index is cached by git blob id next to the result cache (`symbols-v1.json`, signed); `--no-cache` skips it.
-
-```toml
-[review]
-# source glob = where its tests live ({stem}, {dir}, {ext}); added to the usual names (test_x.py, x_test.go, x.test.ts)
-test_map = { "app/**/*.py" = "checks/{stem}_spec.py" }
-```
-
-## Existing project? Accept today's findings with `baseline`
-
-```bash
-aigate-lite check --all                             # see what is already there
-aigate-lite baseline                                # record non-secret findings in .aigate/baseline.json
-git add .aigate/baseline.json && git commit -m "baseline"
-```
-
-Fingerprints do not depend on line numbers, so unrelated edits do not resurrect old findings. Secrets are never
-baselined unless you pass `--include-secrets` (rotate them instead), and a baseline never hides *new* copies of an old finding.
-
-## Presets
-
-`preset = "relaxed" | "balanced" | "strict"` in `.aigate/lite.toml` (default `balanced`); `init` picks one for you.
-Your own `[rules]` settings always win (this includes turning the "core" rules above on for people). `strict` turns
-them on. The full table of what each preset changes is in
-[docs/RULES.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/RULES.md) (generated by `scripts/gen_docs.py`).
-
-## Troubleshooting
-
-Run `aigate-lite doctor` (vendored: `python3 .aigate/aigate_lite.py doctor`; Windows: `py .aigate/aigate_lite.py doctor`).
-It checks git and Python versions, the hooks, the config, TLS and the registry reachability, and prints a one-line fix
-for anything wrong. Errors from other commands also end in a `fix:` line.
-
-| Problem | What to do |
-|---|---|
-| `aigate-lite: command not found` (or not recognized) | Python's scripts folder is not on PATH. Run `py -m aigate_lite <command>` (Windows) or `python3 -m aigate_lite <command>`, or use pipx (`pipx ensurepath`). |
-| `aigate-lite needs Python 3.11+; this is 3.X` | The `python` on PATH is too old. Run with a newer one: `py -3.12 -m aigate_lite ...` (Windows) or `python3.12 -m aigate_lite ...`; hooks also honour `AIGATE_PYTHON`. |
-| Lookups fail: "registry lookup(s) failed on this machine" or "SSLKEYLOGFILE=... cannot be written" | A local setting, not the network. Unset `SSLKEYLOGFILE` (PowerShell: `Remove-Item Env:SSLKEYLOGFILE`; sh: `unset SSLKEYLOGFILE`; also remove it from System > Environment Variables if it is set there). `aigate-lite doctor` names the cause in its `tls` check. |
-| Lookups fail: "not reachable" / "connection refused" / "TLS certificate verification failed" | A network problem: check `HTTPS_PROXY`, set `SSL_CERT_FILE` to your company's CA bundle behind an intercepting proxy, or use `--offline`. Package and vulnerability checks do not run while lookups fail. |
-| The lookup cache cannot be written | Set `AIGATE_CACHE_DIR` to a writable folder (lookups still run, without the disk cache). |
-| Hooks are managed by husky, lefthook or the pre-commit framework | `aigate-lite install` prints the line or YAML snippet to add to that tool instead; `doctor` shows it too. |
-
-## Configuration: `.aigate/lite.toml`
-
-See `examples/lite.toml` for every key. The most useful ones:
-
-```toml
-[rules]
-"suppress.type" = "warn"        # block | fix | warn | off; globs like "perf.*" work
-
-[deps]
-private = ["acme-*", "@acme/*"]                       # internal packages: skip public lookups
-trusted_sources = ["https://pypi.acme.dev/simple"]
-import_map = { mylib = "my-lib-dist" }                # import name -> package name
-
-[[commands]]                    # your own checks, e.g. run tests before every push
-name = "tests"
-run = "python -m pytest -q"
-stage = "push"                  # commit | push | both
-                                # then approve them once: aigate-lite trust
-
-[[allow]]                       # a known false positive
-rule = "secrets.generic"
-path = "tests/fixtures/**"      # blocking rules need a path or a fingerprint (see `check -v`)
-reason = "fake credentials used by tests"
-expires = 2027-06-30
-```
-
-To allow a fix- or warn-level finding for one commit: `AIGATE_ALLOW=tests.deleted git commit ...`.
-Blocking findings can only be allowed through `[[allow]]`.
-
-Result cache (off by default): `--cache` or `[gate] cache = true` remembers which files the per-file checks
-found clean, so an unchanged file is not checked again. Only clean verdicts are stored (no finding text),
-signed, in two 0600 files in your user cache dir. `--no-cache` turns it off even when the config turns it
-on, and also skips the registry lookup cache. It helps large changes and not small ones: compare the `C`
-and `C-cache` rows (300 files) with `A` and `A-cache` (1 file) in docs/PERF.md.
-
-## Output and exit codes
-
-- `--format text` (default), `json` (stable schema), `github` (annotations for Actions) or `sarif`
-  (SARIF 2.1.0, for code-scanning uploads).
-- `-q` prints only what stops the commit; `-v` adds hints, fingerprints and allowed findings. A text report that prints
-  a finding ends with a one-line credit (see "Credit and usage").
-- Exit codes: `0` pass or warnings only, `1` fix or block, `2` usage, git or internal error (one line, never a traceback). `--format json` carries `schema_version`. What stays stable (exit codes, JSON keys, rule ids, versioning and deprecation) is in [docs/CONTRACT.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CONTRACT.md).
-- The verdict is the strongest action found. A Fix verdict becomes Block when the risk score is 60 or
-  higher; the score uses the same formula as the full gate.
-
-## Enforce it in CI (hooks can be skipped)
-
-Hooks run on the developer's machine, so `--no-verify` (or an agent that commits that way) skips them.
-The check that cannot be skipped is a required CI status on the pull request.
-
-**GitHub Actions** — `examples/github-actions.yml`:
-
-1. Copy it to `.github/workflows/aigate-lite.yml` and commit `.aigate/aigate_lite.py`
-   (`aigate-lite install --vendor` copies it for you).
-2. Open a pull request once so the check runs and GitHub learns its name (the job is called `gate`).
-3. Settings → Branches (or Rules → Rulesets) → protect your default branch → **Require status checks to
-   pass** → add `gate`. If you use a merge queue, the workflow already listens to `merge_group`.
-4. **Required for this to mean anything:** GitHub runs the workflow file from the pull request itself, so
-   a pull request that edits `.github/workflows/aigate-lite.yml` can change what runs. Put
-   `.github/workflows/**` and `.aigate/**` in CODEOWNERS and turn on **Require review from Code Owners**
-   (or make the workflow a ruleset-required workflow). Without that, CI is a safety net, not a boundary.
-
-The workflow pins every action to a full commit SHA, runs the gate **and its config from the base
-branch** (a pull request cannot loosen the script or `.aigate/lite.toml` that judge it; the first PR that
-adds the gate uses its own copy, with a warning), writes annotations with `--format github`, and uploads
-`--format sarif` to code scanning (Security → Code scanning; the upload is skipped without failing the
-job where code scanning is not enabled). `--no-commands` keeps `[[commands]]` from the pull request from
-running in CI. The gate runs twice (annotations, then SARIF); only the first run decides the result.
-
-**GitLab CI** — `examples/gitlab-ci.yml` runs on merge-request pipelines and keeps `aigate.sarif` as an
-artifact. Make it blocking with Settings → Merge requests → **Pipelines must succeed**, and run fork
-merge-request pipelines in the parent project (otherwise a fork is checked against its own copy).
-
-**Other CI:** run `python .aigate/aigate_lite.py check --range "origin/main..HEAD" --no-commands` and fail
-the job on exit code 1. `--format json` (schema 1) and `--format sarif` (SARIF 2.1.0) are stable outputs.
+On an existing project, `aigate-lite baseline` accepts today's findings so only new ones block; then commit `.aigate/`.
+Setup modes, the hooks, task scopes, presets and the output formats: [docs/USAGE.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/USAGE.md).
 
 <!-- accuracy:start (generated by scripts/gen_accuracy.py from eval/scoreboard.json; do not edit by hand) -->
 ## Measured accuracy
@@ -385,29 +118,52 @@ Precision is found / (found + false positives + too strict); recall is found / (
 
 <!-- accuracy:end -->
 
+## Troubleshooting
+
+Run `aigate-lite doctor` (vendored: `python3 .aigate/aigate_lite.py doctor`; Windows: `py .aigate/aigate_lite.py doctor`).
+It checks git and Python versions, the hooks, the config, TLS and the registry reachability, and prints a one-line fix
+for anything wrong. Errors from other commands also end in a `fix:` line.
+
+| Problem | What to do |
+|---|---|
+| `aigate-lite: command not found` (or not recognized) | Python's scripts folder is not on PATH. Run `py -m aigate_lite <command>` (Windows) or `python3 -m aigate_lite <command>`, or use pipx (`pipx ensurepath`). |
+| `aigate-lite needs Python 3.11+; this is 3.X` | The `python` on PATH is too old. Run with a newer one: `py -3.12 -m aigate_lite ...` (Windows) or `python3.12 -m aigate_lite ...`; hooks also honour `AIGATE_PYTHON`. |
+| Lookups fail: "registry lookup(s) failed on this machine" or "SSLKEYLOGFILE=... cannot be written" | A local setting, not the network. Unset `SSLKEYLOGFILE` (PowerShell: `Remove-Item Env:SSLKEYLOGFILE`; sh: `unset SSLKEYLOGFILE`; also remove it from System > Environment Variables if it is set there). `aigate-lite doctor` names the cause in its `tls` check. |
+| Lookups fail: "not reachable" / "connection refused" / "TLS certificate verification failed" | A network problem: check `HTTPS_PROXY`, set `SSL_CERT_FILE` to your company's CA bundle behind an intercepting proxy, or use `--offline`. Package and vulnerability checks do not run while lookups fail. |
+| The lookup cache cannot be written | Set `AIGATE_CACHE_DIR` to a writable folder (lookups still run, without the disk cache). |
+| Hooks are managed by husky, lefthook or the pre-commit framework | `aigate-lite install` prints the line or YAML snippet to add to that tool instead; `doctor` shows it too. |
+
 ## Limits (read these)
 
 - **Hooks are bypassable.** `git commit --no-verify` and `git push --no-verify` skip them, and some
   agents commit that way. The pre-push hook catches what the commit hook missed, but only a
-  server-side check is enforceable: see "Enforce it in CI" above.
+  server-side check is enforceable: see [docs/CI.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CI.md).
 - **Static heuristics, not proof.** Time complexity is flagged from code shape, not measured. Test
   tampering for JS/TS is line-based.
 - **Not covered in lite:** calls to functions or attributes that don't exist (that needs a type
   checker, which you can add as a `[[commands]]` entry), sandboxed test runs, mutation testing, and
   LLM review.
 - **Commands in `.aigate/lite.toml` need your approval.** A cloned or pulled config can't run code on your
-  next commit: `[[commands]]` stay off (one `commands.untrusted` warning says so; a repo's `[rules]` can't
-  change that rule) until a person runs
-  `aigate-lite trust`, which prints every command with hidden characters escaped and records exactly that
-  list in `.git/aigate/trusted`. Any change to any command needs a new approval; `trust --rev <branch>`
-  approves a config you push but have not checked out; AI agents can't approve. `--config FILE` on the
-  command line counts as your own choice and is trusted (so don't point it at a file a pull request controls).
+  next commit: `[[commands]]` stay off until a person runs `aigate-lite trust`, and AI agents can't approve. How
+  approval works: [docs/CONFIGURATION.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CONFIGURATION.md#commands-need-your-approval).
 - **A vendored gate is code from the repo too.** With `install --vendor` the hook runs
   `.aigate/aigate_lite.py` as committed; review changes to that file like any other code you execute.
 - **Offline:** if PyPI/npm can't be reached, dependency findings become `deps.unverified` warnings (a person sees one
   line with the count: package and vulnerability checks did NOT run; `-v` lists each one). Set `[gate] offline = "block"`
   to stop instead. A failure on your own machine (an unwritable `SSLKEYLOGFILE`, a file permission) is reported as that,
   in one note, never as "could not reach".
+
+## Documentation
+
+- [Using aigate-lite](https://github.com/hitarth1812/AI-Gate/blob/main/docs/USAGE.md): setup modes, hooks, task scope, baseline, presets, output and exit codes
+- [What it catches](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CHECKS.md) and [every rule with its presets](https://github.com/hitarth1812/AI-Gate/blob/main/docs/RULES.md)
+- [AI agents](https://github.com/hitarth1812/AI-Gate/blob/main/docs/AI_AGENTS.md): what changes for an agent's commit, and `--format agent`
+- [The reviewer](https://github.com/hitarth1812/AI-Gate/blob/main/docs/REVIEWER.md): `aigate-lite review`
+- [Configuration](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CONFIGURATION.md): `.aigate/lite.toml`, allow entries, the result cache
+- [Enforce it in CI](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CI.md): GitHub Actions, GitLab CI and others
+- [Stability contract](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CONTRACT.md): exit codes, JSON keys, rule ids, deprecation
+- [Performance](https://github.com/hitarth1812/AI-Gate/blob/main/docs/PERF.md) and [how accuracy is measured](https://github.com/hitarth1812/AI-Gate/blob/main/eval/README.md)
+- [All documentation](https://github.com/hitarth1812/AI-Gate/blob/main/docs/README.md)
 
 ## License & credit
 
@@ -418,36 +174,14 @@ Suggested credit line: "Uses aigate-lite by Hitarth Khatiwala" (https://github.c
 `aigate-lite doctor` warns (it never fails) if the copyright header in the running file was removed or changed.
 Nothing in the gate depends on it: check results, exit codes and hooks behave the same either way.
 
-## Credit and usage
-
-Every place the tool names itself is visible text, documented here, and never changes a result or an exit code.
-
-| Where | What you see | When it is absent |
-|---|---|---|
-| `check` / `audit` text report | one last line: `aigate-lite by Hitarth Khatiwala · Apache-2.0 · <url>` (ASCII separators on a console that cannot show `·`) | on a clean pass, with `-q`, and in `--format json`, `agent`, `sarif` and `github` |
-| `review` text report | the same line, always | never absent |
-| `review --format md` | a last line `Reviewed by [aigate-lite](<url>) <version>` | never absent |
-| JSON (`check`, `audit`, `review`) | `"author"` and `"url"` next to `"tool"` and `"version"` (`"schema"` is unchanged; nothing was removed or retyped) | |
-| `--format agent` | one line `TOOL aigate-lite <version> <url>` directly before `END` | |
-| SARIF | the tool driver's `name`, `version`, `informationUri` and `organization` | |
-
-The credit is credit, not proof: nothing in the tool or in the CI examples trusts it, and nothing is hidden (there are no
-invisible characters or encoded marks anywhere; a test scans the repository for them). The footer is a plain line of
-text; the tool is Apache-2.0, so keep the copyright header and NOTICE when you redistribute it (Section 4).
+Where the tool names itself (report footers, JSON, SARIF): [docs/CREDIT.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CREDIT.md).
 
 ## Contributing and reporting a false positive
 
 See [CONTRIBUTING.md](https://github.com/hitarth1812/AI-Gate/blob/main/CONTRIBUTING.md). To report a vulnerability, read [SECURITY.md](https://github.com/hitarth1812/AI-Gate/blob/main/SECURITY.md) first (do not open a public issue). A wrong finding (or a missed one) is the most useful report: [docs/FALSE_POSITIVES.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/FALSE_POSITIVES.md) says what to send; a good report becomes a case in the evaluation corpus.
 
-## Development
-
-```bash
-python3 -m pytest -q                                   # Windows: py -m pytest -q; registry calls use tests/registry_fixture.json
-python3 bench/bench.py --compare bench/baseline.json   # perf gates (same machine as the baseline)
-python3 bench/bench.py --compare bench/baseline.json --markdown docs/PERF.md   # regenerate docs/PERF.md
-```
-
-On Windows use `py` in place of `python3` in these commands.
+Please follow the [code of conduct](https://github.com/hitarth1812/AI-Gate/blob/main/CODE_OF_CONDUCT.md). AI coding agents working on this repository: read
+[AGENTS.md](https://github.com/hitarth1812/AI-Gate/blob/main/AGENTS.md).
 
 ## Background
 

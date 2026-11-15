@@ -6,13 +6,23 @@ no runtime dependency, no network use beyond the PyPI, npm, Go proxy and OSV loo
 ## Set up and run the checks
 
 ```bash
-python -m pip install -r requirements-dev.txt     # pytest and pyflakes (pinned); the tool itself needs nothing
+python -m pip install -e .[dev]                   # pytest, pyflakes, hypothesis (pinned); the tool itself needs nothing
+                                                  # (CI installs the same pins from requirements-dev.txt)
 python -m pyflakes aigate_lite.py
-python -m pytest -q                               # about 12 minutes; registry calls use tests/registry_fixture.json
+python -m pytest -q                               # about 25 minutes; registry calls use tests/registry_fixture.json
 python eval/run.py --check --families real,seeded,adversarial     # the accuracy yardstick, offline, a few minutes
 ```
 
 On Windows use `py` in place of `python`.
+
+Performance gates (on the same machine as the baseline):
+
+```bash
+python3 bench/bench.py --compare bench/baseline.json   # perf gates (same machine as the baseline)
+python3 bench/bench.py --compare bench/baseline.json --markdown docs/PERF.md   # regenerate docs/PERF.md
+```
+
+AI coding agents: read [AGENTS.md](AGENTS.md) as well. Everyone: [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
 
 ## Rules for a change
 
@@ -37,8 +47,12 @@ Use the issue template, and read [docs/FALSE_POSITIVES.md](docs/FALSE_POSITIVES.
 
 ## Security issues
 
-Do not open a public issue for a vulnerability; see [SECURITY.md](SECURITY.md) when it exists, or contact the maintainer privately.
+Do not open a public issue for a vulnerability; see [SECURITY.md](SECURITY.md).
 
 ## Commit style
 
 Short imperative subject (`fix(rule): what`), a body that says why, and no unrelated changes in the same commit.
+
+## Releases (maintainers)
+
+How a release is published (PyPI Trusted Publishing, no token) is in [docs/dev/RELEASING.md](docs/dev/RELEASING.md).

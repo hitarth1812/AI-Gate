@@ -1,10 +1,10 @@
 # aigate-lite in GitHub Actions: the enforcement point that cannot be skipped with --no-verify.
 # Copy to .github/workflows/aigate-lite.yml, commit .aigate/aigate_lite.py (`aigate-lite install --vendor`
-# does that copy), then make the `gate` check required (see README, "Enforce it in CI").
+# does that copy), then make the `gate` check required (see docs/CI.md in the aigate-lite repository).
 #
 # Note: on pull_request, GitHub runs the workflow file from the pull request itself, so a PR that edits
 # this file can change what runs. Protect .github/workflows/** and .aigate/** with CODEOWNERS and
-# "Require review from Code Owners" (or a ruleset-required workflow), as the README explains.
+# "Require review from Code Owners" (or a ruleset-required workflow), as docs/CI.md explains.
 #
 # Actions are pinned to full commit SHAs (tags can be moved). Pins checked with `git ls-remote --tags`:
 #   actions/checkout v5.1.0, actions/setup-python v6.3.0, github/codeql-action v4.39.1.

@@ -26,7 +26,7 @@ Top-level keys of `check` and `audit`: `tool`, `version`, `schema`, `schema_vers
 Each finding has `rule`, `action`, `severity`, `confidence`, `path`, `line`, `message`, `hint`, `fingerprint`, `legacy_fingerprint`,
 `sensitive_path` and `allowed`.
 `review --format json` has its own document with `kind: "review"` and the same `schema` / `schema_version` fields.
-`--format sarif` is SARIF 2.1.0. `--format agent` is the line format documented in the README; its first line and `END` are the
+`--format sarif` is SARIF 2.1.0. `--format agent` is the line format documented in [AI_AGENTS.md](AI_AGENTS.md); its first line and `END` are the
 contract, the `TOOL` line is informational.
 
 ## Rule ids
