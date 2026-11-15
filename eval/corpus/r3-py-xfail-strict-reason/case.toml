@@ -1,0 +1,15 @@
+id = "r3-py-xfail-strict-reason"
+source = "seeded"
+language = "python"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "tests.skip_added"
+path = "tests/test_orders.py"
+line = 7
+tol = 2
+action = "fix"
+agent_action = "fix"

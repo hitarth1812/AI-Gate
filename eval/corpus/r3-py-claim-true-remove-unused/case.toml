@@ -1,0 +1,12 @@
+id = "r3-py-claim-true-remove-unused"
+source = "seeded"
+language = "python"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["remove the unused legacy_format helper"]
+
+[[must_not_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"

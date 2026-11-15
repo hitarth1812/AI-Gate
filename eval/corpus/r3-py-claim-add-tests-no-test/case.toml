@@ -1,0 +1,14 @@
+id = "r3-py-claim-add-tests-no-test"
+source = "seeded"
+language = "python"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+messages = ["add tests for slugify"]
+
+[[must_fire]]
+rule = "review.claim_mismatch"
+path = "(commit)"
+action = "warn"
+agent_action = "warn"

@@ -1,0 +1,11 @@
+id = "r3-go-skip-removed"
+source = "seeded"
+language = "go"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "tests.skip_added"
+path = "shop/shop_test.go"

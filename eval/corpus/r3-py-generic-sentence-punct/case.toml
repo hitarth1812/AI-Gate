@@ -1,0 +1,11 @@
+id = "r3-py-generic-sentence-punct"
+source = "seeded"
+language = "python"
+origin = "round 3 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "app/messages.py"

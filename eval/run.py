@@ -60,6 +60,9 @@ SUBST = {
     "@@GHTOKEN@@": _cat("ghp_", "Zx9kQ2vB7mN4pL1wT8yR5uJ3cH6dF0aSeGiO"),
     "@@STRIPE@@": _cat("sk_live_", "4eC39HqLyjWDarjtT1zdp7dc"),
     "@@SLACK@@": _cat("xoxb-", "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
+    # the AWS key in three pieces (round 3): a case that splits a key in its source writes the PIECES as placeholders, so no
+    # tracked file holds the key, nor a constant-foldable expression that adds up to one. "@@AKIA@@" + "@@AKT1@@@@AKT2@@" is @@AWS@@.
+    "@@AKIA@@": "AKIA", "@@AKT1@@": "QWERTYUI", "@@AKT2@@": "OPASDFGH",
     "@@PEMBEGIN@@": "-----BEGIN " + "RSA PRIVATE KEY-----",
     "@@PEMEND@@": "-----END " + "RSA PRIVATE KEY-----",
 }
