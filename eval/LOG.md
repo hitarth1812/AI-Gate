@@ -116,7 +116,7 @@ Same command before and after: `py eval/run.py` (before = the tree with the 37 n
 | holdout failure keys | 15 (missed 14, too strict 1) | 11 (missed 10, too strict 1) |
 | holdout, original 57 | 9 keys | 9 keys (no movement) |
 | holdout, the 10 new cases (written without sight of the fixes) | 6 keys (3 cases) | 2 keys (1 case) |
-| holdout cases passing | 52 of 67 (computed from 15 keys; failing-case count was not stored) | 61 of 67 |
+| holdout cases passing | not recorded (the baseline run did not store the failing-case count) | 61 of 67 |
 
 What the numbers say: the fixes transfer to cases written independently from the same README rules (6 keys down to 2), but the 9 failing
 keys of the original holdout (per-rule counts: `secrets.hardcoded` 6, `review.claim_mismatch` 2, `tests.skip_added` 1 too strict)
