@@ -1,0 +1,8 @@
+# Keeps the actions pinned by full commit SHA in .github/workflows/ up to date (one pull request per update, weekly).
+# Python dependencies are not listed: the tool has none, and the pinned dev tools in requirements-dev.txt are bumped by hand.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
