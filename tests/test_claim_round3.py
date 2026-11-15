@@ -218,6 +218,13 @@ PROBES = {
     "add-test-helpers": (
         PY_TESTS, {"tests/helpers.py": "def make():\n    return 1\n"}, "add test helpers for the parser"),
     "add-test-data": (PY_TESTS, {"tests/data.py": "SAMPLE = 1\n"}, "add test data"),
+    # round 3, third verifier: "add test <something that is not a test>" while a test-path file gains only an import
+    "add-test-coverage-reporting": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add test coverage reporting"),
+    "add-test-plugin": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add test plugin"),
+    "add-test-dependencies": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add test dependencies"),
+    "add-test-logging": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add test logging"),
+    "add-tests-timeout": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add tests timeout"),
+    "add-tests-job-to-ci": (PY_TESTS, {"tests/conftest.py": "import os\n"}, "add tests job to CI"),
     "add-test-config": (PY_TESTS, {"tests/conftest.py": "collect_ignore = ['x.py']\n"}, "add test config to ignore x.py"),
     "add-tests-via-doctest": (
         PY_TESTS, {"tests/conftest.py": "X = 1\n", "app/util.py": "def slugify(t):\n    '''>>> slugify('a')\n    'a'\n    '''\n    return t\n"},

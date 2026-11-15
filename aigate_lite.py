@@ -8167,7 +8167,9 @@ NIL_LINE = _lazy(r"\b(?:nil|none|null|undefined|if|elif|else|unless|not|is|and|o
                  re.I)
 # "add tests" is about tests, not what supports them; "remove unused X" is about code, not rows, files or packages
 NOT_THE_OBJECT = _lazy(r"\s+(?:fixtures?|helpers?|data|config\w*|utilit\w*|utils?|setup|harness|infra\w*|mocks?|stubs?|files?|"
-                            r"dirs?|directory|folders?|environments?|env|runner|scaffold\w*)\b", re.I)
+                            r"dirs?|directory|folders?|environments?|env|runner|scaffold\w*|coverage|plugins?|dependenc\w*|deps|"
+                            r"logging|logs?|timeouts?|jobs?|reporting|reports?|tooling|tools?|ci|workflow\w*|badge\w*|markers?|"
+                            r"flags?|options?|settings?|parallel\w*|caching|cache|retr\w+)\b", re.I)
 CODE_NOUN = frozenset("function functions method methods class classes helper helpers variable variables var vars const consts "
                       "constant constants import imports code type types struct structs param params parameter parameters "
                       "argument arguments def func funcs".split())

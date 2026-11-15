@@ -42,8 +42,20 @@
 - `tests.skip_added`, `secrets.hardcoded` and `security.eval` miss fewer disguised cases (see Added).
 
 ### Added
-- Python: a provider key written as `"AKIA" + "..."`, `"".join([...])`, a constant-only f-string or adjacent string literals is
-  folded and checked like a plain literal.
+- A provider key split over constants is folded and checked like a plain literal. Python: `"AKIA" + "..."`, `"".join([...])`, a
+  constant-only f-string, adjacent string literals. JavaScript and TypeScript: `"A" + "B"`, a template literal whose `${}` holds
+  only a string literal, `["A", "B"].join("")`. Go: `"A" + "B"`, `strings.Join([]string{...}, "")`, `fmt.Sprintf` with constant
+  arguments. A line with 60,000 constants is checked in about a second.
+- `secrets.generic` also reports a secret-word name (`password`, `secret`, `token`, `api_key`, ...) assigned a multi-word string
+  literal with spaces, such as `db_password = "correct horse battery staple"`, in source that is not a test, documentation or a
+  translation file: FIX for a person and for an AI agent. A value that reads as a sentence, a label, a placeholder, a message or a
+  pointer to where the value lives ("stored in vault") is not reported. Known limit: it is English-only.
+- An AI agent gets a WARN when a made-up import in a test file is excused because the same function writes that module; a person
+  is still told nothing (the excuse is real for a person, and an agent could fake it).
+- `review.claim_mismatch` also checks four kinds of claim in a commit message, warning only when the diff clearly contradicts
+  them: "add tests" (the test files gain no test code), "remove the unused X" (the diff removes nothing), "handle the error" (no
+  error-handling line anywhere), and "fix the nil check in F" (no nil check anywhere). Reverts and messages about tests are
+  skipped. It stays silent when unsure.
 - `tests.skip_added` follows a skip mark kept in a name (`later = pytest.mark.skip(...)`, `from pytest import mark as m`) and
   reports it at the alias; `security.eval` sees `__builtins__['eval']`, `builtins.eval` and `getattr(builtins, 'eval')`.
 - `schema_version` in `--format json` output (same value as `schema`); exit codes, JSON keys, rule-id stability, SemVer and the
