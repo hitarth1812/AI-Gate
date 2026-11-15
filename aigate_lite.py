@@ -8152,15 +8152,18 @@ TEST_LINE = _lazy(r"\b(?:def|func|fn|function)\s+(?:\([^)]*\)\s*)?\w*(?:test|ben
                        r"\b(?:it|test|describe|context|specify|suite|scenario)\s*(?:\.\w+)*\s*\(|\bt\.\w+\(|@Test\b|#\[\w*test|"
                        r"\[(?:Test|Fact|Theory)\]|\bclass\s+\w*test|\.should\b|\b(?:verify|check)\w*\(|pytest\.raises|parametrize|"
                        r"\.to(?:be|equal|have|throw)|\bwant\b|\bgot\b|\bcase\b|\brequire\b|\bis\.\w+\(|\w*equal\w*\(|\bshould|>>>", re.I)
-DATA_ROW = _lazy(r"^\s*(?:[\[({\"'`\d]\S.*|[\w\"']+\s*:\s*\S.*),\s*$")
 GUARD_LINE = _lazy(r"\b(?:try|except|catch|finally|rescue|recover|raise|throw|panic|defer|if|elif|else|unless|switch|match|case|when|"
                         r"guard|assert|with|for|while|and|or|not|is|in|err|errors?|exceptions?|fail\w*|invalid|fault|suppress|retry|"
                         r"fallback|default|abort|exit|log|warn\w*|status|reject\w*|settled|exists?|isfile|isdir|nil|none|null|"
                         r"undefined|isinstance|typeof|ok|result|option\w*|unwrap\w*|rejected|errback)\b|[?!]|[=!]=|&&|\|\||"
-                        r"\.get\(|getattr|\bcheck\s*=|\.then\(|\.catch\b|on_?error|exist_ok|recover|nullsafe", re.I)
+                        r"\.get\(|getattr|\bcheck\s*=|\.then\(|\.catch\b|nullsafe|"
+                        # any of these as a substring: handling idioms hide in names (ignore_errors, missing_ok, errorHandler, ...)
+                        r"err|exception|catch|except|ok|ignore|missing|fallback|handler|handle|boundary|guard|check|valid|try|"
+                        r"raise|retry|timeout|fail|reject|rescue|recover|finally|default|sentry|signal|wait|status|assert|if|"
+                        r"else|switch|getenv|environ", re.I)
 # what a nil/None check or a fix of one could be made of (no error words: `err := f()` is not a nil check)
 NIL_LINE = _lazy(r"\b(?:nil|none|null|undefined|if|elif|else|unless|not|is|and|or|assert|isinstance|typeof|guard|panic|raise|throw|"
-                      r"switch|match|case|when|try|except|catch|ok|optional)\b|[?!]|[=!]=|&&|\|\||\.get\(|getattr|recover|nullsafe",
+                      r"switch|match|case|when|try|except|catch|ok|optional)\b|[?!]|[=!]=|&&|\|\||\bget\w*\(|getattr|recover|nullsafe",
                  re.I)
 # "add tests" is about tests, not what supports them; "remove unused X" is about code, not rows, files or packages
 NOT_THE_OBJECT = _lazy(r"\s+(?:fixtures?|helpers?|data|config\w*|utilit\w*|utils?|setup|harness|infra\w*|mocks?|stubs?|files?|"
@@ -8173,8 +8176,14 @@ DATA_NOUN = frozenset("column columns table tables file files folder folders dir
                       "config cache data branch branches tag tags image images volume volumes user users account accounts "
                       "permission permissions endpoint route routes flag flags asset assets resource resources secret secrets "
                       "label labels".split())
-FILE_LIKE = _lazy(r"[\w./-]+\.(?:py|pyw|go|jsx?|tsx?|mjs|cjs|mts|cts|json|toml|ya?ml|md|txt|cfg|ini|sql)\b")
-WHERE = _lazy(r"\b(?:in|from|of|within|inside|under|on|across|at|for|to)\s+(?:the\s+)?[`'\"]?[\w./-]+[`'\"]?", re.I)
+# "add tests" fires only if the test files gain no test-like code: blank, comment, import, fixture and helper lines are not
+TEST_BLOCK = _lazy(r"#\[(?:[\w:]+::)?test\b|#\[cfg\(test\)\]|>>>|\bdef\s+test_|@Test\b")
+SETUP_LINE = _lazy(r"\s*(?:@(?:pytest\.)?fixture\b|import\b|from\s+\S+\s+import\b|package\b|use\s+[\w:{]|"
+                        r"(?:const|let|var)\s+(?:\w+|\{[^}]*\})\s*=\s*require\(|\"[^\"]*\"\s*$|\w+\s+\"[^\"]*\"\s*$|\)\s*$)")
+HELPER_HEAD = _lazy(r"\s*(?:(?:async\s+)?(?:def|function|func)\s+(?:\([^)]*\)\s*)?(?P<n>\w+)|"
+                         r"(?:beforeEach|afterEach|beforeAll|afterAll|setUp|tearDown|setup|teardown)\b)")
+TEST_NAME = _lazy(r"(?:test|Test|Benchmark|Fuzz|Example)")
+TESTY = _lazy(r"\b(?:tests?|testing|specs?)\b", re.I)
 MIGRATION_PATH = _lazy(r"(?:^|/)(?:migrations?|alembic|versions|schema|db)/", re.I)
 
 
@@ -8200,41 +8209,48 @@ def tests_added_nothing(ctx) -> bool:
     files = [fc for fc in ctx.changes if ctx.is_test(fc.path) and not fc.deleted]
     if not files or any(fc.status not in ("A", "M") or fc.binary or fc.symlink or fc.ext not in REVIEW_EXTS for fc in files):
         return False
-    return not any(TEST_LINE.search(t) or DATA_ROW.match(t) for fc in files for t in fc.added.values())
+    if any(TEST_BLOCK.search(t) for fc in ctx.changes for t in fc.added.values()):     # test code anywhere in the diff
+        return False
+    for fc in files:
+        head, prev = None, None                 # indent of the fixture/helper being added, previous added line number
+        for n in sorted(fc.added):
+            t = fc.added[n]
+            head = None if prev is not None and n != prev + 1 else head
+            prev = n
+            if not t.strip() or COMMENT_LINE.match(t) or SETUP_LINE.match(t):
+                continue
+            indent = len(t) - len(t.lstrip())
+            if head is not None and (indent > head or t.strip() in ("}", "})", "});", ")")):
+                if TEST_LINE.search(t):
+                    return False
+                continue
+            h = HELPER_HEAD.match(t)
+            if h and not (h.group("n") and TEST_NAME.match(h.group("n"))) and not TEST_LINE.search(t):
+                head = indent
+                continue
+            return False                                                              # any other code line is test-like
+    return True
 
 
 def removal_contradicts(ctx, rest: str):
-    """Why a "remove the unused ..." claim is false, or None: nothing at all is removed, or no removed line mentions any
-    identifier the message names (`backticked`, snake_case or camelCase) that is still present in a changed file."""
+    """Why a "remove the unused ..." claim is false, or None: only when no line is removed anywhere (any removal keeps
+    it silent: the removed thing may be a member, a neighbour or a spelling the message does not use)."""
     if not _judgeable_sources(ctx):
         return None
     words = [w.lower() for w in re.findall(r"[A-Za-z_]\w*", rest)][:8]
-    if DATA_NOUN.intersection(words):
+    if DATA_NOUN.intersection(words) or any(fc.removed for fc in ctx.changes):
         return None
-    if not any(fc.removed for fc in ctx.changes):
-        return "removes no line" if CODE_NOUN.intersection(words[:4]) else None
-    rest = WHERE.sub(" ", FILE_LIKE.sub(" ", rest))                       # where to look is not what is removed
-    parts = {x for fc in ctx.changes for seg in fc.path.split("/") for x in (seg, seg.rsplit(".", 1)[0])}
-    names = re.findall(r"`([^`\s]+)`", rest) + [w for w in re.findall(r"[A-Za-z_]\w*", rest) if identifier_like(w, False)]
-    names = [n for n in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z_]\w*", n) and n not in parts]
-    if not names:
-        return None
-    removed = "\n".join(t for fc in ctx.changes for _n, t in fc.removed)
-    still = "\n".join(t for fc in ctx.changes for t in [ctx.new_text(fc)] if t)
-    for n in names:
-        pat = re.compile(r"\b" + re.escape(n) + r"\b")
-        if pat.search(removed) or not pat.search(still):
-            return None
-    return f"removes nothing that mentions `{names[0]}`"
+    return "removes no line" if CODE_NOUN.intersection(words[:4]) else None
 
 
 def adds_no_error_handling(ctx) -> bool:
-    """True when non-test Python/Go/JS/TS changes exist and nothing they add or remove is a branch, an error word, a
-    nil/None/null mention or a guard of any kind; false (silent) with any other kind of source file in the change."""
+    """True when non-test Python/Go/JS/TS changes exist and nothing any changed file adds or removes is a branch, an error
+    word, a handling idiom, a nil/None/null mention or a guard of any kind (see GUARD_LINE); false (silent) with any
+    other kind of file in the change."""
     if not _judgeable_sources(ctx):
         return False
     code = [fc for fc in ctx.code_changes(REVIEW_EXTS, tests=False) if fc.added]
-    lines = [t for fc in code for t in list(fc.added.values()) + [t for _n, t in fc.removed] if not COMMENT_LINE.match(t)]
+    lines = [t for fc in ctx.changes for t in list(fc.added.values()) + [t for _n, t in fc.removed] if not COMMENT_LINE.match(t)]
     return bool(code) and not any(GUARD_LINE.search(t) for t in lines)
 
 
@@ -8321,7 +8337,8 @@ def check_claims(ctx) -> list:
                                    f'the message says "{claim}" but the diff {why}', f"remove:{claim}", human=None))
         for m in ERROR_CLAIM.finditer(prose):
             claim = " ".join(m.group(0).lower().split())
-            if judged and ("error", claim) not in seen and _claimed(prose, m) and adds_no_error_handling(ctx):
+            if judged and ("error", claim) not in seen and _claimed(prose, m) and not TESTY.search(prose) \
+                    and adds_no_error_handling(ctx):
                 seen.add(("error", claim))
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but the diff adds no error handling (no try/except, error check, '

@@ -190,10 +190,11 @@ def test_a_deleted_file_counts_as_a_removal(repo):
     assert both(repo, "remove the unused helper function") == []
 
 
-def test_removing_the_named_name_in_a_modified_file_is_silent_but_removing_other_things_is_reported(repo):
+def test_any_removed_line_keeps_a_remove_unused_claim_silent(repo):
+    # last pass: the "no removed line mentions the named identifier" rule is gone (it false-fired on class members)
     base(repo, {"app/__init__.py": "", "app/u.py": "def keep(x):\n    return x\n\n\ndef old_fn(x):\n    return x\n\n\ndef other(x):\n    return x\n"})
     change(repo, {"app/u.py": "def keep(x):\n    return x\n\n\ndef old_fn(x):\n    return x\n"})
-    assert both(repo, "remove the unused `old_fn` function")
+    assert both(repo, "remove the unused `old_fn` function") == []
     assert both(repo, "remove the unused `other` function") == []
 
 
@@ -307,3 +308,109 @@ def test_a_trivial_python_edit_next_to_an_unjudged_language_is_silent(repo, ext,
     base(repo, {"app/__init__.py": "", "app/a.py": "x = 1\n"})
     change(repo, {"app/a.py": "x = 2\n", f"ui/App{ext}": text})
     assert both(repo, "handle the error when loading") == []
+
+
+# ---------------------------------------------------------------------------------------------- last round: ordinary true messages
+
+PY_PARAM = "import pytest\n\n\n@pytest.mark.parametrize('x', [\n    1,\n    2,\n])\ndef test_a(x):\n    assert x\n"
+JS_EACH = "test.each([\n  1,\n  2,\n])('x %i', (n) => {\n  expect(n).toBeTruthy();\n});\n"
+GO_ROWS = ('package a\n\nimport "testing"\n\nfunc TestF(t *testing.T) {\n\tcases := []any{\n\t\t1,\n\t\t2,\n\t}\n\t_ = cases\n}\n')
+PY_TEST_BODY = "import pytest\n\n\ndef test_a():\n    assert f(1)\n"
+GO_TEST_BODY = 'package a\n\nimport "testing"\n\nfunc TestF(t *testing.T) {\n\tf(1)\n}\n'
+IMPORT_ONLY = {"tests/conftest.py": "import os\n"}
+
+
+def py_row(row):
+    return (PY_PARAM, PY_PARAM.replace("    2,\n", f"    2,\n    {row},\n"))
+
+
+def py_add(line):
+    return (PY_TEST_BODY, PY_TEST_BODY.replace("    assert f(1)\n", f"    assert f(1)\n    {line}\n"))
+
+
+LAST_TESTS = {}
+for _name, _row in {"none": "None", "true": "True", "minus-one": "-1", "pytest-param": "pytest.param('z', id='zed')",
+                    "decimal": "Decimal('1.5')", "bytes": "b'abc'", "fstring": "f'a{1}'", "name": "empty_value"}.items():
+    LAST_TESTS[f"py-row-{_name}"] = ({"tests/test_a.py": py_row(_row)[0]}, {"tests/test_a.py": py_row(_row)[1]}, "add tests for f")
+for _name, _row in {"null": "null", "minus-one": "-1", "true": "true"}.items():
+    LAST_TESTS[f"js-row-{_name}"] = ({"src/a.test.js": JS_EACH}, {"src/a.test.js": JS_EACH.replace("  2,\n", f"  2,\n  {_row},\n")},
+                                     "add tests for f")
+for _name, _row in {"nil": "nil", "minus-one": "-1"}.items():
+    LAST_TESTS[f"go-row-{_name}"] = ({"go.mod": "module m\n\ngo 1.22\n", "a/a_test.go": GO_ROWS},
+                                     {"a/a_test.go": GO_ROWS.replace("\t\t2,\n", f"\t\t2,\n\t\t{_row},\n")}, "add tests for f")
+for _name, _line in {"pytest-warns": "with pytest.warns(UserWarning):\n        f(2)", "pytest-fail": "pytest.fail('no')",
+                     "self-fail": "self.fail('x')", "check-is-true": "check.is_true(a)"}.items():
+    LAST_TESTS[f"py-call-{_name}"] = ({"tests/test_a.py": py_add(_line)[0]}, {"tests/test_a.py": py_add(_line)[1]}, "add tests for f")
+for _name, _line in {"fuzz-add": 'f.Add("b")', "testify-no-error": "s.NoError(err)", "testify-len": "s.Len(xs, 2)",
+                     "goconvey": 'Convey("x", t, func() {})'}.items():
+    LAST_TESTS[f"go-call-{_name}"] = ({"go.mod": "module m\n\ngo 1.22\n", "a/a_test.go": GO_TEST_BODY},
+                                      {"a/a_test.go": GO_TEST_BODY.replace("\tf(1)\n", f"\tf(1)\n\t{_line}\n")}, "add tests for f")
+JS_BODY = "test('x', () => {\n  f(1);\n});\n"
+for _name, _line in {"cypress": "cy.get('.x').click();", "user-event": "await userEvent.click(btn);"}.items():
+    LAST_TESTS[f"js-call-{_name}"] = ({"src/a.test.js": JS_BODY}, {"src/a.test.js": JS_BODY.replace("  f(1);\n", f"  f(1);\n  {_line}\n")},
+                                      "add tests for f")
+LAST_TESTS["jest-it-each-template"] = (
+    {"src/a.test.js": JS_BODY},
+    {"src/a.test.js": JS_BODY + "it.each`\n  a | b\n  ${1} | ${2}\n`('adds $a', ({ a, b }) => {\n  f(a, b);\n});\n"}, "add tests for f")
+LAST_TESTS["rust-cfg-test-block-in-source"] = (
+    {**IMPORT_ONLY, "src/lib.rs": "pub fn f() {}\n"},
+    {"tests/conftest.py": "import os\nimport sys\n", "src/lib.rs": "pub fn f() {}\n\n#[cfg(test)]\nmod t {\n    #[test]\n    fn a() {}\n}\n"},
+    "add tests for f")
+LAST_TESTS["def-test-in-a-source-file"] = (
+    {**IMPORT_ONLY, "app/a.py": "x = 1\n"},
+    {"tests/conftest.py": "import os\nimport sys\n", "app/a.py": "x = 1\n\n\ndef test_inline():\n    assert x\n"}, "add tests for f")
+
+# remove unused: any removed line anywhere keeps it silent
+CLASS_B = "class MyClass:\n    def a(self):\n        return 1\n\n    def b(self):\n        return 2\n"
+CLASS_NO_B = "class MyClass:\n    def a(self):\n        return 1\n"
+SERVICE = "class UserService:\n    def find(self):\n        return 1\n\n    def _helper(self):\n        return 2\n"
+LAST_REMOVE = {
+    "remove-unused-class-member": ({"app/a.py": CLASS_B}, {"app/a.py": CLASS_NO_B}, "delete unused MyClass.b method"),
+    "remove-unused-class-methods": ({"app/a.py": CLASS_B}, {"app/a.py": CLASS_NO_B}, "remove unused MyClass methods"),
+    "remove-unused-service-helpers": (
+        {"app/a.py": SERVICE}, {"app/a.py": SERVICE.replace("\n\n    def _helper(self):\n        return 2\n", "\n")},
+        "remove unused UserService helpers"),
+}
+
+# handle the error: a handling idiom the vocabulary of the check does not hide
+PYHEAD = "import os\n\n\ndef g():\n    return 1\n"
+LAST_ERROR = {}
+for _name, (_path, _line, _msg) in {
+        "unlink-missing-ok": ("app/a.py", "Path(p).unlink(missing_ok=True)", "handle the error when the file is gone"),
+        "rmtree-ignore-errors": ("app/a.py", "shutil.rmtree(p, ignore_errors=True)", "handle the error when the tree is gone"),
+        "express-error-handler": ("src/a.js", "app.use(errorHandler);", "handle the error"),
+        "react-error-boundary": ("src/a.tsx", "export const A = () => <ErrorBoundary><Main/></ErrorBoundary>;", "handle the error"),
+        "load-handle-error": ("src/a.js", "load(handleError);", "handle the error"),
+        "getenv-default": ("app/a.py", "os.getenv('X', '1')", "handle the error when X is unset"),
+        "model-validate": ("app/a.py", "Model.model_validate(x)", "handle the error"),
+        "sentry-init": ("app/a.py", "sentry_sdk.init(dsn)", "handle the error"),
+        "uncaught-exception": ("src/a.js", "process.on('uncaughtException', report);", "handle the error"),
+        "excepthook": ("app/a.py", "sys.excepthook = handler", "handle the error"),
+        "unhandled-rejection": ("src/a.js", "process.on('unhandledRejection', report);", "handle the error"),
+        "signal-signal": ("app/a.py", "signal.signal(signal.SIGTERM, stop)", "handle the error"),
+        "raise-for-status": ("app/a.py", "r.raise_for_status()", "handle the error"),
+}.items():
+    _base = "x = 1\n" if _path.endswith(".py") else "export const x = 1;\n"
+    LAST_ERROR[_name] = ({_path: _base}, {_path: _base + _line + "\n"}, _msg)
+LAST_ERROR["go-wait-group"] = (
+    {"a/a.go": "package a\n\nfunc F() {}\n"}, {"a/a.go": "package a\n\nfunc F() {}\n\nfunc G(g Group) {\n\tg.Wait()\n}\n"}, "handle the error")
+LAST_ERROR["error-handling-tests-message"] = (
+    {"app/a.py": "x = 1\n"}, {"app/a.py": "x = 2\n"}, "Add error handling tests for f")
+LAST_ERROR["test-prefixed-message"] = (
+    {"app/a.py": "x = 1\n"}, {"app/a.py": "x = 2\n"}, "test: handle the error case for f")
+
+# a getter in place of a field is a change to how nil is met
+LAST_NIL = {
+    "go-getter": ({"shop/d.go": GO_DESCRIBE}, {"shop/d.go": GO_DESCRIBE.replace("p.Name", "p.GetName()")}, "fix the nil check in Describe"),
+    "py-getter": ({"app/a.py": PY_DESCRIBE}, {"app/a.py": PY_DESCRIBE.replace("p.name", "get_name(p)")}, "fix the None check in describe"),
+}
+
+LAST = {**LAST_TESTS, **LAST_REMOVE, **LAST_ERROR, **LAST_NIL}
+
+
+@pytest.mark.parametrize("name", sorted(LAST))
+def test_last_round_true_message_gets_no_claim_finding(repo, name):
+    files, edit, message = LAST[name]
+    base(repo, files)
+    change(repo, edit)
+    assert both(repo, message) == []
