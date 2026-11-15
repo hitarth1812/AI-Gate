@@ -8151,17 +8151,31 @@ NOT_A_CLAIM = _lazy(r"(?:n't|\b(?:not|never|cannot|unable|without|should|shall|w
 TEST_LINE = _lazy(r"\b(?:def|func|fn|function)\s+(?:\([^)]*\)\s*)?\w*(?:test|bench|fuzz|example|spec|should)\w*|\bassert|\bexpect\b|"
                        r"\b(?:it|test|describe|context|specify|suite|scenario)\s*(?:\.\w+)*\s*\(|\bt\.\w+\(|@Test\b|#\[\w*test|"
                        r"\[(?:Test|Fact|Theory)\]|\bclass\s+\w*test|\.should\b|\b(?:verify|check)\w*\(|pytest\.raises|parametrize|"
-                       r"\.to(?:be|equal|have|throw)|\bwant\b|\bgot\b|\bcase\b", re.I)
+                       r"\.to(?:be|equal|have|throw)|\bwant\b|\bgot\b|\bcase\b|\brequire\b|\bis\.\w+\(|\w*equal\w*\(|\bshould|>>>", re.I)
 DATA_ROW = _lazy(r"^\s*(?:[\[({\"'`\d]\S.*|[\w\"']+\s*:\s*\S.*),\s*$")
 GUARD_LINE = _lazy(r"\b(?:try|except|catch|finally|rescue|recover|raise|throw|panic|defer|if|elif|else|unless|switch|match|case|when|"
                         r"guard|assert|with|for|while|and|or|not|is|in|err|errors?|exceptions?|fail\w*|invalid|fault|suppress|retry|"
                         r"fallback|default|abort|exit|log|warn\w*|status|reject\w*|settled|exists?|isfile|isdir|nil|none|null|"
-                        r"undefined|isinstance|typeof)\b|[?!]|[=!]=|&&|\|\||\.get\(|getattr", re.I)
+                        r"undefined|isinstance|typeof|ok|result|option\w*|unwrap\w*|rejected|errback)\b|[?!]|[=!]=|&&|\|\||"
+                        r"\.get\(|getattr|\bcheck\s*=|\.then\(|\.catch\b|on_?error|exist_ok|recover|nullsafe", re.I)
 # what a nil/None check or a fix of one could be made of (no error words: `err := f()` is not a nil check)
 NIL_LINE = _lazy(r"\b(?:nil|none|null|undefined|if|elif|else|unless|not|is|and|or|assert|isinstance|typeof|guard|panic|raise|throw|"
-                      r"switch|match|case|when|try|except|catch)\b|[?!]|[=!]=|&&|\|\||\.get\(|getattr", re.I)
-OTHER_CODE_EXTS = frozenset({".rs", ".java", ".kt", ".scala", ".rb", ".php", ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".swift",
-                             ".dart", ".lua", ".pl", ".ex", ".exs", ".zig", ".sh", ".ps1", ".r", ".jl"})
+                      r"switch|match|case|when|try|except|catch|ok|optional)\b|[?!]|[=!]=|&&|\|\||\.get\(|getattr|recover|nullsafe",
+                 re.I)
+# "add tests" is about tests, not what supports them; "remove unused X" is about code, not rows, files or packages
+NOT_THE_OBJECT = _lazy(r"\s+(?:fixtures?|helpers?|data|config\w*|utilit\w*|utils?|setup|harness|infra\w*|mocks?|stubs?|files?|"
+                            r"dirs?|directory|folders?|environments?|env|runner|scaffold\w*)\b", re.I)
+CODE_NOUN = frozenset("function functions method methods class classes helper helpers variable variables var vars const consts "
+                      "constant constants import imports code type types struct structs param params parameter parameters "
+                      "argument arguments def func funcs".split())
+DATA_NOUN = frozenset("column columns table tables file files folder folders dir directory directories package packages entry "
+                      "entries record records row rows index indexes indices dependency dependencies setting settings key keys "
+                      "config cache data branch branches tag tags image images volume volumes user users account accounts "
+                      "permission permissions endpoint route routes flag flags asset assets resource resources secret secrets "
+                      "label labels".split())
+FILE_LIKE = _lazy(r"[\w./-]+\.(?:py|pyw|go|jsx?|tsx?|mjs|cjs|mts|cts|json|toml|ya?ml|md|txt|cfg|ini|sql)\b")
+WHERE = _lazy(r"\b(?:in|from|of|within|inside|under|on|across|at|for|to)\s+(?:the\s+)?[`'\"]?[\w./-]+[`'\"]?", re.I)
+MIGRATION_PATH = _lazy(r"(?:^|/)(?:migrations?|alembic|versions|schema|db)/", re.I)
 
 
 def _claimed(prose: str, m) -> bool:
@@ -8172,6 +8186,12 @@ def _claimed(prose: str, m) -> bool:
 def _only_plain_edits(ctx) -> bool:
     """Every changed file is an ordinary added or modified text file (no deletion, rename, copy, mode or binary change)."""
     return bool(ctx.changes) and all(fc.status in ("A", "M") and not fc.binary and not fc.symlink for fc in ctx.changes)
+
+
+def _judgeable_sources(ctx) -> bool:
+    """Every changed file is a plain Python/Go/JS/TS source edit outside migrations: only then is "nothing was removed" or
+    "no error handling was added" a statement about the whole change (a manifest, ignore file, sql or ui file says more)."""
+    return _only_plain_edits(ctx) and all(fc.ext in REVIEW_EXTS and not MIGRATION_PATH.search(fc.path) for fc in ctx.changes)
 
 
 def tests_added_nothing(ctx) -> bool:
@@ -8186,12 +8206,17 @@ def tests_added_nothing(ctx) -> bool:
 def removal_contradicts(ctx, rest: str):
     """Why a "remove the unused ..." claim is false, or None: nothing at all is removed, or no removed line mentions any
     identifier the message names (`backticked`, snake_case or camelCase) that is still present in a changed file."""
-    if not _only_plain_edits(ctx):
+    if not _judgeable_sources(ctx):
+        return None
+    words = [w.lower() for w in re.findall(r"[A-Za-z_]\w*", rest)][:8]
+    if DATA_NOUN.intersection(words):
         return None
     if not any(fc.removed for fc in ctx.changes):
-        return "removes no line"
+        return "removes no line" if CODE_NOUN.intersection(words[:4]) else None
+    rest = WHERE.sub(" ", FILE_LIKE.sub(" ", rest))                       # where to look is not what is removed
+    parts = {x for fc in ctx.changes for seg in fc.path.split("/") for x in (seg, seg.rsplit(".", 1)[0])}
     names = re.findall(r"`([^`\s]+)`", rest) + [w for w in re.findall(r"[A-Za-z_]\w*", rest) if identifier_like(w, False)]
-    names = [n for n in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z_]\w*", n)]
+    names = [n for n in dict.fromkeys(names) if re.fullmatch(r"[A-Za-z_]\w*", n) and n not in parts]
     if not names:
         return None
     removed = "\n".join(t for fc in ctx.changes for _n, t in fc.removed)
@@ -8206,7 +8231,7 @@ def removal_contradicts(ctx, rest: str):
 def adds_no_error_handling(ctx) -> bool:
     """True when non-test Python/Go/JS/TS changes exist and nothing they add or remove is a branch, an error word, a
     nil/None/null mention or a guard of any kind; false (silent) with any other kind of source file in the change."""
-    if not _only_plain_edits(ctx) or any(fc.ext in OTHER_CODE_EXTS for fc in ctx.changes if not ctx.is_test(fc.path)):
+    if not _judgeable_sources(ctx):
         return False
     code = [fc for fc in ctx.code_changes(REVIEW_EXTS, tests=False) if fc.added]
     lines = [t for fc in code for t in list(fc.added.values()) + [t for _n, t in fc.removed] if not COMMENT_LINE.match(t)]
@@ -8242,10 +8267,11 @@ def _symbol_spans(ctx, fc, which: str, name: str):
 
 
 def nil_check_contradicted(ctx, name: str) -> bool:
-    """True when `name` is a function defined in a changed Python or Go file and every definition of it lacks any
-    nil/None/conditional in the lines added to or removed from it. Anything unclear (a name defined only elsewhere, a
-    new function, a parse failure) is False."""
-    verdicts = []
+    """True when `name` is a function defined (before and after) in a changed Python or Go file and no line added or
+    removed anywhere in the diff holds a nil/None/null mention, ok-idiom, recover, conditional, assertion or raise: a fix
+    in a helper, a caller or an idiom stays silent. Anything unclear (a name defined only elsewhere, a new function, a
+    parse failure) is False."""
+    found = False
     for fc in ctx.changes:
         if fc.deleted or fc.binary or ctx.is_test(fc.path) or not (fc.ext in PY_EXTS or fc.ext == ".go"):
             continue
@@ -8257,10 +8283,9 @@ def nil_check_contradicted(ctx, name: str) -> bool:
         old = _symbol_spans(ctx, fc, "old", name)
         if old is None or len(old) != len(new):
             return False
-        added = [t for n, t in fc.added.items() if any(a <= n <= b for a, b in new)]
-        removed = [t for n, t in fc.removed if any(a <= n <= b for a, b in old)]
-        verdicts.append(not any(NIL_LINE.search(t) for t in added + removed))
-    return bool(verdicts) and all(verdicts)
+        found = True
+    lines = [t for fc in ctx.changes for t in list(fc.added.values()) + [t for _n, t in fc.removed]]
+    return found and not any(NIL_LINE.search(t) for t in lines)
 
 
 def check_claims(ctx) -> list:
@@ -8271,6 +8296,7 @@ def check_claims(ctx) -> list:
     findings, seen = [], set()
     for message in ctx.messages:
         prose = message_claims(message)
+        judged = not (re.match(r"\s*revert\b", message, re.I) or "this reverts commit" in message.lower())
         for m in TESTS_CLAIM.finditer(prose):
             claim = " ".join(m.group(0).lower().split())
             if not tests_changed and ("tests", claim) not in seen:
@@ -8278,33 +8304,35 @@ def check_claims(ctx) -> list:
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but no test file changed in this diff', f"tests:{claim}",
                                    human=None))
-            elif tests_changed and re.match(r"(?:add|writ|wrote)", claim) and ("tests-empty", claim) not in seen \
-                    and _claimed(prose, m) and tests_added_nothing(ctx):
+            elif tests_changed and judged and re.match(r"(?:add|writ|wrote)", claim) and ("tests-empty", claim) not in seen \
+                    and _claimed(prose, m) and not NOT_THE_OBJECT.match(prose, m.end()) and "doctest" not in prose.lower() \
+                    and tests_added_nothing(ctx):
                 seen.add(("tests-empty", claim))
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but no test function or assertion was added in the changed '
                                    f'test files', f"tests-empty:{claim}", human=None))
         for m in REMOVE_CLAIM.finditer(prose):
             claim = " ".join(m.group(0).lower().split())
-            why = removal_contradicts(ctx, m.group("rest")) if ("remove", claim) not in seen and _claimed(prose, m) else None
+            why = removal_contradicts(ctx, m.group("rest")) \
+                if judged and ("remove", claim) not in seen and _claimed(prose, m) else None
             if why:
                 seen.add(("remove", claim))
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but the diff {why}', f"remove:{claim}", human=None))
         for m in ERROR_CLAIM.finditer(prose):
             claim = " ".join(m.group(0).lower().split())
-            if ("error", claim) not in seen and _claimed(prose, m) and adds_no_error_handling(ctx):
+            if judged and ("error", claim) not in seen and _claimed(prose, m) and adds_no_error_handling(ctx):
                 seen.add(("error", claim))
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
                                    f'the message says "{claim}" but the diff adds no error handling (no try/except, error check, '
                                    f'guard or branch in the changed code)', f"error:{claim}", human=None))
         for m in NIL_CLAIM.finditer(prose):
             name = m.group("x").split(".")[-1]
-            if ("nil", name) not in seen and _claimed(prose, m) and nil_check_contradicted(ctx, name):
+            if judged and ("nil", name) not in seen and _claimed(prose, m) and nil_check_contradicted(ctx, name):
                 seen.add(("nil", name))
                 findings.append(rv("review.claim_mismatch", "(commit)", None,
-                                   f'the message says "{" ".join(m.group(0).lower().split())}" but the lines changed in `{name}` '
-                                   f'add no nil/None check or condition', f"nil:{name}", human=None))
+                                   f'the message says "{" ".join(m.group(0).lower().split())}" but no nil/None check, guard or '
+                                   f'condition is added or removed anywhere in the diff (`{name}`)', f"nil:{name}", human=None))
         for m in FIX_CLAIM.finditer(prose):
             token = m.group("x")
             if not identifier_like(token, bool(m.group("q"))):

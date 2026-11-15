@@ -195,3 +195,115 @@ def test_removing_the_named_name_in_a_modified_file_is_silent_but_removing_other
     change(repo, {"app/u.py": "def keep(x):\n    return x\n\n\ndef old_fn(x):\n    return x\n"})
     assert both(repo, "remove the unused `old_fn` function")
     assert both(repo, "remove the unused `other` function") == []
+
+
+# ---------------------------------------------------------------------------------------------- verifier probes (true messages)
+
+GO_TEST = ('package a\n\nimport "testing"\n\nfunc TestF(t *testing.T) {\n\tif F(1) != 1 {\n\t\tt.Errorf("x")\n\t}\n}\n')
+PY_DESCRIBE = "def describe(p):\n    return p.name\n\n\ndef run(p):\n    return describe(p)\n"
+MIGRATIONS = {"app/__init__.py": "", "app/a.py": "x = 1\n"}
+
+PROBES = {
+    # add tests
+    "go-require-equal-in-existing-test": (
+        {"go.mod": "module m\n\ngo 1.22\n", "a/a_test.go": GO_TEST},
+        {"a/a_test.go": GO_TEST.replace('\t}\n}\n', '\t}\n\trequire.Equal(t, 2, F(2))\n}\n')}, "add tests for F"),
+    "node-test-strict-equal": (
+        {"src/a.test.js": "const { strictEqual } = require('node:assert');\ntest('f', () => {\n  strictEqual(f(1), 1);\n});\n"},
+        {"src/a.test.js": "const { strictEqual } = require('node:assert');\ntest('f', () => {\n  strictEqual(f(1), 1);\n"
+                          "  strictEqual(f(2), 2);\n});\n"}, "add tests for f"),
+    "add-test-fixtures": (
+        PY_TESTS, {"tests/conftest.py": "def items():\n    return [1]\n"}, "add test fixtures"),
+    "add-test-helpers": (
+        PY_TESTS, {"tests/helpers.py": "def make():\n    return 1\n"}, "add test helpers for the parser"),
+    "add-test-data": (PY_TESTS, {"tests/data.py": "SAMPLE = 1\n"}, "add test data"),
+    "add-test-config": (PY_TESTS, {"tests/conftest.py": "collect_ignore = ['x.py']\n"}, "add test config to ignore x.py"),
+    "add-tests-via-doctest": (
+        PY_TESTS, {"tests/conftest.py": "X = 1\n", "app/util.py": "def slugify(t):\n    '''>>> slugify('a')\n    'a'\n    '''\n    return t\n"},
+        "add tests via doctest"),
+    "revert-of-an-add-tests-commit": (
+        PY_TESTS, {"tests/conftest.py": "X = 1\n"}, 'Revert "add tests for slugify"\n\nThis reverts commit 0123abc.'),
+    # remove unused
+    "drop-unused-column-migration": (
+        MIGRATIONS, {"migrations/0002_drop.sql": "ALTER TABLE t DROP COLUMN legacy_flag;\n"}, "drop the unused legacy_flag column"),
+    "drop-unused-column-python-migration": (
+        MIGRATIONS, {"migrations/0002_drop.py": "def upgrade(op):\n    op.drop_column('t', 'legacy_flag')\n"},
+        "drop the unused `legacy_flag` column"),
+    "remove-unused-files-from-the-package": (MIGRATIONS, {".npmignore": "dist\n"}, "remove unused files from the package"),
+    "delete-unused-cache-entries": (
+        MIGRATIONS, {"app/cache.py": "def prune(cache):\n    cache.clear()\n"}, "delete the unused cache entries on startup"),
+    "drop-unused-package-from-the-build": (
+        {"pyproject.toml": "[tool.x]\nname = 'a'\n"}, {"pyproject.toml": "[tool.x]\nname = 'a'\nexclude = ['b']\n"},
+        "drop the unused b package from the build"),
+    "remove-unused-imports-from-a-test-file": (
+        {"tests/test_foo.py": "import os\nimport sys\n\n\ndef test_foo():\n    assert sys\n"},
+        {"tests/test_foo.py": "import sys\n\n\ndef test_foo():\n    assert sys\n"}, "remove unused imports from test_foo.py"),
+    "remove-unused-import-in-a-file-name": (
+        {"app/foo_bar.py": "import os\nimport sys\n\n\ndef foo_bar():\n    return sys.argv\n"},
+        {"app/foo_bar.py": "import sys\n\n\ndef foo_bar():\n    return sys.argv\n"}, "remove unused import in foo_bar.py"),
+    "remove-unused-imports-in-a-module": (
+        {"app/my_mod.py": "import os\nimport sys\n\nNAME = 'my_mod'\nprint(sys.argv)\n"},
+        {"app/my_mod.py": "import sys\n\nNAME = 'my_mod'\nprint(sys.argv)\n"}, "remove unused imports in my_mod"),
+    "revert-of-a-remove-unused-commit": (
+        {"app/a.py": "x = 1\n"}, {"app/a.py": "x = 1\ny = 2\n"}, 'Revert "remove the unused helper function"'),
+    # handle the error
+    "handle-failures-subprocess-check": (
+        {"app/a.py": "import subprocess\n"}, {"app/a.py": "import subprocess\n\n\ndef go(c):\n    return subprocess.run(c, check=True)\n"},
+        "handle failures of the subprocess"),
+    "handle-error-exist-ok": (
+        {"app/a.py": "import os\n"}, {"app/a.py": "import os\n\n\ndef mk(p):\n    os.makedirs(p, exist_ok=True)\n"},
+        "handle the error when the dir exists"),
+    "handle-failures-then-rejection-handler": (
+        {"src/a.js": "export const f = (u) => fetch(u);\n"},
+        {"src/a.js": "export const f = (u) => fetch(u).then(r => r.text(), () => 'x');\n"}, "handle failures"),
+    "handle-error-on-error-callback": (
+        {"src/a.js": "export const f = (u) => load(u);\n"}, {"src/a.js": "export const f = (u) => load(u, { onError: report });\n"},
+        "handle the error"),
+    "handle-error-go-ok-idiom": (
+        {"a/a.go": "package a\n\nfunc F(m map[string]int) int { return 0 }\n"},
+        {"a/a.go": "package a\n\nfunc F(m map[string]int) int {\n\tv, ok := m[\"a\"]\n\t_ = ok\n\treturn v\n}\n"}, "handle the error"),
+    "handle-error-retry": (
+        {"app/a.py": "def f():\n    return 1\n"}, {"app/a.py": "def f():\n    return 1\n\n\ndef g():\n    return retry(f)\n"},
+        "handle the error"),
+    # nil check
+    "nil-check-added-in-a-helper": (
+        {"shop/d.go": GO_DESCRIBE},
+        {"shop/d.go": GO_DESCRIBE.replace("return p.Name", "return nameOf(p)") + "\nfunc nameOf(p *Item) string {\n\tif p == nil {\n"
+                                                                                     "\t\treturn \"\"\n\t}\n\treturn p.Name\n}\n"},
+        "fix the nil check in Describe"),
+    "none-check-added-in-a-caller": (
+        {"app/a.py": PY_DESCRIBE},
+        {"app/a.py": PY_DESCRIBE.replace("    return describe(p)", "    if p is None:\n        return ''\n    return describe(p)")},
+        "fix the None check in describe"),
+    "nil-check-comma-ok": (
+        {"shop/d.go": GO_DESCRIBE},
+        {"shop/d.go": GO_DESCRIBE.replace("\treturn p.Name", "\tv, ok := names[\"a\"]\n\t_ = ok\n\treturn v")},
+        "fix the nil check in Describe"),
+    "nil-check-recover": (
+        {"shop/d.go": GO_DESCRIBE},
+        {"shop/d.go": GO_DESCRIBE.replace("\treturn p.Name", "\tdefer func() { recover() }()\n\treturn p.Name")},
+        "fix the nil check in Describe"),
+    "none-check-optional": (
+        {"app/a.py": PY_DESCRIBE}, {"app/a.py": PY_DESCRIBE.replace("def describe(p):", "def describe(p: Optional[str]):")},
+        "fix the None check in describe"),
+    "none-check-nullsafe": (
+        {"app/a.py": PY_DESCRIBE}, {"app/a.py": PY_DESCRIBE.replace("def describe(p):", "@nullsafe\ndef describe(p):")},
+        "fix the None check in describe"),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PROBES))
+def test_verifier_probe_true_message_gets_no_claim_finding(repo, name):
+    files, edit, message = PROBES[name]
+    base(repo, files)
+    change(repo, edit)
+    assert both(repo, message) == []
+
+
+@pytest.mark.parametrize("ext,text", [(".vue", "<script>try { go() } catch (e) { log(e) }</script>\n"),
+                                      (".svelte", "{#await p}{:catch e}x{/await}\n"),
+                                      (".hs", "f = catch go handler\n"), (".sql", "BEGIN TRY SELECT 1 END TRY BEGIN CATCH END CATCH;\n")])
+def test_a_trivial_python_edit_next_to_an_unjudged_language_is_silent(repo, ext, text):
+    base(repo, {"app/__init__.py": "", "app/a.py": "x = 1\n"})
+    change(repo, {"app/a.py": "x = 2\n", f"ui/App{ext}": text})
+    assert both(repo, "handle the error when loading") == []
