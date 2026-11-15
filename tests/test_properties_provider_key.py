@@ -7,8 +7,16 @@ from conftest import find
 
 AGENT = {"CLAUDECODE": "1"}
 WHO = [pytest.param(None, id="person"), pytest.param(AGENT, id="agent")]
-REAL_SHAPE = "xoxb-" + "987654321098-5432109876543-Zq7Lm2Xv9Kp4Rt8Wy3Nb6Hc1"      # no placeholder run in it
-PLACEHOLDER_SHAPE = "xoxb-" + "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"
+
+
+def build(*parts):
+    """The pieces joined at run time (a call, not a constant operation), so this file holds no token the repository self-scan
+    could fold into one."""
+    return "".join(parts)
+
+
+REAL_SHAPE = build("xo", "xb-", "987654321098-", "5432109876543-", "Zq7Lm2Xv9Kp4Rt8Wy3Nb6Hc1")   # no placeholder run in it
+PLACEHOLDER_SHAPE = build("xo", "xb-", "123456789012-", "1234567890123-", "AbCdEfGhIjKlMnOpQrStUvWx")
 
 
 def result(repo, rel, text, env):
