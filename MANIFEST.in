@@ -1,13 +1,17 @@
 # The sdist carries what the test suite needs, so it can run from an unpacked sdist (the wheel is unchanged: it holds
 # only aigate_lite.py and its dist-info, which scripts/release_check.py checks).
-include CHANGELOG.md PROGRESS.md ROADMAP.md README.md LICENSE NOTICE requirements-dev.txt
-include .gitattributes .pre-commit-hooks.yaml
+include CHANGELOG.md README.md LICENSE NOTICE requirements-dev.txt
+include SECURITY.md CONTRIBUTING.md CODE_OF_CONDUCT.md AGENTS.md PROGRESS.md
+include .gitattributes .pre-commit-hooks.yaml .editorconfig
 graft tests
 graft bench
 graft docs
 graft examples
 graft scripts
+graft eval
 graft .github
 graft .aigate
 prune bench/.work
+prune eval/.cache
+exclude bench/latest.json bench/phase2_start.json eval/.holdout_detail.json
 global-exclude __pycache__ *.py[cod] .pytest_cache

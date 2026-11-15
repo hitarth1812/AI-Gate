@@ -29,6 +29,11 @@ classifiers = [
     "Topic :: Security",
 ]
 
+# Development tools only (`pip install -e .[dev]`); the tool itself has no dependencies. Same pins as requirements-dev.txt,
+# which CI installs from: change both together.
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "pyflakes==3.4.0", "hypothesis==6.170.15"]
+
 [project.scripts]
 aigate-lite = "aigate_lite:main"
 
