@@ -445,7 +445,7 @@ def summarize(cases, results) -> dict:
                     "recall": round(tp / (tp + fn + under), 3) if tp + fn + under else None}
     kinds = collections.Counter(f.split("|", 2)[2].split(":", 1)[0] for f in fails)
     return {"cases": dict(per_family), "total_cases": sum(per_family.values()), "skipped": skipped, "contested": contested,
-            "rules": table, "failures": dict(kinds), "failing": sorted(fails),
+            "rules": table, "failures": dict(kinds), "failing": sorted(fails), "failing_cases": len({f.split("|", 1)[0] for f in fails}),
             "overall": {"false_block_clean": kinds.get("FALSE_BLOCK", 0), "unexpected_block": kinds.get("UNEXPECTED_BLOCK", 0),
                         "crashes": kinds.get("CRASH", 0), "gate_errors": kinds.get("GATE_ERROR", 0),
                         "agent_softer": softer, "fn": kinds.get("FN", 0), "fp": kinds.get("FP", 0),

@@ -22,32 +22,50 @@ def cell(v):
     return "-" if v is None else (f"{v:.3f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v))
 
 
+def holdout_lines(h: dict) -> list:
+    """The headline: the holdout is the cases nobody tuned the tool on, so it is the number to read first."""
+    total, kinds = h.get("total_cases", 0), h.get("failures") or {}
+    if not total:
+        return ["- **Holdout:** none in this scoreboard."]
+    if "failing_cases" in h:
+        head = f"{total - h['failing_cases']} of {total} cases pass"
+    else:
+        head = f"{total} cases"
+    parts = [f"missed {kinds.get('FN', 0)}", f"too strict {kinds.get('OVER', 0)}"]
+    for key, label in (("FP", "false positive"), ("UNDER", "too lax"), ("CRASH", "crash"), ("GATE_ERROR", "gate.error"),
+                       ("FALSE_BLOCK", "block on a clean project"), ("UNEXPECTED_BLOCK", "unexpected BLOCK")):
+        if kinds.get(key):
+            parts.append(f"{label} {kinds[key]}")
+    return [f"- **Holdout (cases the tool was never tuned on): {head}; {', '.join(parts)}.** A \"missed\" is a finding a labelled case "
+            "expects and the tool did not report; \"too strict\" is a result harsher than the label."]
+
+
 def render(board: dict) -> str:
     t, h = board["train"], board["holdout"] or {}
     o = t["overall"]
     fam = t["cases"]
-    names = {"FN": "missed", "FP": "false positive", "OVER": "too strict", "UNDER": "too lax", "CRASH": "crash",
-             "GATE_ERROR": "gate.error", "FALSE_BLOCK": "block on a clean project", "UNEXPECTED_BLOCK": "unexpected BLOCK",
-             "AGENT_SOFTER": "agent softer"}
-    held_kinds = ", ".join(f"{names.get(k, k)} {v}" for k, v in sorted((h.get("failures") or {}).items())) or "none"
     lines = [
         "## Measured accuracy", "",
         f"Measured on a fixed corpus with `py eval/run.py` (aigate-lite {board['tool_version']}, Python {board['python']}); "
         f"how it works and what the cases are: [eval/README.md]({EVAL_URL}). These are corpus numbers, not a guarantee: the corpus is "
-        "small and written by the maintainers, so the rate on your code will differ. The table is generated from "
-        "`eval/scoreboard.json`.", "",
-        f"- **Training cases:** {t['total_cases']} ({', '.join(f'{k} {v}' for k, v in sorted(fam.items()))}), each run as a person and "
-        f"as an AI agent; **holdout** (never shown to fixers): {h.get('total_cases', 0)} cases.",
+        "small and written by the maintainers, so the rate on your code will differ. The numbers are generated from "
+        "`eval/scoreboard.json`. Read the holdout line first: the training cases are the ones the tool was fixed against, so "
+        "their results are expected to be clean.", "",
+        *holdout_lines(h),
+        f"- **AI agent softer than a person, holdout and training together:** {o['agent_softer'] + (h.get('overall') or {}).get('agent_softer', 0)} "
+        "(must stay 0)", "",
+        "### Training cases (the tool was tuned on these)", "",
+        f"- **Cases:** {t['total_cases']} ({', '.join(f'{k} {v}' for k, v in sorted(fam.items()))}), each run as a person and as an AI agent.",
         f"- **Blocks on clean projects** (a person, pinned popular repositories): {o['false_block_clean']}",
         f"- **Unexpected BLOCKs:** {o['unexpected_block']}; **crashes:** {o['crashes']}; **`gate.error`:** {o['gate_errors']}",
-        f"- **An AI agent softer than a person:** {o['agent_softer']} (must stay 0)",
-        f"- **Failures against the labels:** missed {o['fn']}, false positives {o['fp']}, too strict {o['over']}, too lax {o['under']} "
-        f"(holdout failures: {held_kinds})", "",
+        f"- **Failures against the labels:** missed {o['fn']}, false positives {o['fp']}, too strict {o['over']}, too lax {o['under']}", "",
+        "### Per rule: training cases (the tool was tuned on these)", "",
         "| Rule | Found | False positive | Missed | Too strict | Too lax | Precision | Recall |", "|---|---|---|---|---|---|---|---|",
     ]
     for rule, r in sorted(t["rules"].items()):
         lines.append(f"| `{rule}` | {r['tp']} | {r['fp']} | {r['fn']} | {r['over']} | {r['under']} | {cell(r['precision'])} | {cell(r['recall'])} |")
-    lines += ["", "Precision is found / (found + false positives + too strict); recall is found / (found + missed + too lax).", ""]
+    lines += ["", "Precision is found / (found + false positives + too strict); recall is found / (found + missed + too lax). "
+              "Rules with few training cases have noisy rates.", ""]
     return "\n".join(lines)
 
 
