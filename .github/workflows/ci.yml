@@ -16,7 +16,7 @@ jobs:
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60          # the suite grew to ~1,900 tests; a Windows runner needs about 30 minutes for them
     strategy:
       fail-fast: false
       matrix:
