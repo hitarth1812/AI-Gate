@@ -4,7 +4,8 @@
     py eval/tools/snapshot_registry.py [--case clean-py-requests]   # network needed; writes eval/snapshots/<id>.json
 
 For each clean case it audits the pinned checkout with the network ON and a private cache folder, repeating until a pass fetches
-nothing new (the tool's per-run lookup budget can cut a first pass short), then converts the tool's own lookup cache
+nothing new (the tool's per-run lookup budget can cut a first pass short). The tool runs under `python -S`, so the
+packages installed on the recording machine do not hide a lookup, then converts the tool's own lookup cache
 (registry-v1.json) into the fixture format that AIGATE_REGISTRY_FIXTURE reads. eval/run.py replays the snapshot (no network, the
 clock pinned to the snapshot's `_meta.now`), so the dependency checks run on real projects and still give the same answer
 tomorrow. A snapshot is tied to what the tool looks up: after a change that adds lookups, record the snapshots again and commit
@@ -66,7 +67,7 @@ def audit(script: Path, repo: Path, cache: Path) -> int:
     env = {k: v for k, v in os.environ.items() if not k.startswith("AIGATE_") and k not in ev.STRIP}
     env.update({"AIGATE_CACHE_DIR": str(cache), "HOME": str(cache), "GOENV": "off", "GIT_CONFIG_NOSYSTEM": "1",
                 "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
-    subprocess.run([sys.executable, str(script), "check", "--all", "--format", "json"], cwd=repo, env=env, capture_output=True,
+    subprocess.run([sys.executable, "-S", str(script), "check", "--all", "--format", "json"], cwd=repo, env=env, capture_output=True,
                    timeout=900)
     path = cache / "registry-v1.json"
     return len(json.loads(path.read_text(encoding="utf-8")).get("entries", {})) if path.is_file() else 0

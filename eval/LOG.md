@@ -137,3 +137,20 @@ Rejected or revised attempts:
 - The `.properties` case: the case's `@@SLACK@@` token contains `12345678` and `AbCdEfGh`, which the documented-placeholder rule
   discards in every language, so the label cannot be met without changing that rule. Left failing and proposed in LABEL_CHANGES H.
 - Holdout writer was given the multi-word idea (the spec), not any code or tool output.
+
+## First nightly run (2026-11-15): every leg failed, found and fixed
+
+The first scheduled `eval-nightly` run failed on all six legs (3 operating systems x Python 3.11 and 3.14) with 15 false BLOCKs on
+`clean-py-click` and `clean-py-requests`: `import setuptools` read as "no package 'setuptools' on PyPI".
+
+Cause: the registry snapshots were recorded on a machine that already had `setuptools` installed, so the tool never looked it up
+(an installed package is not looked up) and the snapshot did not hold it. A runner without `setuptools` then replayed a snapshot in which
+the name "did not exist". The pull-request CI never saw this: its eval step runs only real, seeded and adversarial cases, never the
+clean repositories. It also passed locally on Python 3.12 for the same reason (the same installed packages), and failed on
+Python 3.14 (no `setuptools`).
+
+Fix: the harness runs the tool under `python -S` (both when recording a snapshot and when replaying it), so the packages installed on
+the machine are never visible and the answer does not depend on the machine; the five Python snapshots were recorded again
+(click 55 -> 56 packages, requests 10 -> 12, attrs 22 -> 23; flask and jinja unchanged in size). Two tests pin it
+(`tests/test_eval_harness.py`). Result: `py eval/run.py --check --no-write` passes on 3.11, 3.12 and 3.14 from a clean export with an
+empty clone cache (training failure keys 2, as in the ratchet; holdout 11, as in the ratchet).
