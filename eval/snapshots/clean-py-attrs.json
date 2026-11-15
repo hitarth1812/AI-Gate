@@ -1,12 +1,12 @@
 {
  "_meta": {
   "case": "clean-py-attrs",
-  "date": "2026-11-14",
+  "date": "2026-11-15",
   "lookups": 23,
   "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
-  "now": "2026-11-14T09:45:22+00:00",
+  "now": "2026-11-15T11:48:22+00:00",
   "sha": "6771a04893780166e4b7826b63599f43ac30d00a",
-  "tool_version": "0.5.2"
+  "tool_version": "0.6.0"
  },
  "go": {},
  "npm": {},
@@ -3536,6 +3536,7 @@
     "21.3.0.dev2",
     "21.3.0.dev4"
    ]
-  }
+  },
+  "typing_extensions": {}
  }
 }

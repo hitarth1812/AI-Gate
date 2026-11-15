@@ -221,3 +221,24 @@ def test_key_fragment_placeholders_add_up_to_the_aws_key_and_are_not_a_key_alone
     assert ev.fill("".join(pieces).encode()) == ev.fill(b"@@AWS@@")
     assert ev.fill(b'"@@AKIA@@" + "@@AKT1@@@@AKT2@@"').decode() == '"AKIA" + "QWERTYUIOPASDFGH"'
     assert all(len(ev.SUBST[p]) < 12 for p in pieces)
+
+
+def test_the_gate_runs_without_the_packages_installed_on_this_machine(repo, tmp_path):
+    # the first nightly run failed on every runner: a snapshot recorded where setuptools was installed never held it, so a
+    # runner without setuptools read `import setuptools` as a made-up package. The harness now hides installed packages
+    # (`python -S`), so the answer cannot depend on the machine. pytest is installed here (the suite needs it).
+    repo.write("a.py", "import pytest\n")
+    repo.add()
+    empty = tmp_path / "empty.json"
+    empty.write_text('{"pypi": {}, "npm": {}, "go": {}}', encoding="utf-8")
+    env = ev.run_env("person", tmp_path)
+    env["AIGATE_REGISTRY_FIXTURE"] = str(empty)
+    res = ev.gate(ROOT / "aigate_lite.py", repo.path, env, ["check", "--offline", "--no-cache", "--format", "json"])
+    assert res["crash"] is None
+    assert any(f["rule"] == "deps.hallucinated" and "pytest" in f["message"] for f in res["findings"]), res["findings"]
+
+
+def test_the_python_snapshots_hold_the_build_tools_an_installed_environment_would_hide():
+    for case in ("clean-py-click", "clean-py-requests"):
+        table = json.loads((EVAL / "snapshots" / f"{case}.json").read_text(encoding="utf-8"))
+        assert "setuptools" in table["pypi"], case

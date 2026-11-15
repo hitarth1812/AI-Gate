@@ -1,12 +1,12 @@
 {
  "_meta": {
   "case": "clean-py-requests",
-  "date": "2026-11-14",
-  "lookups": 17,
+  "date": "2026-11-15",
+  "lookups": 19,
   "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
-  "now": "2026-11-14T09:45:22+00:00",
+  "now": "2026-11-15T11:47:18+00:00",
   "sha": "0e322af87745eff34caffe4df68456ebc20d9068",
-  "tool_version": "0.5.2"
+  "tool_version": "0.6.0"
  },
  "go": {},
  "npm": {},
@@ -295,6 +295,7 @@
    "yanked": []
   },
   "pyOpenSSL": {},
+  "pygments": {},
   "pytest": {
    "created": "2010-11-25T21:00:27.474482Z",
    "deprecated": null,
@@ -593,6 +594,7 @@
    },
    "yanked": []
   },
+  "setuptools": {},
   "simplejson": {},
   "trustme": {
    "created": "2017-07-18T06:05:44.317506Z",

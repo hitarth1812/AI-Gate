@@ -255,9 +255,12 @@ def run_env(who: str, tmp: Path) -> dict:
 
 
 def gate(script: Path, cwd: Path, env: dict, args: list, timeout=300):
+    """Run the CLI under `python -S`: the packages installed on the machine that runs the evaluation are not visible to
+    the tool, so a snapshot recorded on one machine gives the same answer on every runner (a runner without setuptools or
+    pytest must not read `import setuptools` as a made-up package)."""
     t0 = time.perf_counter()
     try:
-        proc = subprocess.run([sys.executable, str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
+        proc = subprocess.run([sys.executable, "-S", str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
         return {"crash": "timeout", "ms": (time.perf_counter() - t0) * 1000, "findings": [], "verdict": None}
     ms = (time.perf_counter() - t0) * 1000

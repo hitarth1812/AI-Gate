@@ -1,12 +1,12 @@
 {
  "_meta": {
   "case": "clean-py-click",
-  "date": "2026-11-14",
-  "lookups": 118,
+  "date": "2026-11-15",
+  "lookups": 119,
   "note": "recorded from the tool's own lookup cache; replayed by eval/run.py (no network)",
-  "now": "2026-11-14T09:45:22+00:00",
+  "now": "2026-11-15T11:46:37+00:00",
   "sha": "874ca2bc1c30d93a4ac6e36a15ed685eafe89097",
-  "tool_version": "0.5.2"
+  "tool_version": "0.6.0"
  },
  "go": {},
  "npm": {},
@@ -532,6 +532,7 @@
     "7.2.8": "2026-10-31T21:37:50.278147Z",
     "7.3.0": "2026-11-05T20:38:44.928714Z",
     "7.3.1": "2026-11-12T21:25:10.989820Z",
+    "7.3.2": "2026-11-14T21:19:05.777196Z",
     "8.0.0": "2026-11-07T07:30:30.831477Z"
    },
    "vulns": {
@@ -3402,6 +3403,7 @@
     "2.32.1"
    ]
   },
+  "setuptools": {},
   "snowballstemmer": {
    "created": "2013-02-15T07:44:45.104535Z",
    "deprecated": null,
