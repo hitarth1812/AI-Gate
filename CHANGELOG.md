@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased: command-level fixes (found by a reviewer running the commands, not by the test suite)
+## 0.6.1 — 2026-11-16: command-level fixes (found by a reviewer running the commands, not by the test suite)
 
 ### Added
 - `aigate-lite fix --all` fixes the tracked files (what `audit` reads), with the same three rules and a diff first; the edits are
