@@ -26,6 +26,10 @@ python3 scripts/gen_accuracy.py --check           # the README accuracy section 
 AIGATE_PROVENANCE=human python3 aigate_lite.py check --all --offline -q   # the gate on its own repository
 ```
 
+- **Run the suite on Linux (WSL2) as well as on Windows before the maintainer pushes; CI runs Ubuntu, macOS and Windows.** A test
+  that passes on one system only is a bug in the test. Write test files with `repo.write(...)` or
+  `write_text(..., encoding="utf-8", newline="\n")` (Windows would write CRLF), and make a finding's line part of the *staged*
+  change. See CONTRIBUTING.md.
 - Delete `aigate_lite.egg-info/` (left by a build) before running pytest: the suite refuses to start next to it.
 - The tests clear the agent variables (`CLAUDECODE`, `AI_AGENT`, ...) for the commands they run. A tool you start yourself
   from an agent shell sees them and behaves as for an agent; that is expected.
