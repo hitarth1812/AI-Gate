@@ -67,7 +67,8 @@ aigate-lite scope show
 aigate-lite scope clear                                # when the task is done
 ```
 
-The scope is stored inside `.git/`, so it is per-clone and never committed.
+The scope is stored inside `.git/`, so it is per-clone and never committed. An AI agent cannot change it (see
+[AI_AGENTS.md](AI_AGENTS.md)).
 
 ## Existing project? Accept today's findings with `baseline`
 
@@ -79,6 +80,29 @@ git add .aigate/baseline.json && git commit -m "baseline"
 
 Fingerprints do not depend on line numbers, so unrelated edits do not resurrect old findings. Secrets are never
 baselined unless you pass `--include-secrets` (rotate them instead), and a baseline never hides *new* copies of an old finding.
+The file is applied only once it is committed: until then `audit` and `check` say "baseline.json exists but is not committed, so it
+is not applied yet". A push or a range is judged change by change, so a baseline accepts only as many findings as the change
+removed (a new branch whose whole history is "new" is judged against that rule too).
+
+## Fixing the mechanical findings: `fix`
+
+```bash
+aigate-lite fix                  # staged changes: a diff of what it would change (debugger lines, focused tests, env files)
+aigate-lite fix --yes            # apply it and stage the edits
+aigate-lite fix --all            # the same for the tracked files (what `audit` reads); the edits are staged, not committed
+aigate-lite fix --all --allow-pass --yes   # a debugger line that is the only statement in its block becomes `pass`
+```
+
+`fix` never runs from a hook. A line it cannot change safely is listed with its file, line and the reason; the rest of that file
+is still fixed. When it changes nothing it says why: nothing staged, findings in committed files (use `--all`), or findings that
+need a manual change (with their rules). `check` and `audit` name `fix` on their `next:` line only when it can change something.
+
+## Where the gate looks
+
+The gate uses the git repository that contains the current folder. When that is a parent of the folder you are in it says so
+("using the git repository at ..."), and `setup` and `install` stop and ask for `--yes` if the folder has no tracked files at all
+(usually a new project that needs its own `git init`). A manual `check` or `audit` also says how many files in the current
+folder were not tracked, because they were not scanned.
 
 ## Presets
 
