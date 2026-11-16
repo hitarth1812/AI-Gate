@@ -10,6 +10,9 @@ from conftest import SCRIPT, aigate, find
 
 EVAL = "ev" + "al(y)"
 BAD_TOML = "preset = [\n"
+# GitHub sets GITHUB_BASE_REF on every pull_request run (GitLab sets the other one); the tool honours them, so a test that is
+# about their ABSENCE has to say so (an empty value counts as unset)
+NO_BASE = {"GITHUB_BASE_REF": "", "CI_MERGE_REQUEST_TARGET_BRANCH_NAME": ""}
 
 
 def staged(repo, files=None):
@@ -205,7 +208,7 @@ def feature_branch_with_change(repo):
 
 def test_review_pr_without_a_base_variable_says_which_base_it_used(repo):
     feature_branch_with_change(repo)
-    proc = repo.run("review", "--pr", "--offline")
+    proc = repo.run("review", "--pr", "--offline", env=NO_BASE)
     assert proc.returncode == 1
     assert "main..HEAD" in proc.stderr and "GITHUB_BASE_REF" in proc.stderr and "--range" in proc.stderr
 
@@ -217,7 +220,7 @@ def test_review_pr_with_the_variable_says_nothing_extra(repo):
 
 
 def test_review_pr_on_the_base_branch_itself_exits_2_and_asks_for_a_range(repo):
-    proc = repo.run("review", "--pr", "--offline")               # HEAD is main: the guessed range is empty, a silent PASS
+    proc = repo.run("review", "--pr", "--offline", env=NO_BASE)   # HEAD is main: the guessed range is empty, a silent PASS
     assert proc.returncode == 2 and "--range" in proc.stderr and "GITHUB_BASE_REF" in proc.stderr
     assert proc.stdout == ""
 
