@@ -68,7 +68,7 @@ def test_tool_version_or_source_change_invalidates(repo, tmp_path):
     res, prof = profiled(repo, script=copy)
     assert prof.get("cache_hits", 0) == 0 and find(res, "secrets.hardcoded")
     text = copy.read_text(encoding="utf-8").replace(f'__version__ = "{aigate.__version__}"', '__version__ = "9.9.9"')
-    copy.write_text(text, encoding="utf-8")
+    copy.write_text(text, encoding="utf-8", newline="\n")
     assert profiled(repo, script=copy)[1].get("cache_hits", 0) == 0
 
 

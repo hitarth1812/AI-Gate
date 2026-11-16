@@ -33,7 +33,7 @@ def test_setup_installs_hooks_the_script_and_a_config(repo):
 def test_setup_run_twice_keeps_the_config(repo):
     assert repo.run("setup", "--preset", "strict").returncode == 0
     config = repo.path / ".aigate" / "lite.toml"
-    config.write_text(config.read_text(encoding="utf-8") + "# my own edit\n", encoding="utf-8")
+    config.write_text(config.read_text(encoding="utf-8") + "# my own edit\n", encoding="utf-8", newline="\n")
     before = config.read_bytes()
     second = repo.run("setup")
     assert second.returncode == 0, second.stdout + second.stderr
@@ -43,7 +43,7 @@ def test_setup_run_twice_keeps_the_config(repo):
 def test_setup_with_a_foreign_hook_stops_unless_forced(repo):
     hook = repo.path / ".git" / "hooks" / "pre-commit"
     hook.parent.mkdir(parents=True, exist_ok=True)
-    hook.write_text("#!/bin/sh\nexit 0\n")
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8", newline="\n")
     assert repo.run("setup").returncode == 1
     assert repo.run("setup", "--force").returncode == 0
     assert (repo.path / ".git" / "hooks" / "pre-commit.local").exists()

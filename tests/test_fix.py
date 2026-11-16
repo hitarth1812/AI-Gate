@@ -90,7 +90,7 @@ def test_crlf_encoding_and_missing_final_newline_are_preserved(repo):
 
 def test_partially_staged_file_is_refused(repo):
     staged(repo, {"a.py": f"x = 1\n{BP}\n"})
-    (repo.path / "a.py").write_text(f"x = 1\n{BP}\nmore = 2\n")
+    (repo.path / "a.py").write_text(f"x = 1\n{BP}\nmore = 2\n", encoding="utf-8", newline="\n")
     before = state(repo)
     proc = fix(repo, "--yes")
     assert "has unstaged changes" in proc.stdout and "stage or stash" in proc.stdout and state(repo) == before
@@ -176,7 +176,7 @@ def test_unstaged_gitignore_is_not_swept_into_the_commit(repo):
 @posix
 def test_symlinked_gitignore_is_refused(repo, tmp_path):
     victim = tmp_path / "victim.txt"
-    victim.write_text("keep\n")
+    victim.write_text("keep\n", encoding="utf-8", newline="\n")
     (repo.path / ".gitignore").symlink_to(victim)
     staged(repo, {".env": "DB_PASSWORD=" + "Zx9!kQ2#vB7$mN4p\n"})
     fix(repo, "--yes")

@@ -34,7 +34,7 @@ def test_one_unreadable_distribution_does_not_hide_the_others(monkeypatch, tmp_p
 def test_project_site_packages_survive_a_broken_distribution(monkeypatch, tmp_path):
     site = tmp_path / "site"
     site.mkdir()
-    (site / "localmod.py").write_text("x = 1\n")
+    (site / "localmod.py").write_text("x = 1\n", encoding="utf-8", newline="\n")
     names, mapping = environment(monkeypatch, tmp_path,
                                  [Dist("bad", error=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad")),
                                   Dist("good-dist", "goodmod\n")], site)

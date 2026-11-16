@@ -173,7 +173,7 @@ def test_unwritable_cache_one_note_lookups_still_run(fresh_tls, monkeypatch, tmp
         cache.mkdir()
         os.chmod(cache, 0o500)
     else:
-        (tmp_path / "file").write_text("x")
+        (tmp_path / "file").write_text("x", encoding="utf-8", newline="\n")
         cache = tmp_path / "file" / "cache"                  # a parent that is a file: no folder can be made
     monkeypatch.setenv("AIGATE_CACHE_DIR", str(cache))
     try:
@@ -199,7 +199,7 @@ def test_cache_parent_missing_is_created(fresh_tls, monkeypatch, tmp_path, fake_
 
 def test_unwritable_cache_end_to_end_no_crash(repo, tmp_path):
     deps_change(repo)
-    (tmp_path / "file").write_text("x")
+    (tmp_path / "file").write_text("x", encoding="utf-8", newline="\n")
     res = repo.check("--cache", env={"AIGATE_CACHE_DIR": str(tmp_path / "file" / "cache")})
     assert res["code"] in (0, 1) and not find(res, "deps.unverified")
 

@@ -1,5 +1,52 @@
 # Changelog
 
+## Unreleased: command-level fixes (found by a reviewer running the commands, not by the test suite)
+
+### Added
+- `aigate-lite fix --all` fixes the tracked files (what `audit` reads), with the same three rules and a diff first; the edits are
+  staged, not committed. `fix --allow-pass` replaces a debugger line that is the only statement in its block with `pass`
+  (default: left for you).
+- `check` and `audit` print a second `next:` line that names `aigate-lite fix` (or `fix --all`) and how many findings it can
+  change, only when it can change at least one.
+- A text `check` or `audit` that left files out says so: "N files here are not tracked by git and were NOT scanned; run
+  `git add -A`" (not in a hook run, in JSON or in the agent format).
+- One line on stderr when the repository is not the current folder: "using the git repository at <root> (you are in <cwd>)".
+- `setup` and `install` stop in a folder that is inside a repository but tracks none of its files, and ask for `--yes`;
+  `doctor` warns about the same case.
+- When a hook of another tool is already there, `install` prints its first line and what it looks like (the pre-commit framework,
+  husky, lefthook, git-lfs, another aigate-lite, unknown), then the `--force` explanation.
+- An unknown command suggests the closest one (`did you mean aigate-lite check?`); `update` and `upgrade` say
+  `pip install -U aigate-lite`.
+- `review --pr` without `GITHUB_BASE_REF` says which range it reviewed, and exits 2 asking for `--range` when its guess is empty.
+- Python: the line checks read the file with the standard library's tokenizer (`python_lex`), so a line can be told apart as
+  code, string or comment.
+
+### Changed (behaviour you will notice)
+- `fix` says why it changed nothing ("nothing staged", "N findings are in committed files (fix works on staged changes; use
+  --all)", "N FIX findings need a manual change: <rules>"), and one unsafe line no longer skips its whole file: the safe edits
+  are applied and the skipped lines are listed with file:line and the reason.
+- An AI agent cannot run `scope set`, `scope add`, `scope clear` or `uninstall` (exit 1, like `baseline` and `trust`);
+  `scope show` still works. The hint for `scope.out_of_scope` that an agent sees says to ask the human to widen the scope.
+- `baseline` ends with the two git commands, on one `next:` line. An uncommitted `.aigate/baseline.json` is reported as not
+  applied yet, and `audit` no longer suggests writing a baseline in that state.
+- `-q` prints the normal report layout (only the findings that stop the commit, with a `next:` line) and no longer recommends
+  `git commit --no-verify`.
+- `--config FILE` that does not exist is an error (exit 2) naming the path; a config error or version-pin finding names the file
+  that was read, not always `.aigate/lite.toml`.
+- `init` and `setup` detect the project from the working tree (respecting `.gitignore`), so a new repository is detected before the
+  first `git add`; `setup` prints one next-steps block.
+- Python, a person and an AI agent alike: `code.todo`, `security.weak_crypto`, `suppress.lint`, `suppress.type` and
+  `secrets.generic` no longer fire on text inside a string literal, and `security.weak_crypto` no longer fires on a comment. A
+  provider key or a connection-string password inside a string still fires. On this repository's own audit a person's findings
+  went from 120 to 52.
+- `unittest.skipUnless` is a conditional skip for a person, like `skipIf` and `pytest.mark.skipif` (a warning with the hint); an AI
+  agent's result is unchanged.
+
+### Fixed
+- `aigate-lite audit | head` exits with the verdict's exit code and prints nothing on stderr (it exited 2 or printed
+  `BrokenPipeError`).
+- `unvendor` exits non-zero unless the pre-commit hook really is the installed kind afterwards.
+
 ## 0.6.0 — 2026-11-15: the evaluation harness, two rounds of fixes measured against it, and a written contract
 
 ### Changed (behaviour you will notice)

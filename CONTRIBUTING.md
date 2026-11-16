@@ -15,6 +15,13 @@ python eval/run.py --check --families real,seeded,adversarial     # the accuracy
 
 On Windows use `py` in place of `python`.
 
+**Run the suite on Linux (WSL2) as well as on Windows before you push.** CI runs Ubuntu, macOS and Windows on Python 3.11-3.14,
+and a test that only passes on one of them is a bug in the test. The usual cause is line endings: `Path.write_text` writes
+CRLF on Windows and LF elsewhere, so a staged change can look different from a committed one. In tests write files with
+`repo.write(...)` (LF and UTF-8 everywhere) or `write_text(..., encoding="utf-8", newline="\n")`, and make a test that checks a
+finding on an *added* line add that line in the staged change, not in the commit before it. A test that is about CRLF writes
+the bytes itself. Pull requests also set `GITHUB_BASE_REF`; a test about its absence must unset it.
+
 Performance gates (on the same machine as the baseline):
 
 ```bash

@@ -8,6 +8,9 @@ author name, or AI co-author trailers in pushed commits. You can add your own va
 - `forbidden_for_agents` paths are blocked: `.aigate/`, CI workflows and hook configs.
 - The config is read from the last commit, so an agent cannot loosen the gate in the same commit.
 - `AIGATE_ALLOW` and `AIGATE_SKIP` are ignored.
+- These commands refuse to run (exit 1, "refuses to run for an AI agent"), because each one would let an agent loosen or remove
+  its own gate: `baseline`, `trust`, `scope set`, `scope add`, `scope clear` and `uninstall`. `scope show` still works. When a
+  finding is outside the scope, the agent is told to stop and ask the human to widen it.
 
 Detection is best effort. An agent that runs with none of these signals looks like a human.
 

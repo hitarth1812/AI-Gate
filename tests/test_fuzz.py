@@ -80,7 +80,7 @@ def test_a_garbage_config_file_is_a_problem_not_a_crash(text, tmp_path_factory):
     repo_dir = tmp_path_factory.mktemp("cfg")
     subprocess.run(["git", "init", "-q", str(repo_dir)], check=True)
     (repo_dir / ".aigate").mkdir()
-    (repo_dir / ".aigate" / "lite.toml").write_text(text, encoding="utf-8", errors="replace")
+    (repo_dir / ".aigate" / "lite.toml").write_text(text, encoding="utf-8", errors="replace", newline="\n")
     repo = aigate.Repo(str(repo_dir))
     cfg = aigate.load_config(repo, "worktree")
     assert cfg is not None and hasattr(cfg, "problems")

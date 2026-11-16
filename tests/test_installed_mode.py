@@ -454,7 +454,7 @@ def test_doctor_fails_an_installed_hook_that_cannot_find_the_tool(repo):
     assert repo.run("install", "--mode", "installed").returncode == 0
     hook = repo.path / ".git" / "hooks" / "pre-commit"
     hook.write_text(hook.read_text(encoding="utf-8").replace("PINNED='" + sys.executable.replace("\\", "/") + "'",
-                                                             "PINNED='/nonexistent/python'"), encoding="utf-8")
+                                                             "PINNED='/nonexistent/python'"), encoding="utf-8", newline="\n")
     env = {"PATH": os.path.dirname(shutil.which("git"))}
     checks = {c["id"]: c for c in json.loads(repo.run("doctor", "--offline", "--format", "json", env=env).stdout)}
     assert checks["python.hook"]["status"] == "fail" and "pipx install aigate-lite" in checks["python.hook"]["fix"]
@@ -578,7 +578,7 @@ def test_unvendor_warns_when_the_installed_gate_is_older_than_the_copy(repo):
     assert repo.run("install", "--vendor").returncode == 0
     copy = repo.path / ".aigate" / "aigate_lite.py"
     copy.write_text(copy.read_text(encoding="utf-8").replace(f'__version__ = "{aigate.__version__}"', '__version__ = "9.9.9"'),
-                    encoding="utf-8")
+                    encoding="utf-8", newline="\n")
     proc = repo.run("unvendor", "--force")
     assert "the vendored copy is 9.9.9" in proc.stderr
 

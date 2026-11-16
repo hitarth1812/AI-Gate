@@ -69,7 +69,7 @@ def test_no_commands_means_no_finding_and_trust_says_so(repo):
 
 def test_command_line_config_counts_as_trusted(repo, tmp_path):
     cfg = tmp_path / "ci lite.toml"
-    cfg.write_text(config(code=5))
+    cfg.write_text(config(code=5), encoding="utf-8", newline="\n")
     staged_change(repo)
     res = repo.check("--config", str(cfg))
     assert "exited with code 5" in failed(res)[0]["message"] and not untrusted(res)

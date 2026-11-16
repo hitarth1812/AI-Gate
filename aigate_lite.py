@@ -526,7 +526,12 @@ def run_git(root, *args, input_bytes=None, check=True) -> str:
     return proc.stdout.decode("utf-8", "replace")
 
 
+ANNOUNCE_REPO = False          # set by main() for a command a person runs: say once when the repository is not the current folder
+
+
 class Repo:
+    announced = False
+
     def __init__(self, root: str, git_dir=None):
         self.root = root
         self.git_dir = git_dir
@@ -546,7 +551,13 @@ class Repo:
         if proc.returncode != 0 or len(lines) != 2:
             raise GitError("not inside a git repository",
                            "run it inside your project's folder (or create a repository there: git init)")
-        return cls(lines[0].strip(), lines[1].strip())
+        repo = cls(lines[0].strip(), lines[1].strip())
+        if cwd is None and ANNOUNCE_REPO and not cls.announced:
+            cls.announced = True
+            here = os.getcwd()
+            if os.path.normcase(os.path.realpath(here)) != os.path.normcase(os.path.realpath(repo.root)):
+                print(f"using the git repository at {repo.root} (you are in {here})", file=sys.stderr)
+        return repo
 
     def git(self, *args, **kw) -> str:
         return run_git(self.root, *args, **kw)
@@ -816,6 +827,7 @@ class Config:
     data: dict
     problems: list
     origin: str
+    path: str = ".aigate/lite.toml"          # the file the findings about the config point at (--config FILE: that file)
 
     def __getitem__(self, key):
         return self.data[key]
@@ -1084,14 +1096,27 @@ def load_config(repo: Repo, source: str, explicit=None) -> Config:
             hint = ""
             if any(w in str(e).lower() for w in ("escape", "hex value", "unicode")):
                 hint = "; on Windows put paths in single quotes ('C:\\path') or use forward slashes"
-            problems.append(f"{CONFIG_PATH} is not valid TOML ({e}){hint}; using defaults")
+            problems.append(f"{origin} is not valid TOML ({e}){hint}; using defaults")
     data = merge_config(apply_preset(raw, problems), problems)
     validate_config(data, problems)
-    return Config(data, problems, origin)
+    return Config(data, problems, origin, explicit or CONFIG_PATH)
 
 
 BASELINE_PATH = ".aigate/baseline.json"
+BASELINE_PENDING = (f"{os.path.basename(BASELINE_PATH)} exists but is not committed, so it is not applied yet: "
+                    f"git add {BASELINE_PATH} && git commit")
+ADOPT_BASELINE = "adopt a baseline so only new findings count: aigate-lite baseline"
+COMMIT_BASELINE = f"commit the baseline you wrote so only new findings count: git add {BASELINE_PATH} && git commit"
 BASELINE_NEVER = ("gate.", "commands.", "scope.")   # the gate's own state, never accepted by a baseline
+
+
+def baseline_applied(repo, source) -> bool:
+    """Whether the baseline the gate reads exists at `source` (worktree, "" = the index, a commit, or None = none)."""
+    if source is None:
+        return False
+    if source == "worktree":
+        return os.path.exists(os.path.join(repo.root, BASELINE_PATH))
+    return repo.read(f"{source}:{BASELINE_PATH}") is not None
 
 
 def load_baseline(repo, source) -> tuple:
@@ -1315,6 +1340,14 @@ class Context:
                         self.lang_notes.append(note)
             self._lex[key] = lx
         return self._lex[key]
+
+    def py_lexed(self, fc, which="new"):
+        """The Python lexed view (built on first use, shared by every check); see python_lex."""
+        key = (fc.path, which, "py")
+        got = self._lex.get(key)
+        if got is None:
+            got = self._lex[key] = PyLazy(self, fc, which)
+        return got
 
     def ignored(self, path) -> bool:
         flags = self._path_flags.get(path)
@@ -2260,6 +2293,69 @@ def lex_text(text, cfg):
     return Lexed(text, sc.kinds)
 
 
+def python_lex(text):
+    """The Lexed view (code / string / comment per character) of Python source, built from the standard library's
+    tokenizer; None when it cannot be tokenized, and the callers then keep their line-based checks. Python has no
+    LanguageSpec on purpose: a spec would switch on the brace-based structure checks written for Go and JS."""
+    import io
+    import tokenize
+    starts, off = [], 0
+    for ln in text.split("\n"):
+        starts.append(off)
+        off += len(ln) + 1
+    kinds = bytearray(len(text))                              # CODE is 0
+    depth, begin = 0, None
+
+    def mark(a, b, kind):
+        pa, pb = starts[a[0] - 1] + a[1], starts[b[0] - 1] + b[1]
+        kinds[pa:pb] = bytes([kind]) * (pb - pa)
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(text).readline):
+            name = tokenize.tok_name.get(tok.type, "")
+            if name == "STRING":
+                if depth == 0:
+                    mark(tok.start, tok.end, STR)
+            elif name == "COMMENT":
+                mark(tok.start, tok.end, COM)
+            elif name in ("FSTRING_START", "TSTRING_START"):   # 3.12+: an f-string is several tokens; all of it is a string
+                if depth == 0:
+                    begin = tok.start
+                depth += 1
+            elif name in ("FSTRING_END", "TSTRING_END"):
+                depth -= 1
+                if depth == 0 and begin is not None:
+                    mark(begin, tok.end, STR)
+            elif name == "ERRORTOKEN" and tok.string.strip():
+                return None
+    except (tokenize.TokenError, SyntaxError, ValueError, IndexError, RecursionError):
+        return None
+    return Lexed(text, bytes(kinds))
+
+
+class PyLazy:
+    """The Python lexed view of a file, built on first use (most files have no line that needs it). When the source cannot
+    be tokenized every `line()` is empty, so the callers' own check (`lx.line(n)` equals the added text) fails and they fall
+    back to their line-based search."""
+
+    def __init__(self, ctx, fc, which="new"):
+        self._args, self._lx, self._built = (ctx, fc, which), None, False
+
+    def _view(self):
+        if not self._built:
+            self._built = True
+            ctx, fc, which = self._args
+            text = ctx.new_text(fc) if which == "new" else ctx.old_text(fc)
+            self._lx = python_lex(text) if text is not None and len(text) <= MAX_BYTES else None
+        return self._lx
+
+    def line(self, n):
+        lx = self._view()
+        return lx.line(n) if lx is not None else ""
+
+    def __getattr__(self, name):                    # region, search, masked, kind_at: only reached once line() matched
+        return getattr(self._view(), name)
+
+
 # --------------------------------------------------------------------------- languages: specs
 
 # A LanguageSpec bundles everything the checks need to know about one language. Specs are built on first use
@@ -2909,6 +3005,18 @@ def _one_block_per_key_file(findings) -> list:
     return [f for f in findings if not (f.rule == "secrets.env_file" and f.path in keyed)]
 
 
+def _inside_py_string(ctx, fc, line_no, text, m) -> bool:
+    """A `name = "value"` match in a Python line that lies INSIDE one string literal (a code sample, a docstring, a template
+    being written to a file) is text, not an assignment. A dict key such as {"password": "..."} (the name is a string of its
+    own, closed before the operator) and every real assignment still count."""
+    if fc.ext not in PY_EXTS:
+        return False
+    lx = ctx.py_lexed(fc)
+    if lx.line(line_no).rstrip("\r") != text.rstrip("\r"):       # not tokenized: the old behaviour
+        return False
+    return all(lx.kind_at(line_no, i) == STR for i in range(m.start("name"), m.start("val")))
+
+
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
     """Secrets on one added line."""
     import hashlib
@@ -2932,7 +3040,7 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         return "warn" if soft is None and person_test_context(fc.path) else None
     docs = bool(DOC_PATH.search(fc.path)) and fc.ext != ".txt" and not ctx.sensitive(fc.path)
     for m in GENERIC_ASSIGN.finditer(text):
-        if _looks_like_secret(m.group("name"), m.group("val")):
+        if _looks_like_secret(m.group("name"), m.group("val")) and not _inside_py_string(ctx, fc, line_no, text, m):
             val = m.group("val")
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
                 _soft_value(val, docs, soft is not None, text[m.end():],
@@ -2942,7 +3050,8 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
     if soft is None and " " in text and PHRASE_GATE.search(text) and not DOC_PATH.search(fc.path) \
             and not PHRASE_SKIP_PATH.search(fc.path):
         for m in PHRASE_ASSIGN.finditer(text):
-            if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")):
+            if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")) \
+                    and not _inside_py_string(ctx, fc, line_no, text, m):
                 val = m.group("val")
                 add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", None, fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
@@ -4946,6 +5055,9 @@ def check_deps(ctx) -> list:
 # --------------------------------------------------------------------------- checks: tests
 
 SKIP_MARKS = {"skip", "skipif", "xfail", "skipunless", "expectedfailure"}
+# pytest.mark.skipif and unittest.skipIf / skipUnless skip on a condition (a platform, a privilege, a binary on PATH): a warning
+# for a person with the conditional-skip hint; an AI agent keeps the fix. `skip`, `xfail` and `expectedFailure` do not.
+CONDITIONAL_SKIP_MARKS = {"skipif", "skipunless"}
 # A skip that depends on the environment (a service that is not reachable, short mode, another OS, a missing binary) is
 # a warning for people, with a hint to make CI fail when it fires. A skip with no condition, or one whose own message
 # says TODO / flaky / broken, stays a fix. An AI agent's change keeps the old action for every skip.
@@ -5271,7 +5383,7 @@ def check_tests(ctx) -> list:
                 if n.marks:
                     f = make("tests.skip_added", fc.path, n.mark_line if n.mark_line in fc.added else n.line,
                              f"new test {q} is marked {', '.join(sorted(n.marks))}", key=q)
-                    if n.marks <= {"skipif"}:
+                    if n.marks <= CONDITIONAL_SKIP_MARKS:
                         f.human, f.hint = "warn", SKIP_HINT
                     out.append(f)
                 elif n.asserts == 0:
@@ -5285,7 +5397,7 @@ def check_tests(ctx) -> list:
             if n.marks - o.marks:
                 f = make("tests.skip_added", fc.path, n.mark_line if n.mark_line in fc.added else n.line,
                          f"{q}: now {', '.join(sorted(n.marks - o.marks))}", key=q)
-                if (n.marks - o.marks) <= {"skipif"}:
+                if (n.marks - o.marks) <= CONDITIONAL_SKIP_MARKS:
                     f.human, f.hint = "warn", SKIP_HINT
                 out.append(f)
             if src_changed and (o.consts - n.consts) and (n.consts - o.consts):
@@ -5471,7 +5583,10 @@ BARE_NOLINT_REASONS = {"false positive", "ok", "ignore", "intentional"}
 def _suppressions_file(ctx, fc) -> list:
     out = []
     before = Counter()
-    lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
+    if fc.ext in PY_EXTS:                            # a marker inside a string literal is text, not a suppression
+        lx, old_lx = ctx.py_lexed(fc), (ctx.py_lexed(fc, "old") if fc.old_spec else None)
+    else:
+        lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
     for old_line, text in fc.removed:
         for rule, rx in SUPPRESSIONS:
             if _suppression_hit(old_lx, rx, old_line, text):
@@ -5523,6 +5638,28 @@ WEAK_CRYPTO = re.compile(
     r"(?i)(?=.*\b(?:md5|sha1)\b)(?=.*" + _SECRET_AT % r"(?:password|passwd|pwd|secret|token)" + r")|"
     r"(?=.*(?:\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(|Math\.random\(\)))"
     r"(?=.*" + _SECRET_AT % SECRET_WORDS + r")")
+# The two halves of WEAK_CRYPTO for Python source: the weak operation (an md5/sha1 name, or a weak random call) must be CODE;
+# the secret word may be anywhere but in a comment (`d["token"] = random.randint(...)` names it in a string). The algorithm
+# of a real `hashlib.new("md5", ...)` call is only ever spelled as a string, so it counts. tests/test_python_string_fp.py
+# keeps this equal to WEAK_CRYPTO on lines without strings or comments.
+_WEAK_HASH = re.compile(r"(?i)\b(?:md5|sha1)\b")
+_WEAK_RANDOM_CALL = re.compile(r"(?i)\brandom\.(?:random|randint|choice|choices|randrange|getrandbits)\s*\(")
+_SECRET_NARROW = re.compile(r"(?i)" + _SECRET_AT % r"(?:password|passwd|pwd|secret|token)")
+_SECRET_WIDE = re.compile(r"(?i)" + _SECRET_AT % SECRET_WORDS)
+_HASHLIB_NEW_STR = re.compile(r"""(?i)\bhashlib\.new\(\s*(['"])(?P<alg>md5|sha1)\1""")
+
+
+def _py_weak(lx, line, text) -> bool:
+    code = lx.masked(line, (STR, COM))
+    for m in _HASHLIB_NEW_STR.finditer(text):
+        if lx.kind_at(line, m.start()) == CODE:
+            a, b = m.span("alg")
+            code = code[:a] + text[a:b] + code[b:]
+    nocomment = lx.masked(line, (COM,))
+    return bool((_WEAK_HASH.search(code) and _SECRET_NARROW.search(nocomment))
+                or ((_WEAK_RANDOM_CALL.search(code) or "Math.random()" in code) and _SECRET_WIDE.search(nocomment)))
+
+
 # HMAC with SHA-1 (or MD5) is not a weak hash for a secret: its security does not rest on collision resistance. Not
 # flagged for people; an agent's change keeps the finding. Plain SHA-1/MD5 hashing of a secret is still flagged.
 HMAC_SHA1 = re.compile(r"(?i)createHmac\(\s*['\"](?:sha1|md5)['\"]|\bhmac\.new\([^)]*\bhashlib\.(?:sha1|md5)\b|"
@@ -5592,6 +5729,11 @@ def _code_lines_file(ctx, fc) -> list:
             js_placeholder = is_js and JS_PLACEHOLDER.search(text)
             todo = TODO_RE.search(text)
             weak = WEAK_CRYPTO.search(text)
+            if is_py and (todo or weak):                 # Python: text of a string or of a comment is not code
+                pyx = ctx.py_lexed(fc)
+                if pyx.line(line).rstrip("\r") == text.rstrip("\r"):
+                    todo = pyx.search(TODO_RE, line, COM, text) if todo else None
+                    weak = _py_weak(pyx, line, text) if weak else None
         if placeholder:
             out.append(make("code.placeholder", fc.path, line, text.strip()[:90], key=text.strip()))
         elif js_placeholder:
@@ -6292,6 +6434,8 @@ class Result:
     config: str
     notes: list
     extra: dict = dataclasses.field(default_factory=dict)      # review: what the reviewer collected (see check_review)
+    fixable: int = 0                                           # findings `aigate-lite fix` can change (text report only)
+    baseline_pending: bool = False                             # .aigate/baseline.json is on disk but not where the gate reads it
 
 
 def _baseline_accepts(ctx, f, baseline, granted) -> bool:
@@ -6350,10 +6494,10 @@ def version_findings(cfg) -> list:
         return []
     status, why = requires_status(text, __version__)
     if status == "old":
-        return [make("gate.version_too_old", CONFIG_PATH, None,
+        return [make("gate.version_too_old", cfg.path, None,
                      f"this repository requires aigate-lite {text} and this is {__version__} ({why})", key=text)]
     if status in ("new", "odd"):
-        return [make("gate.version_too_new", CONFIG_PATH, None,
+        return [make("gate.version_too_new", cfg.path, None,
                      f"this repository expects aigate-lite {text} and this is {__version__} ({why})", key=text)]
     return []
 
@@ -6506,6 +6650,8 @@ def shown_hint(res, f):
     forbidden path for it), so it is never shown the [[allow]] route: for a key it is told to stop and ask the human."""
     if res.provenance[0] == "agent" and f.rule == "secrets.hardcoded":
         return f"{f.meta.hint} If this value is not a secret, {AGENT_ASK}."       # the rotate advice stays; no allow route
+    if res.provenance[0] == "agent" and f.rule == "scope.out_of_scope":
+        return "Unstage it, or stop and ask the human to widen the scope."        # an agent cannot change its own scope
     return f.hint
 
 
@@ -6527,13 +6673,14 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
     act = "push" if stage == "push" else "commit"
     blocks = [f for f in active if f.action == "block"]
     fixes = [f for f in active if f.action == "fix"]
+    adopt = COMMIT_BASELINE if res.baseline_pending else ADOPT_BASELINE      # an uncommitted baseline: commit it, do not write one
     if res.verdict == "block" and blocks:
         n = len(blocks)
         rules = list(dict.fromkeys(f.rule for f in blocks))
         if all(r.startswith("secrets.") for r in rules):
             if stage == "scan":
                 return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above (secrets cannot be baselined), then " \
-                       f"adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+                       f"{adopt}{hidden}"
             if res.provenance[0] == "agent":
                 return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above; if it is not a secret, {AGENT_ASK}{hidden}"
             return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above{hidden}"
@@ -6541,7 +6688,7 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
         advice = list(dict.fromkeys(_block_advice(r) for r in rules))
         other = [r for r in rules if not r.startswith("secrets.")]
         pointer = other[0] if len(other) == 1 else "<rule>"
-        base = ", then adopt a baseline so only new findings count: aigate-lite baseline" \
+        base = f", then {adopt}" \
             if stage == "scan" and not any(r.startswith(BASELINE_NEVER) for r in rules) else ""
         if res.provenance[0] == "agent":              # an agent cannot allow a finding: never show it the route
             return f"next: fix the {n} BLOCK line{'' if n == 1 else 's'} above ({'; '.join(advice)}){base}; if it is a " \
@@ -6552,17 +6699,31 @@ def _next_line(res: Result, active, baselined, stage) -> str | None:
     if res.verdict in ("block", "fix"):
         n, rules = len(fixes), sorted({f.rule for f in fixes})
         if stage == "scan":
-            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or adopt a baseline so only new " \
-                   f"findings count: aigate-lite baseline{hidden}"
+            return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above, or {adopt}{hidden}"
         if len(rules) == 1 and res.provenance[0] != "agent" and not res.escalated:
             return f"next: fix it, or for this {act} only (humans): AIGATE_ALLOW={rules[0]} git {act} ...{hidden}"
         return f"next: fix the {n} FIX line{'' if n == 1 else 's'} above (a false positive? aigate-lite explain " \
                f"<rule>){hidden}"
     if res.verdict == "warn":
         if stage == "scan":
-            return f"next: nothing blocks; adopt a baseline so only new findings count: aigate-lite baseline{hidden}"
+            return f"next: nothing blocks; {adopt}{hidden}"
         return f"next: {act} allowed; the warnings are worth a look{hidden}"
     return f"next: nothing to do{hidden}" if baselined else None
+
+
+def _next_lines(res: Result, active, baselined, stage) -> list:
+    """The `next:` line, plus one that names `aigate-lite fix` and how many findings it can change (only when it can)."""
+    out = []
+    nxt = _next_line(res, active, baselined, stage)
+    if nxt:
+        out.append(nxt)
+    n = getattr(res, "fixable", 0)
+    if n and stage != "push":
+        total = sum(1 for f in active if f.action in ("block", "fix"))
+        cmd = "aigate-lite fix --all" if stage == "scan" else "aigate-lite fix"
+        out.append(f"next: {cmd} can change {n} of the {total} FIX/BLOCK finding{'s' if total != 1 else ''} above "
+                   f"(it shows a diff first; --yes applies)")
+    return out
 
 
 def top_dir(path: str) -> str:
@@ -6658,7 +6819,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
         """The credit line: only when a finding is printed, never with -q, always the last line."""
         return [f"{s('dim')}{credit_line(sym)}{s('reset')}"] if active and not quiet else []
     st = res.stats
-    if verbose or quiet:
+    if verbose:                                  # -v (with -q: the same view without the warnings)
         prov = res.provenance[0] + (f" via {res.provenance[1]}" if res.provenance[0] == "agent" else "")
         out.append(f"{s('dim')}aigate-lite {__version__} {sym['dot']} {res.label} {sym['dot']} {st['files']} "
                    f"file{'' if st['files'] == 1 else 's'} (+{st['added']} -{st['removed']}) {sym['dot']} {prov} "
@@ -6675,7 +6836,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             out.append(f"  {s(f.action)}{f.action.upper():<5}{s('reset')} {f.rule:<28} {f.path}"
                        f"{f':{f.line}' if f.line else ''}")
             out.append(f"        {f.message}")
-            hint = shown_hint(res, f) if f.hint else (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
+            hint = shown_hint(res, f) or (f.meta.hint if (verbose or f.action in ("fix", "block")) else None)
             for i, ln in enumerate((hint or "").splitlines()):
                 out.append(f"        {s('dim')}{sym['arrow'] + ' ' if i == 0 else '  '}{ln}{s('reset')}")
             if verbose:
@@ -6690,34 +6851,25 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
             summary += f" {sym['dot']} {len(baselined)} in baseline (hidden; -v shows them)" if not verbose \
                 else f" {sym['dot']} {len(baselined)} in baseline"
         out.append(summary)
-        if quiet:
-            if res.verdict in ("fix", "block") and stage != "scan":
-                out.append(f"{s('dim')}  Fix the findings, or for a false positive: `aigate-lite explain <rule>` shows "
-                           f"how to allow it. Bypass once (not recommended): git "
-                           f"{'push' if stage == 'push' else 'commit'} --no-verify{s('reset')}")
-        else:
-            nxt = _next_line(res, active, baselined, stage)
-            if nxt:
-                out.append(nxt)
+        out += _next_lines(res, active, baselined, stage)
         return "\n".join(out + foot()) + "\n"
 
+    shown = [f for f in active if f.action != "warn"] if quiet else active       # -q: only what stops the commit
     who = "human" if res.provenance[0] != "agent" else f"AI agent ({res.provenance[1].lstrip('$')})"
     head = (f"aigate-lite {__version__} {sym['dot']} {mode} {sym['dot']} {st['files']} file"
             f"{'' if st['files'] == 1 else 's'} +{st['added']} {sym['minus']}{st['removed']} {sym['dot']} {who}")
     out.append(f"{s('dim')}{_fit(head, width, sym)}{s('reset')}")
     out += [f"{s('dim')}{_fit('  note: ' + note, width, sym)}{s('reset')}" for note in res.notes]
     if view.get("summary") or view.get("group_by") == "rule":
-        out += _summary_lines(active, s, sym, width) if view.get("summary") else _rule_lines(active, s, sym, width, limit)
-        if limit is not None and not view.get("summary") and len(active) > limit:
-            out.append(f"  +{len(active) - limit} more {sym['dash']} raise --max-findings (now {limit}) or use --summary")
+        out += _summary_lines(shown, s, sym, width) if view.get("summary") else _rule_lines(shown, s, sym, width, limit)
+        if limit is not None and not view.get("summary") and len(shown) > limit:
+            out.append(f"  +{len(shown) - limit} more {sym['dash']} raise --max-findings (now {limit}) or use --summary")
         out.append(_summary(res, active, allowed, baselined, stage, sym, s))
-        nxt = _next_line(res, active, baselined, stage)
-        if nxt:
-            out.append(_fit(nxt, width, sym))
+        out += [_fit(ln, width, sym) for ln in _next_lines(res, active, baselined, stage)]
         return "\n".join(out + foot()) + "\n"
     rank = {"block": 0, "fix": 1, "warn": 2}
-    folded = unverified_fold(res, active)
-    listed = [f for f in active if f not in folded] if folded else active
+    folded = unverified_fold(res, shown)
+    listed = [f for f in shown if f not in folded] if folded else shown
     by_file: dict = defaultdict(list)
     for f in listed:
         by_file[f.path].append(f)
@@ -6757,9 +6909,7 @@ def render_text(res: Result, *, color=False, verbose=False, quiet=False, stage="
                         f"vulnerability checks did NOT run for them (see the note above; -v lists them)", None if color
                         else width, sym))
     out.append(_summary(res, active, allowed, baselined, stage, sym, s))
-    nxt = _next_line(res, active, baselined, stage)
-    if nxt:
-        out.append(_fit(nxt, width, sym))
+    out += [_fit(ln, width, sym) for ln in _next_lines(res, active, baselined, stage)]
     return "\n".join(out + foot()) + "\n"
 
 
@@ -6838,7 +6988,8 @@ def report_json(res: Result, view=None) -> None:
         "verdict": res.verdict, "escalated": res.escalated, "risk": res.risk,
         "exit_code": 1 if res.verdict in ("fix", "block") else 0, "stats": res.stats, "notes": res.notes,
         "findings": [{"rule": f.rule, "action": f.action, "severity": f.meta.severity, "confidence": f.meta.confidence,
-                      "path": f.path, "line": f.line, "message": f.message, "hint": f.hint or f.meta.hint,
+                      "path": f.path, "line": f.line, "message": f.message,
+                "hint": (shown_hint(res, f) if f.rule == "scope.out_of_scope" else f.hint) or f.meta.hint,
                       "fingerprint": f.fingerprint, "legacy_fingerprint": f.legacy_fingerprint,
                       "sensitive_path": f.sensitive, "allowed": f.allowed}
                      for f in shown],
@@ -8735,7 +8886,15 @@ def cmd_review(args) -> int:
     env = dict(os.environ)
     rng, extra = args.range, [m for m in (args.message or []) if m.strip()]
     if args.pr:
-        rng = pr_range(Repo.discover(), env)
+        repo0 = Repo.discover()
+        rng = pr_range(repo0, env)
+        if not (env.get("GITHUB_BASE_REF") or env.get("CI_MERGE_REQUEST_TARGET_BRANCH_NAME")):
+            if repo0.git("rev-list", "--count", rng).strip() == "0":       # a guess that is empty would be a silent PASS
+                raise GitError(f"cannot tell which branch this pull request targets: GITHUB_BASE_REF is not set and the guess "
+                               f"({rng}) holds no commits",
+                               "name the range yourself: aigate-lite review --range origin/main..HEAD (or set GITHUB_BASE_REF)")
+            print(f"aigate-lite: GITHUB_BASE_REF is not set: reviewing {rng} (name the range yourself with --range)",
+                  file=sys.stderr)
         extra += pr_texts(env)
     ns = argparse.Namespace(staged=not rng, range=rng, push=False, all=False, remote=None, format="review",
                             offline=args.offline, cache=False, no_cache=args.no_cache, no_commands=True,
@@ -8745,12 +8904,19 @@ def cmd_review(args) -> int:
     if isinstance(res, int):                                     # nothing staged / no commits to look at
         res = Result([], "pass", False, 0, ("human", "default"), "nothing to review",
                      {"files": 0, "added": 0, "removed": 0, "seconds": 0}, "built-in defaults", [])
-    if args.format == "agent":
-        sys.stdout.write(render_agent(res))
-    else:
-        rep = review_report(res)
-        sys.stdout.write({"json": lambda r: json.dumps(r, indent=2) + "\n", "md": render_review_md,
-                          "text": render_review_text}[args.format](rep))
+        if args.format == "text" and not rng:
+            print("aigate-lite review: nothing staged to review; use `--range BASE..HEAD` (or `--pr`) for commits, or "
+                  "`aigate-lite audit` for every tracked file", file=sys.stderr)
+    try:
+        if args.format == "agent":
+            sys.stdout.write(render_agent(res))
+        else:
+            rep = review_report(res)
+            sys.stdout.write({"json": lambda r: json.dumps(r, indent=2) + "\n", "md": render_review_md,
+                              "text": render_review_text}[args.format](rep))
+        sys.stdout.flush()
+    except BrokenPipeError:
+        silence_stdout()
     return 1 if res.verdict in ("fix", "block") else 0
 
 
@@ -8873,10 +9039,46 @@ def plan_runs(repo, args, env) -> list:
     return [("staged changes", head or repo.empty_tree(), None, [])]
 
 
+NOTHING_STAGED_HINT = ("next: to check commits already made use `aigate-lite check --range BASE..HEAD`; for every tracked file "
+                       "use `aigate-lite audit`")
+
+
+def _untracked_here() -> int:
+    """Files in the current folder (and below) that git does not track and does not ignore."""
+    PROFILE["git_calls"] += 1
+    try:
+        proc = subprocess.run(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=os.getcwd(),
+                              capture_output=True)
+    except OSError:
+        return 0
+    return len([e for e in proc.stdout.split(b"\0") if e]) if proc.returncode == 0 else 0
+
+
+def untracked_note(n, at_top) -> str:
+    return (f"{n} file{' here is' if n == 1 else 's here are'} not tracked by git and {'was' if n == 1 else 'were'} NOT "
+            f"scanned; run `git add -A`" + ("" if at_top else " (or `git init` if this folder should be its own repository)"))
+
+
+def _count_fixable(repo, findings, full) -> int:
+    """How many stopping findings `aigate-lite fix` would really change (a file it would refuse does not count)."""
+    cand = [f for f in findings if f.rule in FIXABLE and not f.allowed and f.action in ("block", "fix")]
+    if not cand:
+        return 0
+    try:
+        plan = plan_fixes(repo, cand, None, against_head=full)
+    except Exception:                                  # a hint must never break a report
+        return 0
+    return sum(1 for f in cand if _is_handled(plan, f))
+
+
 def run_check(args, env, collect=False):
     """Run the gate and print the report; with collect=True return the Result instead (int when nothing ran)."""
     started = time.monotonic()
     repo = Repo.discover()
+    if args.config and not os.path.isfile(args.config):        # a typo here would silently run with the default config
+        raise UserError(f"config file not found: {args.config}" if not os.path.exists(args.config)
+                        else f"{args.config} is not a config file",
+                        "check the path (a relative path is read from the folder you run it in)")
     full = bool(getattr(args, "all", False))
     stage = "scan" if full else "push" if (args.push or args.range) else "commit"
     pre = load_config(repo, "worktree", args.config)
@@ -8899,6 +9101,7 @@ def run_check(args, env, collect=False):
                           enabled=(args.cache or pre["gate"].get("cache") is True) and not args.no_cache)
     findings, notes, stats, label = [], [], Counter(), runs[0][0] if len(runs) == 1 else f"push ({len(runs)} refs)"
     provenance, cfg = quick, pre
+    baseline_pending = False
     for run_label, base, head, commits in runs:
         messages, authors, parents = _commit_info(repo, commits) if commits else ((), (), {})
         provenance = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"],
@@ -8921,6 +9124,8 @@ def run_check(args, env, collect=False):
         if head is None and not changes:
             if args.format == "text" and not args.quiet:
                 print("aigate-lite: nothing staged to check")
+                if not args.staged:                    # a person ran it (a hook run says nothing more)
+                    print(NOTHING_STAGED_HINT, file=sys.stderr)
             elif args.format == "agent":
                 print("AIGATE verdict=pass risk=0 exit=0\n" + agent_tool_line() + "\nEND")
             elif args.format in ("json", "sarif", "github") and not collect:   # a machine reader still gets a document
@@ -8938,8 +9143,11 @@ def run_check(args, env, collect=False):
                       full=full, messages=[*messages, *(getattr(args, "extra_messages", None) or [])],
                       deep=bool(getattr(args, "deep", False)), no_cache=bool(args.no_cache),
                       strict=bool(getattr(args, "strict", False)))
-        if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+        on_disk = os.path.exists(os.path.join(repo.root, BASELINE_PATH))
+        if not on_disk:
             bl_source = None                          # no git reads for repositories without a baseline
+        elif not baseline_applied(repo, bl_source):
+            baseline_pending = True                   # written but not committed (or staged): the gate does not read it
         ctx.baseline, bl_problems = load_baseline(repo, bl_source)
         if bl_source == "" and repo.read(":" + BASELINE_PATH) != repo.read("HEAD:" + BASELINE_PATH):
             bl_problems.append(f"using the staged {BASELINE_PATH}, which differs from HEAD")
@@ -8949,7 +9157,7 @@ def run_check(args, env, collect=False):
         stats["added"] += sum(len(fc.added) for fc in counted)
         stats["removed"] += sum(len(fc.removed) for fc in counted)
         for problem in cfg.problems:
-            findings.append(make("gate.config_invalid", CONFIG_PATH, None, problem, key=problem))
+            findings.append(make("gate.config_invalid", cfg.path, None, problem, key=problem))
         findings += version_findings(cfg)
         # an internal error is a block; `fail_closed = false` softens it for a person only: never a silent pass for an AI agent
         fail_action = "block" if cfg["gate"].get("fail_closed", True) or provenance[0] == "agent" else "warn"
@@ -8986,6 +9194,15 @@ def run_check(args, env, collect=False):
     registry.save()
     results.save()
     notes += registry_notes(registry)
+    if baseline_pending:
+        notes.append(BASELINE_PENDING)
+    untracked_msg = None
+    if args.format == "text" and not (args.staged or args.push):         # a person's run, not a hook's
+        n_untracked = _untracked_here()
+        if n_untracked:
+            at_top = os.path.normcase(os.path.realpath(os.getcwd())) == os.path.normcase(os.path.realpath(repo.root))
+            untracked_msg = untracked_note(n_untracked, at_top)
+            notes.append(untracked_msg)
 
     final_ctx = ctx
     findings = apply_policy(_one_block_per_key_file(findings), final_ctx, env)
@@ -8994,29 +9211,37 @@ def run_check(args, env, collect=False):
     stats["seconds"] = round(time.monotonic() - started, 2)
     res = Result(findings, verdict, escalated, risk, provenance, label,
                  {"files": stats["files"], "added": stats["added"], "removed": stats["removed"],
-                  "seconds": stats["seconds"]}, cfg.origin, notes)
+                  "seconds": stats["seconds"]}, cfg.origin, notes, baseline_pending=baseline_pending)
     if getattr(args, "deep", False):
         res.extra["review"] = final_ctx.cache.get("review")
         if full:
             notes.append("--deep does not run with --all: the reviewer judges a change, not the whole tree")
     if collect:
         return res
+    if args.format == "text" and not args.quiet and verdict in ("fix", "block") and stage != "push":
+        res.fixable = _count_fixable(repo, findings, full)
     view = {"summary": getattr(args, "summary", False), "group_by": getattr(args, "group_by", "path"),
             "max": getattr(args, "max_findings", None)}
     if view["max"] is not None and view["max"] < 0:
         view["max"] = 0
-    if args.format == "json":
-        report_json(res, view)
-    elif args.format == "github":
-        report_github(res)
-    elif args.format == "sarif":
-        report_sarif(res)
-    elif args.format == "agent":
-        sys.stdout.write(render_agent(res))
-    else:
-        mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
-        report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
-                    stage=stage, mode=mode, hook=bool(args.staged or args.push), view=view)
+    try:
+        if args.format == "json":
+            report_json(res, view)
+        elif args.format == "github":
+            report_github(res)
+        elif args.format == "sarif":
+            report_sarif(res)
+        elif args.format == "agent":
+            sys.stdout.write(render_agent(res))
+        else:
+            mode = "all" if full else "push" if args.push else "range" if args.range else "staged"
+            report_text(res, color=use_color(args.color, sys.stdout, env), verbose=args.verbose, quiet=args.quiet,
+                        stage=stage, mode=mode, hook=bool(args.staged or args.push), view=view)
+            if untracked_msg and args.quiet and verdict == "pass":       # -q prints nothing on a pass: never a bare one here
+                print(untracked_msg, file=sys.stderr)
+        sys.stdout.flush()
+    except BrokenPipeError:                      # the reader stopped early: the verdict is known, so exit with it, quietly
+        silence_stdout()
     return 1 if verdict in ("fix", "block") else 0
 
 
@@ -9500,8 +9725,49 @@ def resolve_mode(args) -> str:
         ("installed" if installed_package() else "path")
 
 
+def folder_untracked_in_parent(repo) -> bool:
+    """The current folder is inside a repository that tracks none of its files (a new project folder under, say, a
+    repository in the home folder): the hooks and the scan would be for that other repository."""
+    here = os.getcwd()
+    if os.path.normcase(os.path.realpath(here)) == os.path.normcase(os.path.realpath(repo.root)):
+        return False
+    PROFILE["git_calls"] += 1
+    proc = subprocess.run(["git", "ls-files", "-z", "--", "."], cwd=here, capture_output=True)
+    return proc.returncode == 0 and not proc.stdout.strip(b"\0")
+
+
+def parent_repo_gate(repo, args):
+    """None to go on; else the exit code of a refusal (setup/install in a folder the repository does not track)."""
+    if getattr(args, "yes", False) or not folder_untracked_in_parent(repo):
+        return None
+    print(f"aigate-lite: this folder ({os.getcwd()}) has no files tracked by the git repository at {repo.root}.\n"
+          f"  Installing here would put the hooks into that repository, and its files would be checked, not this "
+          f"folder's.\n"
+          f"  fix: if this folder should be its own project, run `git init` here and run this command again; "
+          f"to use {repo.root} anyway, add --yes", file=sys.stderr)
+    return 2
+
+
+HOOK_TOOLS = (("the pre-commit framework", ("File generated by pre-commit", "pre-commit hook-impl", "INSTALL_PYTHON")),
+              ("husky", ("husky",)), ("lefthook", ("lefthook", "LEFTHOOK")), ("git-lfs", ("git lfs", "git-lfs")),
+              ("aigate-lite from another install", ("aigate-lite", "aigate_lite")))
+
+
+def describe_hook(text) -> tuple:
+    """(first non-comment line, the tool the hook looks like) for a hook file this tool did not write."""
+    first = next((ln.strip() for ln in text.splitlines() if ln.strip() and not ln.strip().startswith("#")), None)
+    shown = "(none: only comments)" if first is None else _visible(first)
+    if len(shown) > 100:
+        shown = shown[:97] + "..."
+    tool = next((name for name, marks in HOOK_TOOLS if any(m in text for m in marks)), "unknown")
+    return shown, tool
+
+
 def cmd_install(args) -> int:
     repo = Repo.discover()
+    stop = parent_repo_gate(repo, args)
+    if stop is not None:
+        return stop
     hooks_dir = repo.git_path("hooks")
     mode = resolve_mode(args)
     args.vendor = mode == "vendored"
@@ -9540,9 +9806,12 @@ def cmd_install(args) -> int:
         path = os.path.join(hooks_dir, kind)
         if os.path.exists(path):
             with open(path, encoding="utf-8", errors="replace") as fh:
-                ours = HOOK_MARK in fh.read()
+                existing = fh.read()
+            ours = HOOK_MARK in existing
             if not ours and not args.force:
-                print(f"{path} already exists. Re-run with --force to keep it as {kind}.local; it will still run first.")
+                first, tool = describe_hook(existing)
+                print(f"{path} already exists.\n  first line: {first}\n  looks like: {tool}\n"
+                      f"Re-run with --force to keep it as {kind}.local; it will still run first.")
                 return 1
             if not ours and os.path.exists(path + ".local"):
                 print(f"{path}.local already exists; resolve it by hand first.")
@@ -9576,6 +9845,9 @@ def cmd_install(args) -> int:
 
 def cmd_uninstall(_args) -> int:
     repo = Repo.discover()
+    refused = refuse_for_agent(repo, "uninstall", "removing the gate's hooks is a person's decision; stop and ask the human")
+    if refused is not None:
+        return refused
     hooks_dir = repo.git_path("hooks")
     for kind in ("pre-commit", "pre-push"):
         path = os.path.join(hooks_dir, kind)
@@ -9762,7 +10034,8 @@ def init_text(preset: str, info: ProjectInfo) -> str:
 def cmd_init(args) -> int:
     repo = Repo.discover()
     path = os.path.join(repo.root, CONFIG_PATH)
-    files = [f for f in run_git(repo.root, "ls-files", "-z").split("\0") if f]
+    # the working tree, not only the index: a new repository before its first `git add` is detected (.gitignore respected)
+    files = [f for f in run_git(repo.root, "ls-files", "-z", "--cached", "--others", "--exclude-standard").split("\0") if f]
     info = detect_project(repo.root, files)
     what = []
     if info.languages:
@@ -9771,7 +10044,7 @@ def cmd_init(args) -> int:
         what.append("packages: " + ", ".join(info.ecosystems))
     if info.test_commands:
         what.append("tests: " + "; ".join(info.test_commands))
-    print("Detected: " + ("; ".join(what) if what else "nothing (no tracked project files)"))
+    print("Detected: " + ("; ".join(what) if what else "nothing (no project files found)"))
     print(f"Preset: {args.preset}")
     text = init_text(args.preset, info)
     if args.print:
@@ -9788,7 +10061,8 @@ def cmd_init(args) -> int:
     with open(path, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(text)
     print(f"Wrote {CONFIG_PATH}{backup}")
-    print("next: aigate-lite doctor")
+    if not getattr(args, "from_setup", False):             # setup prints its own, single, next-steps block
+        print("next: aigate-lite doctor")
     return 0
 
 
@@ -9798,6 +10072,9 @@ def cmd_setup(args) -> int:
     A repository that already has .aigate/aigate_lite.py stays vendored (`aigate-lite unvendor` switches it)."""
     import argparse
     repo = Repo.discover()
+    stop = parent_repo_gate(repo, args)
+    if stop is not None:
+        return stop
     have_copy = os.path.exists(os.path.join(repo.root, ".aigate", "aigate_lite.py"))
     mode = getattr(args, "mode", None) or ("vendored" if args.vendor else None)
     note = ""
@@ -9810,13 +10087,13 @@ def cmd_setup(args) -> int:
             mode, note = "vendored", ("running from a loose aigate_lite.py, so the gate is copied into .aigate/; "
                                       "pipx install aigate-lite makes `setup` use the installed tool instead")
     rc = cmd_install(argparse.Namespace(force=args.force, vendor=mode == "vendored", mode=mode, no_pre_push=False,
-                                        from_setup=True))
+                                        from_setup=True, yes=True))      # the question was asked once, above
     if rc:
         return rc
     if note:
         print("note: " + note)
     if not os.path.exists(os.path.join(repo.root, CONFIG_PATH)):
-        rc = cmd_init(argparse.Namespace(preset=args.preset, print=False, force=False))
+        rc = cmd_init(argparse.Namespace(preset=args.preset, print=False, force=False, from_setup=True))
         if rc:
             return rc
     print("Setup done. Next steps:\n"
@@ -9841,6 +10118,16 @@ def cmd_unvendor(args) -> int:
     rc = cmd_install(argparse.Namespace(force=args.force, vendor=False, mode="installed", no_pre_push=False))
     if rc:
         return rc
+    try:                                                       # it must not say "done" unless the hook really is the installed kind
+        with open(os.path.join(repo.git_path("hooks"), "pre-commit"), encoding="utf-8", errors="replace") as fh:
+            now = hook_mode(fh.read())
+    except OSError:
+        now = "missing"
+    if now != "installed":
+        print(f"aigate-lite: unvendor did not switch the pre-commit hook to the installed tool (it is {now})\n"
+              "  fix: run `aigate-lite doctor` to see what the hooks are, then `aigate-lite install --mode installed`",
+              file=sys.stderr)
+        return 1
     if copy:
         try:
             with open(os.path.join(repo.root, ".aigate", "aigate_lite.py"), encoding="utf-8", errors="replace") as fh:
@@ -9896,7 +10183,9 @@ def cmd_baseline(args) -> int:
     left = 0 if args.include_secrets else len(secrets)
     print(f"{left} secret finding{'' if left == 1 else 's'} not baselined; rotate {'it' if left == 1 else 'them'}"
           if left else "0 secret findings not baselined")
-    print(f"next: review and commit {BASELINE_PATH}")
+    rel = os.path.relpath(path).replace(os.sep, "/")        # a path git accepts from the folder you are in
+    # one last line that starts with "next:" (like every other command's), holding the two exact git commands
+    print(f"next: review {BASELINE_PATH}, then: git add {rel} && git commit -m \"Add aigate-lite baseline\"")
     return 0
 
 
@@ -9914,12 +10203,14 @@ class FixPlan:
     gitignore: tuple     # (old bytes, new bytes) or None
     skipped: list        # (path, line, why)
     notes: list = dataclasses.field(default_factory=list)
+    handled: set = dataclasses.field(default_factory=set)      # (path, line, rule) of every finding the plan changes
 
 
-def _unchanged_since_staged(repo, path) -> bool:
-    """True when the work tree file matches the index (git's own comparison: autocrlf and filters included)."""
-    return subprocess.run(["git", "diff", "--quiet", "--no-ext-diff", "--", f":(literal){path}"],
-                          cwd=repo.root, capture_output=True).returncode == 0
+def _unchanged_since_staged(repo, path, against_head=False) -> bool:
+    """True when the work tree file matches the index (git's own comparison: autocrlf and filters included), or, for
+    `fix --all`, HEAD (a finding's line number comes from the committed file, so the file must still be that one)."""
+    cmd = ["git", "diff", "--quiet", "--no-ext-diff"] + (["HEAD"] if against_head else []) + ["--", f":(literal){path}"]
+    return subprocess.run(cmd, cwd=repo.root, capture_output=True).returncode == 0
 
 
 def _python_debug_lines(text) -> set:
@@ -9946,14 +10237,34 @@ def _python_debug_lines(text) -> set:
     return {line for line, stmts in by_line.items() if all(debug_stmt(n) for n in stmts)}
 
 
-def _plan_file(repo, path, findings, plan) -> None:
+def _emptied_blocks(text, drop) -> list:
+    """Blocks whose statements would ALL be dropped (so deleting them would leave an empty block, a syntax error):
+    for each, the 0-based line indexes of its statements, first first. Module level may be empty."""
+    try:
+        tree = ast.parse(text)
+    except SyntaxError:
+        return []
+    out = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module):
+            continue
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if isinstance(block, list) and block and all(isinstance(st, ast.stmt) for st in block) \
+                    and all(st.lineno - 1 in drop for st in block):
+                out.append([st.lineno - 1 for st in block])
+    return out
+
+
+def _plan_file(repo, path, findings, plan, against_head=False, allow_pass=False) -> None:
     full = os.path.join(repo.root, path)
     root = os.path.realpath(repo.root)
     if os.path.islink(full) or not os.path.realpath(full).startswith(root + os.sep):
         plan.skipped.append((path, None, "a symlink or outside the repository"))
         return
-    if not _unchanged_since_staged(repo, path):
-        plan.skipped.append((path, None, "has unstaged changes; stage or stash them first"))
+    if not _unchanged_since_staged(repo, path, against_head):
+        plan.skipped.append((path, None, "has changes since the last commit; commit or stash them first" if against_head
+                             else "has unstaged changes; stage or stash them first"))
         return
     try:
         with open(full, "rb") as fh:
@@ -9968,7 +10279,7 @@ def _plan_file(repo, path, findings, plan) -> None:
     lines = text.split("\n")                       # like git's line numbers: only \n ends a line
     is_py = path.endswith((".py", ".pyw"))
     debug_ok = _python_debug_lines(text) if is_py else set()
-    drop, changed = set(), {}
+    drop, changed, wanted = set(), {}, {}
     for f in findings:
         i = (f.line or 0) - 1
         if not 0 <= i < len(lines):
@@ -9979,29 +10290,49 @@ def _plan_file(repo, path, findings, plan) -> None:
                 new = rx.sub(repl, body, count=1)
                 if new != body:
                     changed[i] = new + lines[i][len(body):]
+                    wanted[i] = f
                     break
             else:
                 plan.skipped.append((path, f.line, "the focused call is not at the start of the line; fix it by hand"))
         elif is_py and (i + 1) in debug_ok:
             drop.add(i)
+            wanted[i] = f
         elif not is_py and JS_DEBUGGER_LINE.match(body) and "\n".join(lines[:i]).count("`") % 2 == 0:
             drop.add(i)                             # (an odd number of backticks before it: inside a template)
+            wanted[i] = f
         else:
             plan.skipped.append((path, f.line, "other code on the line or a multi-line statement; fix it by hand"))
+    if is_py:                                       # a block that would be left empty: `pass` under --allow-pass, else by hand
+        for block in _emptied_blocks(text, drop):
+            if not all(i in drop for i in block):
+                continue                            # an earlier block already took one of these lines out
+            if allow_pass:
+                first = block[0]
+                body = lines[first].rstrip("\r")
+                changed[first] = body[:len(body) - len(body.lstrip())] + "pass" + lines[first][len(body):]
+                drop.discard(first)                 # the first statement stays, as `pass`; the others go
+                continue
+            for i in block:
+                drop.discard(i)
+                wanted.pop(i, None)
+                plan.skipped.append((path, i + 1, "the only statement in its block: fix it by hand (or run `aigate-lite fix "
+                                     "--allow-pass` to replace it with `pass`)"))
     for i in [i for i in drop if is_py and lines[i].strip().startswith("import ")]:
         module = lines[i].split()[1].rstrip(";")      # keep `import pdb` while something else still uses pdb
         rest = "\n".join(changed.get(j, ln) for j, ln in enumerate(lines) if j not in drop)
         if re.search(rf"\b{re.escape(module)}\b", rest):
             drop.discard(i)
+            wanted.pop(i, None)
     new_text = "\n".join(changed.get(i, ln) for i, ln in enumerate(lines) if i not in drop)
     if is_py:
         try:
             ast.parse(new_text)
         except SyntaxError:
-            plan.skipped.append((path, None, "removing the line would leave an empty block; fix it by hand"))
+            plan.skipped.append((path, None, "removing the lines would break the file's syntax; fix them by hand"))
             return
     if new_text != text:
         plan.edits[path] = (data, new_text.encode("utf-8"))
+        plan.handled.update((path, f.line, f.rule) for f in wanted.values())
 
 
 def _gitignore_line(path: str) -> str:
@@ -10057,8 +10388,9 @@ def _plan_gitignore(repo, paths, plan) -> None:
         plan.gitignore = (old, old + (eol if old and not old.endswith(b"\n") else b"") + eol.join(lines) + eol)
 
 
-def plan_fixes(repo, findings, only) -> FixPlan:
-    """What `fix` would change, from the staged check's findings. Nothing is written here."""
+def plan_fixes(repo, findings, only, against_head=False, allow_pass=False) -> FixPlan:
+    """What `fix` would change, from the findings of a staged check (or, with against_head, of an audit of HEAD).
+    Nothing is written here."""
     wanted = set(only or FIXABLE) & set(FIXABLE)
     plan = FixPlan({}, [], None, [])
     by_path: dict = defaultdict(list)
@@ -10069,8 +10401,9 @@ def plan_fixes(repo, findings, only) -> FixPlan:
             else:
                 by_path[f.path].append(f)
     for path, fs in sorted(by_path.items()):
-        _plan_file(repo, path, fs, plan)
+        _plan_file(repo, path, fs, plan, against_head, allow_pass)
     plan.untrack = list(dict.fromkeys(plan.untrack))
+    plan.handled.update((p, None, "secrets.env_file") for p in plan.untrack)
     _plan_gitignore(repo, plan.untrack, plan)
     for p in plan.untrack:
         if repo.read("HEAD:" + p) is not None:
@@ -10116,20 +10449,75 @@ def _apply_fixes(repo, plan) -> None:
         run_git(repo.root, "rm", "--cached", "-q", "--", f":(literal){path}")
 
 
+def _is_handled(plan, f) -> bool:
+    return (f.path, f.line, f.rule) in plan.handled or (f.rule == "secrets.env_file" and f.path in plan.untrack)
+
+
+def _manual_text(findings, plan) -> str:
+    """'2 FIX findings need a manual change: rule, rule' for the stopping findings the plan does not change."""
+    manual = [f for f in findings if not f.allowed and f.action in ("block", "fix") and not _is_handled(plan, f)]
+    parts = []
+    for act in ("block", "fix"):
+        fs = [f for f in manual if f.action == act]
+        if fs:
+            n = len(fs)
+            parts.append(f"{n} {act.upper()} finding{'s' if n != 1 else ''} need{'s' if n == 1 else ''} a manual change: "
+                         + ", ".join(sorted({f.rule for f in fs})))
+    return "; ".join(parts)
+
+
+def _anything_staged(repo) -> bool:
+    return subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=repo.root, capture_output=True).returncode != 0
+
+
+def _say_nothing_to_fix(repo, env, args, plan, findings, only) -> int:
+    """Nothing was changed: say why, never a bare 'nothing to fix' while the audit reports FIX lines."""
+    manual = _manual_text(findings, plan)
+    if plan.skipped or manual:
+        print("nothing to fix automatically" + (f"; {manual}" if manual else ""))
+        return 0
+    if args.all:
+        print("nothing to fix: no FIX or BLOCK findings in the tracked files")
+        return 0
+    if _anything_staged(repo):
+        print("nothing to fix: the staged change has no FIX or BLOCK findings")
+        return 0
+    # nothing is staged: fix works on a staged change, so look at what the committed files hold
+    audit = run_check(build_parser().parse_args(["check", "--all", "--offline", "--no-commands", "--format", "json"]),
+                      env, collect=True)
+    stopping = [] if isinstance(audit, int) else [f for f in audit.findings if not f.allowed and f.action in ("block", "fix")]
+    if not stopping:
+        print("nothing staged")
+        return 0
+    n = len(stopping)
+    in_head = plan_fixes(repo, stopping, only, against_head=True, allow_pass=args.allow_pass)
+    if in_head.edits or in_head.untrack:
+        print(f"{n} finding{' is' if n == 1 else 's are'} in committed files (fix works on staged changes; use --all)")
+        rest = _manual_text(stopping, in_head)
+        if rest:
+            print(f"of these, {rest}")
+    else:
+        print(f"{_manual_text(stopping, in_head)} (they are in committed files; fix works on staged changes)")
+    return 0
+
+
 def cmd_fix(args) -> int:
-    """Mechanical fixes for staged findings. Shows the diff and changes nothing unless --yes; never run by hooks."""
+    """Mechanical fixes for staged findings (or, with --all, for the tracked files). Shows the diff and changes nothing
+    unless --yes; never run by hooks."""
     repo = Repo.discover()
     env = dict(os.environ)
-    ns = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--format", "json"])
+    ns = build_parser().parse_args(["check", "--all" if args.all else "--staged", "--offline", "--no-commands",
+                                    "--format", "json"])
     res = run_check(ns, env, collect=True)
     findings = [] if isinstance(res, int) else res.findings
     only = [r.strip() for r in (args.only or "").split(",") if r.strip()]
-    plan = plan_fixes(repo, findings, only)
-    for path, line, why in plan.skipped:
+    plan = plan_fixes(repo, findings, only, against_head=args.all, allow_pass=args.allow_pass)
+    for path, line, why in sorted(plan.skipped, key=lambda t: (t[0], t[1] or 0)):
         print(f"skipped {path}{f':{line}' if line else ''}: {why}")
     if not (plan.edits or plan.untrack or plan.gitignore):
-        print("nothing to fix" + (" automatically" if plan.skipped else ""))
-        return 0
+        return _say_nothing_to_fix(repo, env, args, plan, findings, only)
+    flags = (" --all" if args.all else "") + (f" --only {args.only}" if args.only else "") \
+        + (" --allow-pass" if args.allow_pass else "")
     if not args.yes:
         for path in plan.untrack:
             print(f"would run: git rm --cached -- {path}   (the file stays on disk)")
@@ -10139,19 +10527,46 @@ def cmd_fix(args) -> int:
             sys.stdout.write(_diff(".gitignore", *plan.gitignore))
         for path, (old, new) in plan.edits.items():
             sys.stdout.write(_diff(path, old, new))
-        print("next: aigate-lite fix --yes")
+        manual = _manual_text(findings, plan)
+        if manual:
+            print(f"also: {manual}")
+        print(f"next: aigate-lite fix{flags} --yes")
         return 1
     _apply_fixes(repo, plan)
     for note in plan.notes:
         print(f"note: {note}")
-    print(f"fixed: {len(plan.edits)} file(s) edited, {len(plan.untrack)} unstaged"
-          + (", .gitignore updated" if plan.gitignore else "") + "; checking again:")
+    summary = (f"fixed: {len(plan.edits)} file(s) edited, {len(plan.untrack)} unstaged"
+               + (", .gitignore updated" if plan.gitignore else ""))
+    manual = _manual_text(findings, plan)
+    if args.all:
+        # an audit reads HEAD, so a re-check would show the old findings: the edits are staged, not committed
+        print(summary + "; the changes are staged, not committed: review `git diff --cached`, then run `git commit`")
+        if manual:
+            print(f"still to do: {manual}")
+        return 0
+    print(summary + "; checking again:")
     recheck = build_parser().parse_args(["check", "--staged", "--offline", "--no-commands", "--color", "never"])
     return run_check(recheck, env)
 
 
+def refuse_for_agent(repo, what, why_not) -> int | None:
+    """None for a person; for an AI agent print the refusal (like `baseline` and `trust`) and return exit code 1. The
+    agent markers of the config count too, as they do for `baseline`."""
+    cfg = load_config(repo, "worktree")
+    kind, why = detect_provenance(dict(os.environ), cfg["provenance"]["agent_env"], cfg["provenance"]["default"])
+    if kind != "agent":
+        return None
+    print(f"aigate-lite: `{what}` refuses to run for an AI agent ({why.lstrip('$')}): {why_not}", file=sys.stderr)
+    return 1
+
+
 def cmd_scope(args) -> int:
     repo = Repo.discover()
+    if args.action != "show":                    # an agent that could widen or clear its scope would have no scope
+        refused = refuse_for_agent(repo, f"scope {args.action}", "the task scope is a person's boundary; stop and ask the "
+                                   "human to widen it")
+        if refused is not None:
+            return refused
     path = scope_path(repo)
     current = load_scope(repo) if not os.environ.get("AIGATE_SCOPE") else []
     if args.action == "show":
@@ -10668,6 +11083,10 @@ def doctor_report(env, offline=False, fetch=None) -> list:
                                  "their base", "run: git fetch --unshallow (CI: fetch-depth: 0)"))
         elif not has_commits:
             checks.append(_check("repo", "warn", f"{repo.root}: no commits yet", "make a first commit"))
+        elif folder_untracked_in_parent(repo):
+            checks.append(_check("repo", "warn", f"{cwd} has no tracked files; the repository found is {repo.root}",
+                                 f"run: git init (in {cwd}, if this folder is its own project), or run aigate-lite from "
+                                 f"{repo.root}"))
         else:
             checks.append(_check("repo", "ok", repo.root))
         cfg = load_config(repo, "worktree")
@@ -10706,13 +11125,28 @@ def cmd_doctor(args) -> int:
     return 1 if any(c["status"] == "fail" for c in checks) else 0
 
 
+def unknown_command_hint(word, commands) -> str:
+    """A hint for a command that does not exist: the closest real one, or how to update the tool."""
+    import difflib
+    w = word.lower()
+    if w in ("update", "upgrade", "self-update", "self-upgrade") or difflib.get_close_matches(w, ["update", "upgrade"], 1, 0.75):
+        return "aigate-lite has no update command; to update it: pip install -U aigate-lite (pipx: pipx upgrade aigate-lite)"
+    close = difflib.get_close_matches(w, commands, 1, 0.6)
+    return f"did you mean `aigate-lite {close[0]}`?" if close else ""
+
+
 def build_parser():
     import argparse
 
     class Parser(argparse.ArgumentParser):
         def error(self, message):
             self.print_usage(sys.stderr)
-            self.exit(2, f"aigate-lite: {message}\n  see: aigate-lite --help\n")
+            hint = ""
+            m = re.match(r"argument command: invalid choice: '([^']*)' \(choose from (.*)\)", message)
+            if m:                                  # an unknown COMMAND (not a bad value of some option)
+                hint = unknown_command_hint(m.group(1), re.findall(r"[a-z][a-z-]*", m.group(2)))
+                hint = f"  {hint}\n" if hint else ""
+            self.exit(2, f"aigate-lite: {message}\n{hint}  see: aigate-lite --help\n")
     p = Parser(prog="aigate-lite", description="Commit-time gate for AI-written code. "
                                                "--debug (or AIGATE_DEBUG=1) shows tracebacks.",
                epilog=ATTRIBUTION, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -10790,11 +11224,15 @@ def build_parser():
     u.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     u.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ (same as --mode vendored)")
     u.add_argument("--mode", choices=MODES, help="installed: hooks run the installed aigate-lite; vendored: .aigate/ copy")
+    u.add_argument("--yes", action="store_true",
+                   help="go on when this folder is inside a repository that tracks none of its files")
     i = sub.add_parser("install", help="install the pre-commit and pre-push git hooks")
     i.add_argument("--force", action="store_true", help="install even if other hooks exist (they keep running)")
     i.add_argument("--vendor", action="store_true", help="copy the script into .aigate/ and point the hooks there")
     i.add_argument("--no-pre-push", action="store_true", help="install only the pre-commit hook")
     i.add_argument("--mode", choices=MODES, help="installed: hooks run the installed aigate-lite; vendored: .aigate/ copy")
+    i.add_argument("--yes", action="store_true",
+                   help="go on when this folder is inside a repository that tracks none of its files")
     v = sub.add_parser("unvendor", help="switch a repository from the vendored copy to the installed tool")
     v.add_argument("--force", action="store_true", help="rewrite the hooks even if this copy is not an installed package")
     sub.add_parser("uninstall", help="remove the hooks this tool installed")
@@ -10810,6 +11248,10 @@ def build_parser():
     x = sub.add_parser("fix", help="fix debugger lines, focused tests and staged env files (shows a diff; --yes applies)")
     x.add_argument("--yes", action="store_true", help="apply the changes and stage them")
     x.add_argument("--only", metavar="RULE[,RULE]", help=f"only these rules ({', '.join(FIXABLE)})")
+    x.add_argument("--all", action="store_true",
+                   help="fix the tracked files (what `audit` reads) instead of the staged change; the edits are staged")
+    x.add_argument("--allow-pass", action="store_true",
+                   help="a debugger line that is the only statement in its block becomes `pass` (default: left for you)")
     b = sub.add_parser("baseline", help="accept today's findings so only new ones stop commits (.aigate/baseline.json)")
     b.add_argument("--include-secrets", action="store_true", help="also accept secrets (rotate them instead)")
     b.add_argument("--prune", action="store_true", help="drop entries that no longer occur")
@@ -10819,6 +11261,17 @@ def build_parser():
     e = sub.add_parser("explain", help="list rules, or explain one")
     e.add_argument("rule", nargs="?")
     return p
+
+
+def silence_stdout() -> None:
+    """After a closed pipe (`aigate-lite audit | head`): point stdout at the null device, so the interpreter's own final flush
+    cannot print `Exception ignored ... BrokenPipeError` (the recipe of the Python documentation)."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(devnull, sys.stdout.fileno())
+        os.close(devnull)
+    except (OSError, ValueError, AttributeError):
+        pass
 
 
 def main(argv=None) -> int:
@@ -10837,6 +11290,9 @@ def main(argv=None) -> int:
     try:
         args = build_parser().parse_args(argv)
         command = args.command
+        global ANNOUNCE_REPO       # a hook run (check --staged / --push) starts at the top of the repository: nothing to say
+        ANNOUNCE_REPO = command in ("check", "audit", "review", "setup", "install", "unvendor", "uninstall", "init", "scope",
+                                    "trust", "baseline", "fix") and not (command == "check" and (args.staged or args.push))
         if args.command == "check":
             return run_check(args, dict(os.environ))
         return {"review": cmd_review, "setup": cmd_setup, "audit": cmd_audit, "install": cmd_install, "unvendor": cmd_unvendor, "uninstall": cmd_uninstall, "init": cmd_init, "scope": cmd_scope,
@@ -10851,10 +11307,7 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:                   # the reader went away (e.g. `| head`): nothing to report
-        try:
-            sys.stdout = open(os.devnull, "w")
-        except OSError:
-            pass
+        silence_stdout()
         return 2
     except Exception as e:                    # fail closed: exit 2 stops the hook, without a traceback
         if debug:

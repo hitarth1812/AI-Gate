@@ -124,7 +124,7 @@ def test_install_force_keeps_the_old_hook(repo):
     # Guards the Windows bug (renaming the hook while it was still open); POSIX allows that rename anyway.
     hooks = repo.path / ".git" / "hooks"
     hooks.mkdir(exist_ok=True)
-    (hooks / "pre-commit").write_text("#!/bin/sh\necho old\n")
+    (hooks / "pre-commit").write_text("#!/bin/sh\necho old\n", encoding="utf-8", newline="\n")
     assert repo.run("install", "--force").returncode == 0
     assert (hooks / "pre-commit.local").read_text() == "#!/bin/sh\necho old\n"
 

@@ -1,0 +1,17 @@
+id = "r4-py-todo-in-a-comment-still-fires"
+source = "seeded"
+language = "python"
+origin = "round 4 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.todo"
+path = "src/pay.py"
+line = 2
+
+[[must_fire]]
+rule = "code.todo"
+path = "src/pay.py"
+line = 3

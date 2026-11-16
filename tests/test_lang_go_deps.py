@@ -162,12 +162,12 @@ def test_a_replaced_module_that_is_not_replaced_locally_is_still_reported(repo):
 def test_gopath_style_settings_are_read_from_the_go_env_file(repo, tmp_path):
     project(repo)
     envfile = tmp_path / "goenv"
-    envfile.write_text("GOPRIVATE=github.com/corp\n# comment\nGOFLAGS=-mod=mod\n")
+    envfile.write_text("GOPRIVATE=github.com/corp\n# comment\nGOFLAGS=-mod=mod\n", encoding="utf-8", newline="\n")
     mod = BASE_MOD + "require github.com/corp/internal v1.0.0\n"
     assert find(change(repo, {"go.mod": mod}), "deps.hallucinated")
     assert not find(change(repo, {"go.mod": mod}, env={"GOENV": str(envfile)}), "deps.hallucinated")
     proxy = tmp_path / "goenv2"
-    proxy.write_text("GOPROXY=https://proxy.corp.example,https://proxy.golang.org\n")
+    proxy.write_text("GOPROXY=https://proxy.corp.example,https://proxy.golang.org\n", encoding="utf-8", newline="\n")
     res = change(repo, {"go.mod": BASE_MOD + "require github.com/not/real v1.0.0\n"}, env={"GOENV": str(proxy)})
     assert not find(res, "deps.hallucinated")
 
@@ -439,7 +439,7 @@ def test_go_private_pattern_semantics(monkeypatch):
 def test_go_env_file_location_follows_the_platform_config_dir(tmp_path, monkeypatch):
     mac = tmp_path / "Library" / "Application Support" / "go"
     mac.mkdir(parents=True)
-    (mac / "env").write_text("GOPRIVATE=corp.example/*\n")
+    (mac / "env").write_text("GOPRIVATE=corp.example/*\n", encoding="utf-8", newline="\n")
     for var in ("GOENV", "GOPRIVATE", "XDG_CONFIG_HOME"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))

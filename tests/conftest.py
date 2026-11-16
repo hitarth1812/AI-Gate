@@ -78,6 +78,10 @@ class GitRepo:
         self.git("config", "user.email", "dev@example.com")
         self.git("config", "user.name", "Dev")
         self.git("config", "commit.gpgsign", "false")
+        # every platform stages the same bytes: no line-ending translation in the test repository (a test that wants CRLF
+        # writes the bytes itself or sets core.autocrlf for its own repository), and no safecrlf refusals
+        self.git("config", "core.autocrlf", "false")
+        self.git("config", "core.safecrlf", "false")
 
     def git(self, *args, env=None, check=True, input=None):
         return subprocess.run(["git", *args], cwd=self.path, env={**self.env, **(env or {})}, text=True,
@@ -86,7 +90,7 @@ class GitRepo:
     def write(self, rel: str, text: str):
         p = self.path / rel
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(text)
+        p.write_text(text, encoding="utf-8", newline="\n")
         return p
 
     def add(self, *paths):

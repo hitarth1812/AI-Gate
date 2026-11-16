@@ -1,0 +1,22 @@
+id = "r4-py-suppressions-in-comments-still-fire"
+source = "seeded"
+language = "python"
+origin = "round 4 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "src/sloppy.py"
+line = 1
+
+[[must_fire]]
+rule = "suppress.type"
+path = "src/sloppy.py"
+line = 2
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "src/sloppy.py"
+line = 3
