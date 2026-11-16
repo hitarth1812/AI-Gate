@@ -56,7 +56,7 @@ def test_version_is_single_sourced_and_pyproject_reads_it():
     meta = tomllib.loads((SCRIPT.parent / "pyproject.toml").read_text(encoding="utf-8"))
     assert "version" not in meta["project"] and "version" in meta["project"]["dynamic"]
     assert meta["tool"]["setuptools"]["dynamic"]["version"] == {"attr": "aigate_lite.__version__"}
-    assert aigate.__version__ == "0.6.0"
+    assert aigate.__version__ == "0.6.1"
 
 
 def stage(repo, files):
