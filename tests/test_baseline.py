@@ -187,7 +187,7 @@ def test_an_agent_cannot_write_a_baseline_and_reads_it_from_head(repo):
     staged = repo.check()
     hit = find(staged, "security.eval")[0]
     doc["entries"].append({"rule": "security.eval", "path": "app/new.py", "fingerprint": hit["fingerprint"]})
-    (repo.path / ".aigate" / "baseline.json").write_text(json.dumps(doc), encoding="utf-8")
+    (repo.path / ".aigate" / "baseline.json").write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     assert find(repo.check(), "security.eval")[0]["allowed"] is None       # unstaged edits are never read
     agent = repo.check(env={"CLAUDECODE": "1"})
     assert find(agent, "security.eval")[0]["allowed"] is None and agent["verdict"] in ("fix", "block")
@@ -250,7 +250,7 @@ def test_baseline_loader_accepts_a_bom_and_rejects_bad_versions_and_gate_rules(r
     repo_obj = aigate.Repo.discover(str(repo.path))
     assert aigate.load_baseline(repo_obj, "worktree")[0] == {("security.eval", "a.py", fp)}
     assert find(full(repo), "security.eval")[0]["allowed"] == "baseline"
-    path.write_text(json.dumps({"version": True, "entries": entries}), encoding="utf-8")
+    path.write_text(json.dumps({"version": True, "entries": entries}), encoding="utf-8", newline="\n")
     assert aigate.load_baseline(repo_obj, "worktree")[0] == set()
 
 
@@ -278,6 +278,6 @@ def test_doctor_reports_the_baseline_and_legacy_entries(repo):
     assert checks["baseline"]["status"] == "ok" and "accepted findings" in checks["baseline"]["detail"]
     doc = baseline_doc(repo)
     doc["entries"][0]["fingerprint"] = "0123456789ab"                  # a 0.1-format entry
-    (repo.path / ".aigate" / "baseline.json").write_text(json.dumps(doc), encoding="utf-8")
+    (repo.path / ".aigate" / "baseline.json").write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     checks = {c["id"]: c for c in json.loads(repo.run("doctor", "--offline", "--format", "json").stdout)}
     assert checks["baseline"]["status"] == "warn" and "--prune" in checks["baseline"]["fix"]

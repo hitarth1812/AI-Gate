@@ -219,7 +219,7 @@ def test_init_in_an_empty_new_repository_says_no_project_files(tmp_path):
 def put_hook(repo, kind, body):
     hooks = repo.path / ".git" / "hooks"
     hooks.mkdir(exist_ok=True)
-    (hooks / kind).write_text(body, newline="\n")
+    (hooks / kind).write_text(body, newline="\n", encoding="utf-8")
 
 
 def install_over(repo, kind, body):

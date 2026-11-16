@@ -155,11 +155,11 @@ def test_env_check_runs_one_git_process_however_many_env_files(repo):
 
     def calls():
         return profile(repo.run("check", "--format", "json", env={"AIGATE_PROFILE": "1"}))["git_calls"]
-    (repo.path / ".env").write_text("X=1\n")
+    (repo.path / ".env").write_text("X=1\n", encoding="utf-8", newline="\n")
     one = calls()
-    (repo.path / ".env.local").write_text("X=1\n")
-    (repo.path / ".env.prod").write_text("X=1\n")
-    (repo.path / ".gitignore").write_text(".env.prod\n")
+    (repo.path / ".env.local").write_text("X=1\n", encoding="utf-8", newline="\n")
+    (repo.path / ".env.prod").write_text("X=1\n", encoding="utf-8", newline="\n")
+    (repo.path / ".gitignore").write_text(".env.prod\n", encoding="utf-8", newline="\n")
     res = repo.check()
     assert sorted(f["path"] for f in find(res, "secrets.env_not_ignored")) == [".env", ".env.local"]
     assert calls() == one

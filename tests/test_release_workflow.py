@@ -101,7 +101,7 @@ def test_build_job_runs_the_guards_before_and_after_building():
 def make_tree(tmp_path, version="1.2.3"):
     root = tmp_path / "src"
     root.mkdir()
-    (root / "aigate_lite.py").write_text(f'"""x"""\n__version__ = "{version}"\n', encoding="utf-8")
+    (root / "aigate_lite.py").write_text(f'"""x"""\n__version__ = "{version}"\n', encoding="utf-8", newline="\n")
     return root
 
 
@@ -131,7 +131,7 @@ def make_dist(tmp_path, version="1.2.3", wheel_extra=(), wheel_meta=None, sdist_
         for name in wheel_extra:
             z.writestr(name, "x")
     pkg = tmp_path / "PKG-INFO"
-    pkg.write_text(f"Metadata-Version: 2.4\nName: aigate-lite\nVersion: {sdist_meta or version}\n", encoding="utf-8")
+    pkg.write_text(f"Metadata-Version: 2.4\nName: aigate-lite\nVersion: {sdist_meta or version}\n", encoding="utf-8", newline="\n")
     with tarfile.open(dist / f"aigate_lite-{version}.tar.gz", "w:gz") as t:
         t.add(pkg, arcname=f"aigate_lite-{version}/PKG-INFO")
     return dist

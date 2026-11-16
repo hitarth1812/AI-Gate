@@ -230,7 +230,7 @@ def test_the_gate_runs_without_the_packages_installed_on_this_machine(repo, tmp_
     repo.write("a.py", "import pytest\n")
     repo.add()
     empty = tmp_path / "empty.json"
-    empty.write_text('{"pypi": {}, "npm": {}, "go": {}}', encoding="utf-8")
+    empty.write_text('{"pypi": {}, "npm": {}, "go": {}}', encoding="utf-8", newline="\n")
     env = ev.run_env("person", tmp_path)
     env["AIGATE_REGISTRY_FIXTURE"] = str(empty)
     res = ev.gate(ROOT / "aigate_lite.py", repo.path, env, ["check", "--offline", "--no-cache", "--format", "json"])

@@ -104,7 +104,7 @@ def test_range_scans_every_commit_for_secrets(repo):
 def test_installed_hooks_block_and_allow_commits(repo):
     hooks = repo.path / ".git" / "hooks"
     hooks.mkdir(exist_ok=True)
-    (hooks / "pre-commit").write_text("#!/bin/sh\necho old-hook-ran\n")
+    (hooks / "pre-commit").write_text("#!/bin/sh\necho old-hook-ran\n", encoding="utf-8", newline="\n")
     (hooks / "pre-commit").chmod(0o755)
     assert repo.run("install").returncode == 1                     # refuses to overwrite a foreign hook
     assert repo.run("install", "--force").returncode == 0

@@ -61,7 +61,7 @@ def test_local_connection_string_is_warning(repo):
 
 
 def test_untracked_env_not_ignored_warns(repo):
-    (repo.path / ".env").write_text("X=1\n")
+    (repo.path / ".env").write_text("X=1\n", encoding="utf-8", newline="\n")
     repo.write("a.py", "x = 1\n")
     repo.add("a.py")
     res = repo.check()

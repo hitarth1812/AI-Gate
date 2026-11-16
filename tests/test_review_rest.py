@@ -405,7 +405,7 @@ def test_pr_range_uses_the_target_branch_and_pr_text_comes_from_the_event(repo, 
     with pytest.raises(aigate.GitError):
         aigate.pr_range(r, {"GITHUB_BASE_REF": "gone"})
     event = tmp_path / "event.json"
-    event.write_text(json.dumps({"pull_request": {"title": "Add tests", "body": "details"}}))
+    event.write_text(json.dumps({"pull_request": {"title": "Add tests", "body": "details"}}), encoding="utf-8", newline="\n")
     assert aigate.pr_texts({"GITHUB_EVENT_PATH": str(event), "CI_MERGE_REQUEST_TITLE": "mr"}) == ["Add tests", "details", "mr"]
     assert aigate.pr_texts({"GITHUB_EVENT_PATH": str(tmp_path / "missing.json")}) == []
 
@@ -417,7 +417,7 @@ def test_review_pr_checks_the_pr_title_against_the_diff(repo, tmp_path):
     repo.write("app/h.py", "x = 1\n")
     repo.commit("work")
     event = tmp_path / "event.json"
-    event.write_text(json.dumps({"pull_request": {"title": "Add tests for the helper", "body": ""}}))
+    event.write_text(json.dumps({"pull_request": {"title": "Add tests for the helper", "body": ""}}), encoding="utf-8", newline="\n")
     data = review(repo, "--pr", env={"GITHUB_BASE_REF": "main", "GITHUB_EVENT_PATH": str(event)})
     assert [f for f in data["should_check"] if f["rule"] == "review.claim_mismatch"]
 

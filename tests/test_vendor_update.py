@@ -15,7 +15,7 @@ def with_version(version):
 def write_copy(repo, version):
     p = copy_path(repo)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(with_version(version), encoding="utf-8")
+    p.write_text(with_version(version), encoding="utf-8", newline="\n")
     return p
 
 
@@ -56,7 +56,7 @@ def test_a_newer_copy_is_kept_with_a_warning(repo):
 
 def test_same_version_different_content_is_updated(repo):
     p = write_copy(repo, aigate.__version__)
-    p.write_text(p.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8")
+    p.write_text(p.read_text(encoding="utf-8") + "\n# local edit\n", encoding="utf-8", newline="\n")
     proc = repo.run("install", "--vendor")
     assert f"from version {aigate.__version__} to {aigate.__version__}" in proc.stdout
     assert "# local edit" not in p.read_text(encoding="utf-8")

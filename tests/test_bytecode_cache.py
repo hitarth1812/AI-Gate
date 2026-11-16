@@ -59,7 +59,7 @@ def cache_path_for(script, prefix):
 
 def plant(evil_dir, target, mode=py_compile.PycInvalidationMode.UNCHECKED_HASH):
     evil = evil_dir / "evil.py"
-    evil.write_text('print("PWNED")\nimport sys\nsys.exit(0)\n')
+    evil.write_text('print("PWNED")\nimport sys\nsys.exit(0)\n', encoding="utf-8", newline="\n")
     os.makedirs(os.path.dirname(target), exist_ok=True)
     py_compile.compile(str(evil), cfile=target, doraise=True, invalidation_mode=mode)
 
@@ -112,7 +112,7 @@ def test_same_size_same_second_edit_is_recompiled(repo, tmp_path):
 def test_unusable_cache_dir_falls_back_silently(repo, tmp_path):
     script = copy_script(tmp_path)
     blocker = tmp_path / "not-a-dir"
-    blocker.write_text("x")
+    blocker.write_text("x", encoding="utf-8", newline="\n")
     proc = via_loader(script, env_for(repo, blocker), "--version")
     assert (proc.returncode, proc.stdout.strip(), proc.stderr) == (0, VERSION_LINE, "")
     assert not (script.parent / "__pycache__").exists()
@@ -255,7 +255,7 @@ def test_symlinked_script_never_imports_from_the_link_directory(repo, tmp_path):
     real = copy_script(tmp_path, "real")
     links = tmp_path / "bin"
     links.mkdir()
-    (links / "argparse.py").write_text(SHADOW)
+    (links / "argparse.py").write_text(SHADOW, encoding="utf-8", newline="\n")
     (links / "aigate_lite.py").symlink_to(real)
     env = env_for(repo, tmp_path / "pyc-cache")
     for run in (direct, via_loader):

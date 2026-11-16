@@ -120,7 +120,7 @@ def test_the_index_is_cached_by_blob_and_a_tampered_cache_is_ignored(repo):
     assert doc["tool"] == aigate.__version__ and doc["entries"]
     doc["entries"] = {k: {"k": "py", "names": {"parse_date": {"t": "v"}}, "dyn": False, "all": None, "calls": []}
                       for k in doc["entries"]}                                  # forged entries, stale signature
-    store[0].write_text(json.dumps(doc))
+    store[0].write_text(json.dumps(doc), encoding="utf-8", newline="\n")
     change(repo, {"app/h.py": "from app.utils import parse_datex\n"})
     assert hits(deep(repo), "api.unknown_symbol") == [("app/h.py", 1)]            # re-parsed, the forgery was not trusted
 

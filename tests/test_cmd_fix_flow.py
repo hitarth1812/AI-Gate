@@ -106,7 +106,7 @@ def test_fix_all_yes_edits_the_working_tree_and_stages_the_edit(repo):
 
 def test_fix_all_skips_a_file_changed_since_the_last_commit(repo):
     committed(repo, {"a.py": f"x = 1\n{BP}\n"})
-    (repo.path / "a.py").write_text(f"x = 2\n{BP}\n")
+    (repo.path / "a.py").write_text(f"x = 2\n{BP}\n", encoding="utf-8", newline="\n")
     proc = repo.run("fix", "--all", "--yes")
     assert (repo.path / "a.py").read_text() == f"x = 2\n{BP}\n"
     assert "skipped a.py" in proc.stdout and "changes since the last commit" in proc.stdout
@@ -199,10 +199,11 @@ def test_a_staged_check_names_fix_and_how_many(repo):
 
 
 def test_the_next_line_does_not_name_fix_for_a_file_fix_would_refuse(repo):
-    committed(repo, {"a.py": f"x = 1\n{BP}\n"})
-    (repo.path / "a.py").write_text(f"x = 1\n{BP}\ny = 2\n")
-    repo.git("add", "a.py")
-    (repo.path / "a.py").write_text(f"x = 1\n{BP}\ny = 3\n")            # an unstaged edit on top: fix refuses this file
+    committed(repo, {"a.py": "x = 1\n"})                                     # HEAD has no debugger line ...
+    (repo.path / "a.py").write_text(f"x = 1\n{BP}\n", encoding="utf-8", newline="\n")
+    repo.git("add", "a.py")                                                  # ... the STAGED change adds it (check judges added lines)
+    (repo.path / "a.py").write_text(f"x = 1\n{BP}\ny = 3\n", encoding="utf-8", newline="\n")   # unstaged edit on top: fix refuses
+    assert "skipped a.py: has unstaged changes" in repo.run("fix").stdout     # the premise: fix really would refuse this file
     proc = repo.run("check", "--staged", "--offline")
     assert proc.returncode == 1 and "aigate-lite fix" not in proc.stdout
 

@@ -287,7 +287,7 @@ def test_doctor_still_reports_a_different_version(repo):
     assert repo.run("install", "--vendor").returncode == 0
     copy = repo.path / ".aigate" / "aigate_lite.py"
     copy.write_text(copy.read_text(encoding="utf-8").replace(f'__version__ = "{aigate.__version__}"', '__version__ = "0.1.0"', 1),
-                    encoding="utf-8")
+                    encoding="utf-8", newline="\n")
     got = doctor_version(repo)
     assert got["status"] == "warn" and "0.1.0" in got["detail"]
 

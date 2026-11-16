@@ -85,7 +85,7 @@ def test_the_text_report_names_it_too(repo):
 def test_an_absolute_config_path_is_shown_as_given(repo, tmp_path):
     staged(repo)
     cfg = tmp_path / "elsewhere.toml"
-    cfg.write_text(BAD_TOML)
+    cfg.write_text(BAD_TOML, encoding="utf-8", newline="\n")
     res = repo.check("--config", str(cfg), "--offline")
     assert find(res, "gate.config_invalid")[0]["message"].startswith(f"{cfg} is not valid TOML")
 
@@ -128,7 +128,7 @@ def test_unvendor_that_cannot_switch_exits_non_zero_and_leaves_the_hooks(repo):
 def test_unvendor_that_install_refuses_exits_non_zero_and_changes_nothing(repo, monkeypatch, capsys, situation):
     hooks = repo.path / ".git" / "hooks"
     if situation == "foreign-hook":
-        (hooks / "pre-commit").write_text("#!/bin/sh\necho mine\n", newline="\n")
+        (hooks / "pre-commit").write_text("#!/bin/sh\necho mine\n", newline="\n", encoding="utf-8")
     else:
         assert repo.run("install", "--vendor").returncode == 0
         if situation == "pre-commit-framework":
