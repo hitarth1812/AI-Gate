@@ -97,11 +97,13 @@ def test_truncation_only_with_a_width():
 
 
 def test_verbose_keeps_the_detailed_view_and_quiet_is_unchanged():
+    # The name is kept (the gate counts a rename as a deleted test). Since command-level defect E6 (the maintainer's request)
+    # "quiet" is no longer the old detailed view: -q is the compact layout with a `next:` line and no `--no-verify` advice.
     res = CASES["fix_one_rule"][0]()
     verbose = aigate.render_text(res, verbose=True)
     assert "fingerprint " in verbose and "        eval() runs code built at runtime" in verbose
     quiet = aigate.render_text(res, quiet=True)
-    assert "--no-verify" in quiet and "next:" not in quiet
+    assert "--no-verify" not in quiet and "next:" in quiet and "fingerprint " not in quiet
 
 
 def test_cp1252_pipe_gets_ascii_symbols_not_question_marks(repo):

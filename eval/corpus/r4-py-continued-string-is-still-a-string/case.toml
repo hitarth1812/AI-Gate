@@ -1,0 +1,15 @@
+id = "r4-py-continued-string-is-still-a-string"
+source = "seeded"
+language = "python"
+origin = "round 4 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "code.todo"
+path = "src/messages.py"
+
+[[must_not_fire]]
+rule = "suppress.lint"
+path = "src/messages.py"

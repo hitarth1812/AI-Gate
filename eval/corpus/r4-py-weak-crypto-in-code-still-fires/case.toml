@@ -1,0 +1,12 @@
+id = "r4-py-weak-crypto-in-code-still-fires"
+source = "seeded"
+language = "python"
+origin = "round 4 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/accounts.py"
+line = 5
