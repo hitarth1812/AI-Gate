@@ -113,6 +113,8 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: Evaluation corpus
         run: python eval/run.py --check --no-write --families real,seeded,adversarial
+      - name: Two clean repositories from their recorded registry snapshots (the smallest two; clone and replay, no registry lookup)
+        run: python eval/run.py --check --no-write --case clean-go-mux --case clean-go-chi
 
   perf-budget:
     name: performance budget (hook scenarios vs the base branch)

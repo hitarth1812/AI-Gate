@@ -7,6 +7,7 @@ CLI, a scoreboard, and a ratchet that makes any regression fail. Standard librar
 py eval/run.py                  # everything (clones the pinned clean repositories on the first run), writes eval/scoreboard.json
 py eval/run.py --check          # the same, and exit 1 if anything is worse than eval/ratchet.json
 py eval/run.py --families real,seeded,adversarial --check --no-write     # what ci.yml runs (offline, ~3 minutes)
+py eval/run.py --check --no-write --case clean-go-mux --case clean-go-chi   # what ci.yml also runs: two clean repositories, clone + recorded snapshot
 py eval/run.py --case <id>      # one case, with every finding printed (for a person and for an agent)
 py eval/run.py --failures       # list every failing key of the training set
 py eval/run.py --update-ratchet # lock in a gain (refuses if a known case got a NEW failure)
@@ -31,6 +32,41 @@ A case with commit messages also runs `review --message`. A clean repository is 
 Two folders: `eval/corpus/` is the training set. `eval/holdout/` (a stable 20% by hash of the case id) is **never shown to
 a fixer**: the runner prints only totals for it and writes the case list to the git-ignored `eval/.holdout_detail.json`.
 A fix that helps the training set but hurts the holdout is rejected.
+
+### What the holdout shows, and the refresh rule
+
+The runner prints one more line for the holdout, and stores the same counts in `eval/scoreboard.json` as `holdout.by_rule`:
+
+```
+holdout by rule: secrets.hardcoded missed 6 · review.claim_mismatch missed 2 · tests.skip_added too strict 1
+```
+
+It groups the failing holdout keys (one key per case and per person or AI agent) by rule and by kind, and the counts add up to the
+failure total printed on the line above. The kinds are `missed` (a labelled finding was not reported), `too strict` (a result
+harsher than the label), `too lax` (weaker than the label), `false positive`, `block on a clean project`, `unexpected block`,
+`crash`, `gate error` and `agent softer`. A failure that belongs to no rule (a crash, a verdict difference) is counted under
+`(none)`. The line never names a case, a path, a language or a file: that stays in the git-ignored `eval/.holdout_detail.json`.
+It tells a fixer which family of rules is behind, without the answers. Read it once per round and write it in `eval/LOG.md`;
+do not run fixes in a loop against the holdout number.
+
+The holdout refresh rule: every minor version adds at least 10 holdout cases. They are written by an agent session that has seen
+neither the fixes nor the existing holdout, from the feature specs only. Each addition is logged in `eval/LOG.md` with what the
+writer was given. Old holdout cases are never deleted and never moved to the training set.
+
+## The scoreboard
+
+`eval/scoreboard.json` holds the numbers the README accuracy section is generated from (`py scripts/gen_accuracy.py`): the version
+of the tool, the case counts and the results of the training set (`train`), and the same for the holdout (`holdout`), where
+`holdout.by_rule` is the per-rule count above (older files have no such key; the README section then leaves that line out).
+It is produced on the reference runner (GitHub `ubuntu-latest`, Python 3.12) by a full `py eval/run.py` and committed by the
+maintainer, who also runs `--update-ratchet`; a number from one laptop is not the published number.
+`py scripts/release_check.py scoreboard` (a release run for a tag does it too, a pull request does not) fails when the file is for
+another version than `__version__` or its case counts differ from the case folders on disk:
+
+```
+release_check: eval/scoreboard.json is for 0.6.0 with 247 training cases; the tree is 0.6.1 with 265.
+  fix: py eval/run.py && py scripts/gen_accuracy.py
+```
 
 ## `case.toml`
 
@@ -61,7 +97,7 @@ path = "app.py"
 that is huge, binary or oddly encoded is made at run time and never committed.
 
 **No provider-shaped secret and no invisible character is stored.** Write `@@AWS@@`, `@@GHTOKEN@@`, `@@STRIPE@@`,
-`@@SLACK@@`, `@@PEMBEGIN@@`/`@@PEMBODY@@`/`@@PEMEND@@`, `@@ZWSP@@`, `@@RLO@@`, `@@LRI@@`, `@@PDI@@`; `run.py` fills them in.
+`@@SLACK@@`, `@@SLACKKEY@@` (a Slack token with no documentation-placeholder run in it), `@@PEMBEGIN@@`/`@@PEMBODY@@`/`@@PEMEND@@`, `@@ZWSP@@`, `@@RLO@@`, `@@LRI@@`, `@@PDI@@`; `run.py` fills them in.
 (The repository's own hygiene tests scan every tracked file, and `.aigate/lite.toml` ignores `eval/corpus` and
 `eval/holdout` for the self-scan because the corpus is made of mistakes.)
 

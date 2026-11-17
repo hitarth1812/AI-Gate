@@ -105,7 +105,7 @@ lexer's block structure. Recommend (a) now, (b) as a later round. Needs your dec
 Note on A1 and the verifier brief: the verifier brief for a future round must confirm that every A-item change is done
 through the decided wording, not a looser one.
 
-## H. Round 3 proposals (engineer, awaiting the human)
+## H. Round 3 proposals (engineer; item 1 decided, see below)
 
 1. **`r3-properties-key` expects `secrets.hardcoded` BLOCK, but the token it writes is a documentation placeholder.** Not a
    `.properties` problem: the case token `@@SLACK@@` (see `SUBST` in `eval/run.py`; it is not written out here) matches the
@@ -117,3 +117,14 @@ through the decided wording, not a looser one.
    keep the token and change the label to `secrets.generic` fix; (c) narrow `DOC_PLACEHOLDER`, which would turn BLOCK every
    fake-looking token with a digit run or the alphabet in it (a wide change that needs its own FP run). Recommend **(a)**. No
    tool change was made: weakening or widening the placeholder rule for one case is not a root-cause fix.
+
+   **Decided by the maintainer on 2026-11-17: option (a).** Applied: the generator changed, the label did not. `eval/run.py`
+   gained one more placeholder, `@@SLACKKEY@@`, a Slack token with no placeholder run in it (it is built from pieces at run time,
+   like the others, so no tracked file holds a token), and `eval/tools/seeds/seed_v3.py` writes it in this one case. `@@SLACK@@`
+   is unchanged, so every other case that uses it is unchanged. The case folder was regenerated from the generator for this
+   case only; `git diff` of it shows one changed line, in `after/src/main/resources/application.properties` (`@@SLACK@@` became
+   `@@SLACKKEY@@`). `case.toml` (id, labels, line, action) is byte for byte as before, and the id still falls into the training
+   set by the same hash rule (the generator asserts it). The documented-placeholder rule in `aigate_lite.py` was not touched.
+   `tests/test_eval_harness.py` has a test that runs this case through the real CLI for a person and an agent and expects its
+   label to be met. The ratchet still lists the two old failure keys of this case: the maintainer removes them with
+   `py eval/run.py --update-ratchet`.

@@ -30,7 +30,10 @@ F, PY_BASE, GO_BASE, TS_BASE = v1.F, v1.PY_BASE, v1.GO_BASE, v1.TS_BASE
 ORIGIN = "round 3 authored from README rules (no tool output)"
 AKIA, T1T2 = "@@AKIA@@", "@@AKT1@@@@AKT2@@"          # "AKIA" and "QWERTYUIOPASDFGH" (the tail of @@AWS@@)
 BLOCK = ("block", "block")
-TOKEN = {"AWS": "@@AWS@@", "GH": "@@GHTOKEN@@", "STRIPE": "@@STRIPE@@", "SLACK": "@@SLACK@@"}
+# SLACK is the token every other case that writes a Slack token uses; it carries a documentation-placeholder run (digits 12345678, the
+# alphabet), which the tool drops in every language. SLACKKEY has none: it is the token for the case that expects a BLOCK for a Slack
+# token in a .properties file (eval/LABEL_CHANGES.md H, decided by the maintainer: the generator changes, the label does not).
+TOKEN = {"AWS": "@@AWS@@", "GH": "@@GHTOKEN@@", "STRIPE": "@@STRIPE@@", "SLACK": "@@SLACK@@", "SLACKKEY": "@@SLACKKEY@@"}
 PLAIN = {"python": PY_BASE, "go": GO_BASE, "typescript": TS_BASE, "javascript": TS_BASE}
 
 
@@ -75,7 +78,7 @@ def hardcoded():
     adv("r3-yaml-ci-key-in-curl", "yaml", {"ci/pipeline.yml": ci}, [F("secrets.hardcoded", "ci/pipeline.yml", "curl", *BLOCK)])
     adv("r3-docker-run-key", "dockerfile", {"Dockerfile": f"FROM python:3.12-slim\nRUN aws configure set aws_access_key_id {TOKEN['AWS']}\n"},
         [F("secrets.hardcoded", "Dockerfile", "aws configure", *BLOCK)])
-    adv("r3-properties-key", "properties", {"src/main/resources/application.properties": f"app.name=shop\nnotify.slack.token={TOKEN['SLACK']}\n"},
+    adv("r3-properties-key", "properties", {"src/main/resources/application.properties": f"app.name=shop\nnotify.slack.token={TOKEN['SLACKKEY']}\n"},
         [F("secrets.hardcoded", "src/main/resources/application.properties", "notify.slack.token", *BLOCK)])
     adv("r3-toml-key", "toml", {"config/deploy.toml": f'[registry]\nurl = "https://ghcr.io"\ntoken = "{TOKEN["GH"]}"\n'},
         [F("secrets.hardcoded", "config/deploy.toml", "token", *BLOCK)])

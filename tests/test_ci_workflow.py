@@ -159,3 +159,21 @@ def test_the_tool_itself_still_has_no_runtime_dependency():
 def test_the_release_checklist_requires_a_green_full_run_on_the_release_commit():
     text = text_of(ROOT / "docs" / "dev" / "RELEASING.md")
     assert "ci-full" in text and re.search(r"green", text) and "release commit" in text
+
+
+# ---- a clean repository from its recorded snapshot, in every pull request --------------------------------------------
+
+def test_the_evaluation_job_also_audits_the_two_smallest_pinned_clean_repositories_from_their_snapshots():
+    # the nightly run is the only other place that audits a clean repository; its first run failed on every leg, so a
+    # broken snapshot must show up in the pull request instead. The two smallest recorded snapshots of the training cases.
+    job = code(jobs(text_of(CI))["eval"])
+    steps = [s for s in re.findall(r"run: (.*eval/run\.py.*)", job) if "--case" in s]
+    assert len(steps) == 1, steps
+    chosen = re.findall(r"--case (\S+)", steps[0])
+    assert len(chosen) == 2 and "--check" in steps[0] and "--no-write" in steps[0] and "--update-ratchet" not in steps[0], steps[0]
+    sizes = {d.name: (ROOT / "eval" / "snapshots" / f"{d.name}.json").stat().st_size
+             for d in (ROOT / "eval" / "corpus").glob("clean-*") if (ROOT / "eval" / "snapshots" / f"{d.name}.json").is_file()}
+    assert set(chosen) == set(sorted(sizes, key=sizes.get)[:2]), (chosen, sizes)
+    for name in chosen:
+        assert (ROOT / "eval" / "corpus" / name / "case.toml").is_file(), name        # a training case, not a holdout case
+    assert "ubuntu-latest" in job and "timeout-minutes: 30" in job

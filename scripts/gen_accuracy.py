@@ -36,8 +36,18 @@ def holdout_lines(h: dict) -> list:
                        ("FALSE_BLOCK", "block on a clean project"), ("UNEXPECTED_BLOCK", "unexpected BLOCK")):
         if kinds.get(key):
             parts.append(f"{label} {kinds[key]}")
-    return [f"- **Holdout (cases the tool was never tuned on): {head}; {', '.join(parts)}.** A \"missed\" is a finding a labelled case "
-            "expects and the tool did not report; \"too strict\" is a result harsher than the label."]
+    lines = [f"- **Holdout (cases the tool was never tuned on): {head}; {', '.join(parts)}.** A \"missed\" is a finding a labelled case "
+             "expects and the tool did not report; \"too strict\" is a result harsher than the label."]
+    if h.get("by_rule"):             # older scoreboards have no such key
+        lines.append(f"- **Holdout failures by rule** (counts only, no case is named; a case that fails for a person and for an AI agent counts twice): "
+                     f"{by_rule_text(h['by_rule'])}.")
+    return lines
+
+
+def by_rule_text(by_rule: dict) -> str:
+    """The same text as the `holdout by rule:` line of eval/run.py."""
+    pairs = sorted(((rule, kind, n) for rule, kinds in by_rule.items() for kind, n in kinds.items()), key=lambda t: (-t[2], t[0], t[1]))
+    return " · ".join(f"{rule} {kind} {n}" for rule, kind, n in pairs) or "none"
 
 
 def render(board: dict) -> str:
