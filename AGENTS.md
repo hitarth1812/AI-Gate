@@ -19,7 +19,8 @@ On Windows use `py` in place of `python3`.
 ```bash
 python3 -m pip install -e .[dev]                  # or: python3 -m pip install -r requirements-dev.txt
 python3 -m pyflakes aigate_lite.py
-python3 -m pytest -q                              # about 25 minutes; registry calls use tests/registry_fixture.json
+python3 -m pytest -q -n auto -m "not serial"      # in parallel; 5.4 to 6.3 minutes on a 20-thread Windows machine (4 runs)
+python3 -m pytest -q -m serial                    # the timing-sensitive tests, one at a time; 0.4 to 1.1 minutes
 python3 eval/run.py --check --no-write --families real,seeded,adversarial     # the accuracy yardstick, offline
 python3 scripts/gen_docs.py --check               # docs/RULES.md matches the rule table
 python3 scripts/gen_accuracy.py --check           # the README accuracy section matches eval/scoreboard.json
@@ -30,6 +31,11 @@ AIGATE_PROVENANCE=human python3 aigate_lite.py check --all --offline -q   # the 
   that passes on one system only is a bug in the test. Write test files with `repo.write(...)` or
   `write_text(..., encoding="utf-8", newline="\n")` (Windows would write CRLF), and make a finding's line part of the *staged*
   change. See CONTRIBUTING.md.
+- The two pytest commands above are what CI runs (registry calls use `tests/registry_fixture.json`). A plain
+  `python3 -m pytest -q` runs everything in one process and took 31 minutes 17 seconds on the same machine; use it to
+  debug an order- or parallel-only failure. A test that asserts a wall-clock limit gets `@pytest.mark.serial` with a
+  one-line reason; mark nothing else serial (isolate its temporary directories instead). `pytest-xdist` is a development
+  tool only, pinned in `requirements-dev.txt`.
 - Delete `aigate_lite.egg-info/` (left by a build) before running pytest: the suite refuses to start next to it.
 - The tests clear the agent variables (`CLAUDECODE`, `AI_AGENT`, ...) for the commands they run. A tool you start yourself
   from an agent shell sees them and behaves as for an agent; that is expected.

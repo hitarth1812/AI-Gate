@@ -6,14 +6,22 @@ no runtime dependency, no network use beyond the PyPI, npm, Go proxy and OSV loo
 ## Set up and run the checks
 
 ```bash
-python -m pip install -e .[dev]                   # pytest, pyflakes, hypothesis (pinned); the tool itself needs nothing
+python -m pip install -e .[dev]                   # pytest, pytest-xdist, pyflakes, hypothesis (pinned); the tool itself needs nothing
                                                   # (CI installs the same pins from requirements-dev.txt)
 python -m pyflakes aigate_lite.py
-python -m pytest -q                               # about 25 minutes; registry calls use tests/registry_fixture.json
+python -m pytest -q -n auto -m "not serial"       # in parallel; 5.4 to 6.3 minutes on a 20-thread Windows machine (4 runs)
+python -m pytest -q -m serial                     # the timing-sensitive tests, one at a time; 0.4 to 1.1 minutes
 python eval/run.py --check --families real,seeded,adversarial     # the accuracy yardstick, offline, a few minutes
 ```
 
 On Windows use `py` in place of `python`.
+
+The two pytest commands are what CI runs (registry calls use `tests/registry_fixture.json`). A plain `python -m pytest -q`
+runs everything in one process and took 31 minutes 17 seconds on the same machine. A test that asserts a wall-clock
+limit carries `@pytest.mark.serial` with a one-line reason, so that CPU contention from the parallel tests cannot make it
+fail; give every other test its own temporary directory (`tmp_path`, the `repo` fixture) rather than marking it serial.
+Pull requests run four CI legs (Ubuntu 3.11 and 3.14, Windows 3.12, macOS 3.12) after a quick check of pyflakes, the
+generated docs and the self-scan; the full 12-leg matrix runs every night and by hand (`ci-full`) before a release.
 
 **Run the suite on Linux (WSL2) as well as on Windows before you push.** CI runs Ubuntu, macOS and Windows on Python 3.11-3.14,
 and a test that only passes on one of them is a bug in the test. The usual cause is line endings: `Path.write_text` writes

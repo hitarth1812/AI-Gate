@@ -39,8 +39,12 @@ pick a tag as the branch.
 
 1. Set `__version__` in `aigate_lite.py` (for example `0.5.0`), and in `CHANGELOG.md` replace "unreleased" in that version's
    heading with the date. A version that is on PyPI can never be uploaded again.
-2. Run the tests, open a pull request and merge it into `main`.
-3. Tag the merge commit and push the tag:
+2. Run the tests, open a pull request and merge it into `main`. Pull requests run only four legs (Ubuntu 3.11 and 3.14,
+   Windows 3.12, macOS 3.12) to stay fast.
+3. **Run the full matrix on the release commit and wait for it to be green.** Actions -> `ci-full` -> Run workflow, branch
+   `main`: all 12 legs (Ubuntu, macOS and Windows on Python 3.11 to 3.14). The same workflow runs every night, and a red
+   night opens an issue; a green night is not enough unless it ran on the release commit. Do not tag while any leg is red.
+4. Tag the merge commit and push the tag:
 
    ```bash
    git switch main && git pull
@@ -48,9 +52,9 @@ pick a tag as the branch.
    git push origin v0.5.0
    ```
 
-4. Open the run (Actions → release). When `build` and `test-wheel` are green, `publish` waits for the `pypi` environment:
+5. Open the run (Actions → release). When `build` and `test-wheel` are green, `publish` waits for the `pypi` environment:
    open it and choose *Approve and deploy*.
-5. Check the result from a clean place:
+6. Check the result from a clean place:
 
    ```bash
    pipx install aigate-lite==0.5.0     # or: pip install aigate-lite==0.5.0 / uvx aigate-lite@0.5.0 --version

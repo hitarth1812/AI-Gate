@@ -5,6 +5,8 @@ import sys
 import time
 import urllib.error
 
+import pytest
+
 from conftest import SCRIPT, aigate
 
 STATUSES = ("fail", "warn", "ok")
@@ -169,6 +171,7 @@ def test_text_output_has_one_next_line_and_ascii_fallback(repo):
     assert "?" not in "".join(ln[:2] for ln in lines if ln and not ln.startswith(("next", " ")))
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 def test_offline_doctor_is_fast(repo):
     repo.run("install")
     start = time.perf_counter()

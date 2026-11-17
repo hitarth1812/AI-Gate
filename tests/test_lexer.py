@@ -215,6 +215,7 @@ def test_code_text_blanks_strings_and_comments_but_keeps_newlines():
     assert lx.code_text().count("}") == 2 and lx.code_text().count("\n") == 2
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 def test_lexing_is_linear_enough():
     import time
     text = ("func f() { x := \"a // b\" // c\n y := `d` }\n" * 20000)
@@ -225,6 +226,7 @@ def test_lexing_is_linear_enough():
 
 # ---------------------------------------------------------------- review fixes: hostile input stays fast
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 def test_structure_analysis_survives_adversarial_whitespace_and_comments():
     import time
     spec = aigate.language_for("a.ts")
@@ -239,6 +241,7 @@ def test_structure_analysis_survives_adversarial_whitespace_and_comments():
         assert time.perf_counter() - t < 6.0
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 def test_sibling_loops_do_not_make_the_depth_quadratic():
     import time
     spec = aigate.language_for("a.go")
