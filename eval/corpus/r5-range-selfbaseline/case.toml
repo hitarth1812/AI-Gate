@@ -1,0 +1,17 @@
+id = "r5-range-selfbaseline"
+source = "seeded"
+language = "python"
+origin = "authored for the committed baseline in a range: the change touches an unaccepted finding and accepts it in the same change"
+who = "person"
+mode = "range"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.eval"
+path = "app.py"
+line = 2
+
+[[must_fire]]
+rule = "gate.baseline_changed"
+path = ".aigate/baseline.json"
+action = "warn"

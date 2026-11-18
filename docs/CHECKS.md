@@ -13,9 +13,9 @@ settings, is in [RULES.md](RULES.md) (generated from the code).
 | Placeholder or unsafe code | `... rest of the code` comments, `...` bodies, swallowed exceptions, debugger leftovers, syntax errors (fix). `eval`/`exec`, `shell=True`, pickle and unsafe YAML, SQL built with f-strings, `verify=False` (fix). Debug mode, wildcard CORS, weak crypto, raw HTML (warn). |
 | Silenced checkers | `# nosec`, `# type: ignore`, `@ts-ignore`, `# pragma: no cover`, whole-file disables (fix). `# noqa`, `eslint-disable-line` (warn). In `[paths] sensitive` these are one step stricter. |
 | Bloat and time complexity | Long or complex functions, long files, big diffs, duplicated blocks, unused imports (warn). Loops nested 3 or more deep, nested loops over the same list, `x in list` / `.pop(0)` / sorting inside loops, network or DB calls inside loops, branching recursion without a cache (warn). |
-| Scope creep | `scope.forbidden_path` (block). `scope.out_of_scope` against a declared task scope (fix). `gate.config_changed` (warn). |
+| Scope creep | `scope.forbidden_path` (block). `scope.out_of_scope` against a declared task scope (fix). `gate.config_changed` (warn). `gate.baseline_changed` (warn): the change adds baseline entries; they do not apply to that change. |
 
-`aigate-lite explain` lists all 75 rules. `aigate-lite explain <rule>` shows how to change or allow one.
+`aigate-lite explain` lists all 76 rules. `aigate-lite explain <rule>` shows how to change or allow one.
 
 **Language coverage.** Python gets every check, using its AST. Go and JavaScript/TypeScript are read with a lexer
 (strings and comments are never mistaken for code) and get secrets, dependencies, tests, suppressions,

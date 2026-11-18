@@ -36,7 +36,7 @@ aigate-lite review               # read the staged change like a careful reviewe
 
 The full table (each kind of mistake, its rules and their default actions), what each language gets, and the size and
 copy-paste rules that are off for people by default are in [docs/CHECKS.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CHECKS.md).
-`aigate-lite explain` lists all 75 rules. `aigate-lite explain <rule>` shows how to change or allow one.
+`aigate-lite explain` lists all 76 rules. `aigate-lite explain <rule>` shows how to change or allow one.
 
 When an AI agent commits, the gate is stricter ([docs/AI_AGENTS.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/AI_AGENTS.md)).
 `aigate-lite review` also reads the rest of the repository for invented APIs, broken callers and claims the diff does not

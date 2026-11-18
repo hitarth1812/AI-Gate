@@ -1,0 +1,18 @@
+id = "r5-push-newbranch-baselined-agent"
+source = "seeded"
+language = "python"
+origin = "authored for the committed baseline on a first push: an AI agent gets no baseline, and may not touch it"
+who = "agent"
+mode = "push"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.eval"
+path = "app.py"
+line = 2
+
+[[must_fire]]
+rule = "scope.forbidden_path"
+path = ".aigate/baseline.json"
+action = "block"
+agent_action = "block"

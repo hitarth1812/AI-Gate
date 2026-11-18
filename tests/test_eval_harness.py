@@ -48,7 +48,7 @@ def test_every_case_is_well_formed():
         if c.family == "clean":
             assert re.fullmatch(r"[0-9a-f]{40}", m["sha"]) and m["repo"].startswith("https://github.com/")
             continue
-        assert c.mode in ("staged", "range", "merge", "detached", "empty")
+        assert c.mode in ("staged", "range", "merge", "detached", "empty", "push")
         for spec_ in c.must_fire + c.must_not_fire:
             assert spec_["rule"] and spec_["path"], c.id
         for spec_ in c.must_fire:
@@ -545,3 +545,35 @@ def test_the_new_placeholder_is_filled_in_with_a_slack_token_that_has_no_placeho
     token = ev.fill(b"@@SLACKKEY@@").decode()
     assert token.startswith("xox") and not re.search(r"12345678|abcdefgh|example|placeholder|xxxx", token, re.I)
     assert "@@" not in token and token != ev.fill(b"@@SLACK@@").decode()       # the old token is still there for the other cases
+
+
+# ---------------------------------------------------------------------------------------------------- mode = "push"
+
+def test_a_push_case_is_built_as_two_commits_and_run_as_a_push_to_an_empty_remote(tmp_path):
+    folder = tmp_path / "case-push-demo"
+    (folder / "before").mkdir(parents=True)
+    (folder / "after").mkdir()
+    (folder / "before" / "a.py").write_text("def f(y):\n    return " + "ev" + "al(y)\n", encoding="utf-8", newline="\n")
+    (folder / "after" / "b.py").write_text("def g(y):\n    return " + "ev" + "al(y)\n", encoding="utf-8", newline="\n")
+    (folder / "case.toml").write_text('id = "case-push-demo"\nsource = "seeded"\nlanguage = "python"\norigin = "test"\n'
+                                      'who = "person"\nmode = "push"\nlabel_status = "frozen"\n\n[[must_fire]]\n'
+                                      'rule = "security.eval"\npath = "b.py"\nline = 2\n', encoding="utf-8", newline="\n")
+    case = ev.Case(folder, holdout=False)
+    (tmp_path / "built").mkdir()
+    repo = ev.build_repo(case, tmp_path / "built", ev.run_env("person", tmp_path))
+    assert ev.git(repo, "rev-list", "--count", "HEAD").stdout.decode().strip() == "2"
+    res = ev.run_case(case, ROOT / "aigate_lite.py", "person", tmp_path / "cache", tmp_path / "run")
+    assert res["crash"] is None, res
+    assert res["data"]["label"].startswith("push"), res["data"]["label"]
+    assert {(f["rule"], f["path"]) for f in res["findings"] if ev.active(f)} >= {("security.eval", "a.py"), ("security.eval", "b.py")}
+
+
+def test_the_push_and_range_baseline_cases_meet_their_labels(tmp_path):
+    # three training cases for a committed baseline on a push or in a range; each runs ONE case through the real CLI
+    ids = {"r5-push-newbranch-baselined", "r5-push-newbranch-baselined-agent", "r5-range-selfbaseline"}
+    cases = ev.load_cases(only=ids)
+    assert {c.id for c in cases} == ids and all(not c.holdout for c in cases)
+    results = {(c.id, who): ev.run_case(c, ROOT / "aigate_lite.py", who, tmp_path / "cache", tmp_path)
+               for c in cases for who in ("person", "agent")}
+    summary = ev.summarize(cases, results)
+    assert summary["failing"] == [] and summary["overall"]["agent_softer"] == 0, summary["failing"]

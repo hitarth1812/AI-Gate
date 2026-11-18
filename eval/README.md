@@ -76,7 +76,7 @@ source = "seeded"                   # real | seeded | adversarial | clean
 language = "python"
 origin = "..."                      # repo + commit SHA, or "ATLAS_OS audit ..."
 who = "both"                        # person | agent | both: whom the labels apply to (the invariants always apply to both)
-mode = "staged"                     # staged | range | merge | detached | empty | clean
+mode = "staged"                     # staged | range | push | merge | detached | empty | clean
 label_status = "frozen"             # real cases start as "proposed" until the human approves the triage sheet
 messages = ["add tests for x"]      # commit messages, for review.claim_mismatch
 contested = false                   # excluded from every metric and from the ratchet until the human decides
@@ -91,7 +91,9 @@ rule = "secrets.hardcoded"
 path = "app.py"
 ```
 
-`before/` is committed as the base, `after/` is overlaid and staged. Extra keys: `delete = [...]`, `[[rename]] from/to`,
+`before/` is committed as the base, `after/` is overlaid and staged. With `mode = "range"` the overlay is committed too and the gate
+checks `HEAD~1..HEAD`; with `mode = "push"` it is committed the same way and the gate runs as the pre-push hook would for the first push of a
+new branch to a remote that holds none of the history (`check --push`, fed `refs/heads/main <HEAD> refs/heads/main 000...0`). Extra keys: `delete = [...]`, `[[rename]] from/to`,
 `[[symlink]] path/target`, `[[gitlink]] path/sha`, `[[transform]] path/kind` (`crlf mixed latin1 bom nul utf16`) and
 `[[generate]] path/kind/size` (`long_line binary deep_json deep_python many_lines many_files big_text empty`): content
 that is huge, binary or oddly encoded is made at run time and never committed.

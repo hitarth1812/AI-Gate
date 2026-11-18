@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "tool": "0.6.1",
+  "entries": [
+    {
+      "rule": "security.eval",
+      "path": "app.py",
+      "fingerprint": "8fe96e2c00b6fa76"
+    }
+  ]
+}

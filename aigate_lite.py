@@ -126,6 +126,8 @@ _RULE_ROWS = [
      "Unstage it, or widen the scope: aigate-lite scope add '<glob>'"),
     ("gate.config_changed", "warn", "medium", 1.0, "Gate or hook configuration changed",
      "Review this change: loosening the gate is an easy way for an agent to get a commit through."),
+    ("gate.baseline_changed", "warn", "medium", 1.0, "The change adds baseline entries",
+     "Entries added in a change apply to later changes only. Review them: a finding accepted here is hidden from then on."),
     # tests
     ("tests.assertions_removed", "fix", "high", 0.85, "Test lost assertions or cases",
      "Restore them, or confirm the behaviour change and allow it once: AIGATE_ALLOW=tests.assertions_removed git commit ..."),
@@ -816,6 +818,7 @@ DEFAULT_CONFIG = {
              "trusted_sources": [], "import_map": {}, "typosquat_min_weekly_downloads": 1000},
     "provenance": {"agent_env": [], "default": "human"},
     "review": {"test_map": {}},          # source glob -> test glob ({stem}, {dir}, {ext}) for tests.missing_for_change
+    "baseline": {"apply_on_push": True},        # a person's push or range honours the committed baseline (see USAGE.md)
     "commands": [],
     "allow": [],
 }
@@ -1041,6 +1044,9 @@ def validate_config(cfg: dict, problems: list) -> None:
     if not isinstance(cfg["gate"].get("cache", False), bool):
         problems.append("gate.cache must be true or false")
         cfg["gate"]["cache"] = False
+    if not isinstance(cfg["baseline"].get("apply_on_push", True), bool):
+        problems.append("baseline.apply_on_push must be true or false")
+        cfg["baseline"]["apply_on_push"] = True                   # not false: false restores the softer 0.6 behaviour
     if cfg["provenance"].get("default") not in ("human", "agent"):
         problems.append("provenance.default must be human or agent")
         cfg["provenance"]["default"] = "human"
@@ -1274,6 +1280,7 @@ class Context:
         self.parse_failures: set = set()
         self.cache: dict = {}          # per-run memo shared by checkers
         self.baseline: set = set()     # (rule, path, fingerprint) accepted by .aigate/baseline.json
+        self.baseline_whole = False    # a person's first push of a branch the remote has none of: judged like an audit
 
     @property
     def agent(self) -> bool:
@@ -6441,8 +6448,9 @@ class Result:
 def _baseline_accepts(ctx, f, baseline, granted) -> bool:
     """Whether .aigate/baseline.json covers `f`. In `check --all` the numbered fingerprint must be listed. In
     staged/range/push checks only findings on changed lines are seen, so twin numbers mean nothing there: a
-    baseline group (rule, file, base key) accepts at most as many added findings as the change removed."""
-    if getattr(ctx, "full", False):
+    baseline group (rule, file, base key) accepts at most as many added findings as the change removed. A person's
+    first push of a branch the remote holds none of (every line is "added") is judged like the audit it is."""
+    if getattr(ctx, "full", False) or getattr(ctx, "baseline_whole", False):
         return (f.rule, f.path, f.fingerprint) in baseline
     if (f.rule, f.path, fingerprint_v2(f.rule, f.path, f.base_key or f.key or f.message)) not in baseline:
         return False
@@ -8990,12 +8998,15 @@ def range_error(repo, spec, missing) -> GitError:
 
 
 def plan_runs(repo, args, env) -> list:
-    """Each run: (label, base, head, commits)."""
+    """Each run: (label, base, head, commits, baseline_from). `baseline_from` is where a person's committed baseline is
+    read for the run: a commit (the base the remote or the target already has), "tip" (a push whose commits the remote
+    has none of, and no remote-tracking ref reaches: the baseline at the tip, as an audit would read it), or None (no base
+    the remote is known to have, or no baseline to read: nothing applies, for a person and for an AI agent)."""
     if getattr(args, "all", False):
         head = repo.commit("HEAD")
         if not head:
             raise GitError("check --all needs at least one commit", "make a first commit")
-        return [("full tree", repo.empty_tree(), head, [])]
+        return [("full tree", repo.empty_tree(), head, [], None)]
     if args.range:
         spec = args.range
         a, b = re.split(r"\.\.\.?", spec, maxsplit=1) if ".." in spec else (spec, "HEAD")
@@ -9005,7 +9016,7 @@ def plan_runs(repo, args, env) -> list:
             raise range_error(repo, spec, a if not start else b)
         base = run_git(repo.root, "merge-base", start, head, check=False).strip() or start
         commits = repo.git("rev-list", "--reverse", "--no-merges", f"{start}..{head}").split()
-        return [(f"range {spec}", base, head, commits)]
+        return [(f"range {spec}", base, head, commits, base)]
     if args.push:
         refs = []
         if not sys.stdin.isatty():
@@ -9026,6 +9037,7 @@ def plan_runs(repo, args, env) -> list:
             if remote:
                 base = run_git(repo.root, "merge-base", remote, head, check=False).strip() or remote
                 commits = repo.git("rev-list", "--reverse", "--no-merges", f"{remote}..{head}").split()
+                baseline_from = base                       # what the remote already has
             else:
                 not_remotes = [f"--remotes={args.remote}"] if args.remote else ["--remotes"]
                 commits = repo.git("rev-list", "--reverse", "--no-merges", head, "--not", *not_remotes).split()
@@ -9033,10 +9045,25 @@ def plan_runs(repo, args, env) -> list:
                     continue
                 parent = repo.commit(commits[0] + "^")
                 base = parent or repo.empty_tree()
-            runs.append((f"push {local_ref.replace('refs/heads/', '')}", base, head, commits))
+                if not os.path.exists(os.path.join(repo.root, BASELINE_PATH)):
+                    baseline_from = None                   # nothing on disk to read: skip the git calls below
+                elif not re.fullmatch(r"0+", remote_sha):
+                    baseline_from = None                   # the remote has this branch, only not here: it is not empty
+                elif not parent:
+                    # the remote holds none of this history: only when the pushed commit shares no commit with any
+                    # remote-tracking ref (of any remote). A branch that merged an unrelated root into known history, or
+                    # that started from an older commit of a branch the remote has since moved past, is not that case.
+                    total = repo.git("rev-list", "--count", head).strip()
+                    unknown = repo.git("rev-list", "--count", head, "--not", "--remotes").strip()
+                    baseline_from = "tip" if total == unknown else None
+                elif repo.git("rev-list", "-n1", parent, "--not", *not_remotes).strip():
+                    baseline_from = None                   # a base no remote is known to have (a local merge): no baseline
+                else:
+                    baseline_from = parent
+            runs.append((f"push {local_ref.replace('refs/heads/', '')}", base, head, commits, baseline_from))
         return runs
     head = repo.commit("HEAD")
-    return [("staged changes", head or repo.empty_tree(), None, [])]
+    return [("staged changes", head or repo.empty_tree(), None, [], None)]
 
 
 NOTHING_STAGED_HINT = ("next: to check commits already made use `aigate-lite check --range BASE..HEAD`; for every tracked file "
@@ -9071,6 +9098,36 @@ def _count_fixable(repo, findings, full) -> int:
     return sum(1 for f in cand if _is_handled(plan, f))
 
 
+def baseline_on_push(repo, tip_cfg, baseline_from, from_file) -> tuple:
+    """(applies, problems): whether a person's push or range honours the committed baseline. With a base commit the
+    `[baseline] apply_on_push` of the BASE decides and the change's own value is ignored (a change cannot switch the
+    option off for itself, nor on); a first push to an empty remote ("tip") reads the tip's value (off there only makes the
+    result stricter); `--config FILE` is read alone. With no baseline source (None) the key is not read at all."""
+    if baseline_from is None:
+        return True, []                               # nothing applies; the key must not bring an older rule back
+    if from_file or baseline_from == "tip":
+        return bool(tip_cfg["baseline"]["apply_on_push"]), []
+    base_cfg = load_config(repo, baseline_from)
+    return bool(base_cfg["baseline"]["apply_on_push"]), [f"{base_cfg.origin}: {p}" for p in base_cfg.problems
+                                                         if p.startswith("baseline.apply_on_push")]
+
+
+def accepted_on_push(repo, tip, baseline_from, only_run) -> tuple:
+    """(entries that may hide this run's findings, whole, added, problems) for a person's push or range. `tip` is the
+    baseline committed at the tip. A range uses the entries present at its base AND at the tip, on edited lines: entries
+    the change adds do not apply to it (`added` counts them). A push whose commits the remote holds none of has no base;
+    for one ref alone the tip baseline is read as an audit reads it (numbered fingerprints, `whole`), without any secrets
+    entry. A base no remote is known to have lends nothing."""
+    if baseline_from == "tip":
+        if not only_run:
+            return set(), False, 0, []
+        return {e for e in tip if not e[0].startswith("secrets.")}, True, 0, []
+    if baseline_from is None:
+        return set(), False, 0, []
+    at_base, problems = load_baseline(repo, baseline_from)
+    return at_base & tip, False, len(tip - at_base), problems
+
+
 def run_check(args, env, collect=False):
     """Run the gate and print the report; with collect=True return the Result instead (int when nothing ran)."""
     started = time.monotonic()
@@ -9102,22 +9159,26 @@ def run_check(args, env, collect=False):
     findings, notes, stats, label = [], [], Counter(), runs[0][0] if len(runs) == 1 else f"push ({len(runs)} refs)"
     provenance, cfg = quick, pre
     baseline_pending = False
-    for run_label, base, head, commits in runs:
+    any_agent, on_push_path, per_run, note_source = False, False, [], None
+    for run_label, base, head, commits, baseline_from in runs:
         messages, authors, parents = _commit_info(repo, commits) if commits else ((), (), {})
         provenance = detect_provenance(env, pre["provenance"]["agent_env"], pre["provenance"]["default"],
                                        messages, authors)
-        if args.config:
+        agent = provenance[0] == "agent"
+        any_agent = any_agent or agent
+        ranged = head is not None and not full        # a push or a range: --config then picks the config, never the baseline
+        if args.config and not ranged:
             cfg, bl_source = pre, "worktree"
-        elif provenance[0] == "agent":                # an agent cannot loosen the gate for its own change
+        elif agent:                                   # an agent cannot loosen the gate for its own change
             # its change's base; for `check --all` (an audit of HEAD, not a change) HEAD itself
             source = (repo.commit("HEAD") or "") if head is None else head if full else base
             committed = bool(source) and source != repo.empty_tree()
-            cfg = load_config(repo, source) if committed else load_config(repo, "__none__")
+            cfg = pre if args.config else load_config(repo, source) if committed else load_config(repo, "__none__")
             bl_source = source if committed else None
         elif head is None:
             cfg, bl_source = pre, ""                  # the baseline as staged, not whatever is on disk
         else:
-            cfg, bl_source = load_config(repo, head), head
+            cfg, bl_source = (pre if args.config else load_config(repo, head)), head
         changes = collect_changes(repo, base, head)
         if full:
             changes = [fc for fc in changes if not path_matches(fc.path, cfg["paths"]["ignore"])]
@@ -9148,9 +9209,30 @@ def run_check(args, env, collect=False):
             bl_source = None                          # no git reads for repositories without a baseline
         elif not baseline_applied(repo, bl_source):
             baseline_pending = True                   # written but not committed (or staged): the gate does not read it
+        if ranged and baseline_from is None:
+            bl_source = None                          # a push with no baseline source: nothing applies, to anyone
         ctx.baseline, bl_problems = load_baseline(repo, bl_source)
+        if ranged and agent and bl_source and bl_source != head:
+            ctx.baseline &= load_baseline(repo, head)[0]          # what a person reads too: the base's AND the tip's entries
         if bl_source == "" and repo.read(":" + BASELINE_PATH) != repo.read("HEAD:" + BASELINE_PATH):
             bl_problems.append(f"using the staged {BASELINE_PATH}, which differs from HEAD")
+        applies = False
+        if ranged and not agent and bl_source:
+            applies, apply_problems = baseline_on_push(repo, cfg, baseline_from, bool(args.config))
+            bl_problems += apply_problems
+        if applies:
+            # a person's push or range: only what was already accepted where the change starts (and still is), and nothing
+            # the change itself adds; see accepted_on_push
+            on_push_path = True
+            tip = ctx.baseline if bl_source == head else load_baseline(repo, head)[0]      # always the tip's own baseline
+            ctx.baseline, ctx.baseline_whole, added, more = accepted_on_push(repo, tip, baseline_from, len(runs) == 1)
+            bl_problems += more
+            if added:
+                findings.append(make("gate.baseline_changed", BASELINE_PATH, None,
+                                     f"this change adds {added} baseline entr{'y; it does' if added == 1 else 'ies; they do'} "
+                                     "not apply to this change", key="added"))
+            note_source = note_source or (head if baseline_from == "tip" else baseline_from)
+        per_run.append(ctx.baseline)
         notes += [p for p in bl_problems if p not in notes]
         counted = [fc for fc in changes if not ctx.ignored(fc.path)]
         stats["files"] += len(counted)
@@ -9205,7 +9287,16 @@ def run_check(args, env, collect=False):
             notes.append(untracked_msg)
 
     final_ctx = ctx
+    if len(runs) > 1 and (any_agent or on_push_path):  # one verdict covers every ref: only what each one accepts, for an agent too
+        final_ctx.baseline = set.intersection(*per_run)
     findings = apply_policy(_one_block_per_key_file(findings), final_ctx, env)
+    if on_push_path and not any_agent:
+        accepted = sum(1 for f in findings if f.allowed == "baseline")
+        if accepted:
+            where = repo.git("log", "-1", "--format=%H", note_source, "--", BASELINE_PATH, check=False).strip()[:7] \
+                if note_source else ""
+            notes.append(f"{accepted} finding{'s are' if accepted != 1 else ' is'} accepted by {BASELINE_PATH}"
+                         f"{f' (committed in {where})' if where else ''}; -v lists them")
     risk = risk_score(findings, provenance[0] == "agent")
     verdict, escalated = decide(findings, risk, escalate=not full)
     stats["seconds"] = round(time.monotonic() - started, 2)

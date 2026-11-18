@@ -213,7 +213,7 @@ def build_repo(case: Case, root: Path, env: dict) -> Path:
         git(repo, "add", "-A", env=env)
         git(repo, "commit", "-q", "--no-verify", "-m", "main work", env=env)
         git(repo, "merge", "--no-commit", "--no-ff", "topic", env=env, check=False)
-    elif case.mode == "range":
+    elif case.mode in ("range", "push"):
         git(repo, "commit", "-q", "--no-verify", "-m", "the change", env=env)
     return repo
 
@@ -258,13 +258,14 @@ def run_env(who: str, tmp: Path) -> dict:
     return env
 
 
-def gate(script: Path, cwd: Path, env: dict, args: list, timeout=300):
+def gate(script: Path, cwd: Path, env: dict, args: list, timeout=300, input=None):
     """Run the CLI under `python -S`: the packages installed on the machine that runs the evaluation are not visible to
     the tool, so a snapshot recorded on one machine gives the same answer on every runner (a runner without setuptools or
     pytest must not read `import setuptools` as a made-up package)."""
     t0 = time.perf_counter()
     try:
-        proc = subprocess.run([sys.executable, "-S", str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
+        proc = subprocess.run([sys.executable, "-S", str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout,
+                              input=input)
     except subprocess.TimeoutExpired:
         return {"crash": "timeout", "ms": (time.perf_counter() - t0) * 1000, "findings": [], "verdict": None}
     ms = (time.perf_counter() - t0) * 1000
@@ -319,9 +320,14 @@ def run_case(case: Case, script: Path, who: str, cache: Path, tmp_root: Path, cl
         return {"crash": "case setup failed: " + (e.stderr or b"").decode(errors="replace")[-160:], "findings": [],
                 "ms": 0, "verdict": None}
     args = ["check", "--deep", "--no-cache", "--format", "json"]
+    stdin = None
     if case.mode == "range":
         args += ["--range", "HEAD~1..HEAD"]
-    res = gate(script, repo, env, args)
+    elif case.mode == "push":              # the first push of a new branch to a remote that holds none of it (git's pre-push input)
+        tip = git(repo, "rev-parse", "HEAD", env=env).stdout.decode().strip()
+        args += ["--push"]
+        stdin = f"refs/heads/main {tip} refs/heads/main {'0' * 40}\n".encode()
+    res = gate(script, repo, env, args, input=stdin)
     if case.messages and not res["crash"]:
         rargs = ["review", "--no-cache", "--format", "json"] + [a for m in case.messages for a in ("--message", m)]
         rev = gate(script, repo, env, rargs)
