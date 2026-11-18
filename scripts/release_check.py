@@ -4,17 +4,25 @@
     release_check.py tag [REF_NAME]   REF_NAME is the tag (vX.Y.Z); empty or missing = not a tag run (dispatch).
                                       Fails unless the tag without its leading "v" equals __version__ in aigate_lite.py.
                                       Prints the version.
+    release_check.py scoreboard       Fails unless eval/scoreboard.json was made for this __version__ and for the case folders
+                                      on disk (the same count of training cases per family, and of holdout cases). A run for a
+                                      tag (`tag vX.Y.Z`) does this check too; a dispatch run (empty REF_NAME) does not.
     release_check.py dist [DIST_DIR]  Fails unless the wheel and the sdist in DIST_DIR (default dist/) both carry exactly
                                       one version, equal to __version__, and the wheel holds only aigate_lite.py and its
                                       dist-info (with LICENSE and NOTICE), and the wheel metadata carries the
                                       required classifiers and project URLs (REQUIRED_CLASSIFIERS, REQUIRED_URLS) and
                                       no License :: classifier. Prints the version.
 
+The scoreboard is made by a full `py eval/run.py` on the reference runner and committed by the maintainer; it is checked for a
+tag, never in a pull request.
+
 Errors go to stderr, the version to stdout, and the exit status is 1 on any failure.
 """
+import json
 import re
 import sys
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 
@@ -122,15 +130,61 @@ def check_dist(dist, root=ROOT):
     return version
 
 
-def main(argv):
+class StaleScoreboard(Failure):
+    """The message is printed as it is: it names both sides and the command that fixes it."""
+
+
+def _case_counts(folder):
+    """({family: n}, total) of the cases in a folder of case.toml files, the way eval/run.py counts them (a contested case is
+    not counted). Only the `source` and `contested` keys are read."""
+    by_family = {}
+    for toml in sorted(Path(folder).glob("*/case.toml")):
+        meta = tomllib.loads(toml.read_text(encoding="utf-8"))
+        if not meta.get("contested", False):
+            by_family[meta["source"]] = by_family.get(meta["source"], 0) + 1
+    return by_family, sum(by_family.values())
+
+
+def check_scoreboard(root=None):
+    """eval/scoreboard.json must describe this tree: the version in aigate_lite.py and the case folders on disk."""
+    root = Path(root) if root else ROOT
+    version = code_version(root)
+    board_path = root / "eval" / "scoreboard.json"
+    fix = "  fix: py eval/run.py && py scripts/gen_accuracy.py"
+    try:
+        board = json.loads(board_path.read_text(encoding="utf-8"))
+        board_version, board_train = board["tool_version"], board["train"]
+        board_families, board_total = dict(board_train["cases"]), int(board_train["total_cases"])
+        board_holdout = int((board.get("holdout") or {}).get("total_cases", 0))
+    except (OSError, ValueError, KeyError, TypeError) as e:
+        raise StaleScoreboard(f"release_check: eval/scoreboard.json cannot be read ({type(e).__name__}: {e}).\n{fix}")
+    families, total = _case_counts(root / "eval" / "corpus")
+    _, holdout = _case_counts(root / "eval" / "holdout")
+    if board_version != version or board_total != total or board_families != families:
+        raise StaleScoreboard(f"release_check: eval/scoreboard.json is for {board_version} with {board_total} training cases; "
+                              f"the tree is {version} with {total}.\n{fix}")
+    if board_holdout != holdout:
+        raise StaleScoreboard(f"release_check: eval/scoreboard.json lists {board_holdout} holdout cases; the tree has {holdout}.\n{fix}")
+    return version
+
+
+def main(argv, root=None):
+    root = Path(root) if root else ROOT
     try:
         if argv[:1] == ["tag"] and len(argv) <= 2:
-            version = check_tag(argv[1] if len(argv) == 2 else "")
+            version = check_tag(argv[1] if len(argv) == 2 else "", root)
+            if len(argv) == 2 and argv[1]:                      # a tag run publishes: the scoreboard must be for this version
+                check_scoreboard(root)
+        elif argv[:1] == ["scoreboard"] and len(argv) == 1:
+            version = check_scoreboard(root)
         elif argv[:1] == ["dist"] and len(argv) <= 2:
-            version = check_dist(argv[1] if len(argv) == 2 else ROOT / "dist")
+            version = check_dist(argv[1] if len(argv) == 2 else root / "dist", root)
         else:
             print(__doc__, file=sys.stderr)
             return 2
+    except StaleScoreboard as e:
+        print(e, file=sys.stderr)
+        return 1
     except Failure as e:
         print(f"release check failed: {e}", file=sys.stderr)
         return 1

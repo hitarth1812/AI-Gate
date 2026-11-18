@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "tool": "0.6.1",
+  "entries": [
+    {
+      "rule": "security.shell",
+      "path": "src/tasks/archive.js",
+      "fingerprint": "10241917f011a29e"
+    }
+  ]
+}

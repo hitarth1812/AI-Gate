@@ -97,6 +97,7 @@ PATHOLOGICAL = {
 }
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("name", sorted(PATHOLOGICAL))
 @pytest.mark.parametrize("path", ["a.go", "a.ts", "a.py"])
 def test_pathological_input_stays_inside_the_time_and_memory_bound(name, path):

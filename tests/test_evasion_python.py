@@ -158,6 +158,7 @@ def test_eval_negatives(repo, env):
 
 # ---------------------------------------------------------------- the fold stays linear in the size of the file
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 @pytest.mark.parametrize("piece,count", [("a", 60000), ("é", 20000)], ids=["ascii-60k", "non-ascii-20k"])
 def test_fold_is_linear_on_a_line_with_many_constants(repo, env, piece, count):

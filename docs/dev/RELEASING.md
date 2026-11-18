@@ -7,7 +7,8 @@ PyPI trusts one workflow of one repository, and only the `publish` job can ask G
 
 Pushing a tag `vX.Y.Z` runs three jobs in order:
 
-1. **build**: checks that the tag equals `__version__`, builds the sdist and the wheel, runs `twine check`, checks that the
+1. **build**: checks that the tag equals `__version__` and that `eval/scoreboard.json` was made for that version and for the
+   case folders on disk (a run by hand does not check the scoreboard), builds the sdist and the wheel, runs `twine check`, checks that the
    wheel holds only `aigate_lite.py` and its dist-info (with `LICENSE` and `NOTICE`) and that the built metadata says the same
    version, prints the SHA-256 of both files and uploads them.
 2. **test-wheel**: installs that wheel (not the checkout) into a clean environment on Ubuntu, macOS and Windows with Python
@@ -39,8 +40,17 @@ pick a tag as the branch.
 
 1. Set `__version__` in `aigate_lite.py` (for example `0.5.0`), and in `CHANGELOG.md` replace "unreleased" in that version's
    heading with the date. A version that is on PyPI can never be uploaded again.
-2. Run the tests, open a pull request and merge it into `main`.
-3. Tag the merge commit and push the tag:
+2. Run the tests, open a pull request and merge it into `main`. Pull requests run only four legs (Ubuntu 3.11 and 3.14,
+   Windows 3.12, macOS 3.12) to stay fast.
+3. **Run the full matrix on the release commit and wait for it to be green.** Actions -> `ci-full` -> Run workflow, branch
+   `main`: all 12 legs (Ubuntu, macOS and Windows on Python 3.11 to 3.14). The same workflow runs every night, and a red
+   night opens an issue; a green night is not enough unless it ran on the release commit. Do not tag while any leg is red.
+
+   Also make the published numbers current: `eval/scoreboard.json` comes from a full `python eval/run.py` on the reference runner
+   (GitHub `ubuntu-latest`, Python 3.12), not from a laptop. Commit it, run `python scripts/gen_accuracy.py --write` and
+   `python eval/run.py --update-ratchet` yourself, and commit those. The build job fails a tag whose scoreboard is for another
+   version or another number of cases (`python scripts/release_check.py scoreboard`).
+4. Tag the merge commit and push the tag:
 
    ```bash
    git switch main && git pull
@@ -48,9 +58,9 @@ pick a tag as the branch.
    git push origin v0.5.0
    ```
 
-4. Open the run (Actions → release). When `build` and `test-wheel` are green, `publish` waits for the `pypi` environment:
+5. Open the run (Actions → release). When `build` and `test-wheel` are green, `publish` waits for the `pypi` environment:
    open it and choose *Approve and deploy*.
-5. Check the result from a clean place:
+6. Check the result from a clean place:
 
    ```bash
    pipx install aigate-lite==0.5.0     # or: pip install aigate-lite==0.5.0 / uvx aigate-lite@0.5.0 --version
@@ -71,6 +81,7 @@ pick a tag as the branch.
 ```bash
 python -m pip install build==1.6.1 twine==7.0.0
 python scripts/release_check.py tag v0.5.0     # prints the version, or exits 1 with the reason
+python scripts/release_check.py scoreboard   # eval/scoreboard.json is for this version and this corpus
 python -m build && python -m twine check dist/*
 python scripts/release_check.py dist dist      # version in the metadata, wheel contents
 ```

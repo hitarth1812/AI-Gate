@@ -177,6 +177,7 @@ def timed(repo, rel, src, env):
     return res, time.perf_counter() - start
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 def test_js_fold_is_linear_on_a_line_with_many_constants(repo, env):
     items = ",".join(["'a'"] * 60000)
@@ -186,6 +187,7 @@ def test_js_fold_is_linear_on_a_line_with_many_constants(repo, env):
     assert elapsed < 5, f"{elapsed:.1f} s"
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 def test_ts_template_fold_is_linear_with_many_interpolations(repo, env):
     body = "${'a'}" * 20000
@@ -195,6 +197,7 @@ def test_ts_template_fold_is_linear_with_many_interpolations(repo, env):
     assert elapsed < 5, f"{elapsed:.1f} s"
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 def test_go_fold_is_linear_on_a_line_with_many_constants(repo, env):
     items = ",".join(['"a"'] * 60000)
@@ -204,6 +207,7 @@ def test_go_fold_is_linear_on_a_line_with_many_constants(repo, env):
     assert elapsed < 5, f"{elapsed:.1f} s"
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 def test_js_deep_chain_and_deep_nesting_do_not_crash_or_hang(repo, env):
     chain = " + ".join([dq("a")] * 3000)
@@ -215,6 +219,7 @@ def test_js_deep_chain_and_deep_nesting_do_not_crash_or_hang(repo, env):
     assert elapsed < 5, f"{elapsed:.1f} s"
 
 
+@pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("env", WHO)
 def test_go_deep_chain_and_deep_nesting_do_not_crash_or_hang(repo, env):
     chain = " + ".join([dq("a")] * 3000)

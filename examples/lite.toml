@@ -40,6 +40,11 @@ cache = false             # remember files the per-file checks found clean (same
 # agent_env = ["MY_AGENT_ENV_VAR"]   # extra env vars that mean "an AI agent is committing"
 # default = "agent"                  # treat every commit as AI-written (stricter)
 
+[baseline]
+# apply_on_push = false              # default true: a person's push or range honours the committed .aigate/baseline.json
+#                                    # (the entries that were already there before the change). false: a baseline accepts only
+#                                    # as many findings as the change removed. An AI agent ignores this key. Without --config, for a range or a push with a base it is read from the base: a change cannot switch it off for itself. With --config it comes from that file.
+
 # Run your own checks too. stage: commit | push | both. {files} = changed files.
 # [[commands]]
 # name = "tests"

@@ -1,5 +1,8 @@
 name: ci
 
+# Pull requests and pushes to main run four legs (the cheap checks first, then Ubuntu 3.11 and 3.14, Windows 3.12 and
+# macOS 3.12). The full matrix (3 systems x Python 3.11 to 3.14) is ci-full.yml: nightly, and by hand before a release.
+
 on:
   push:
     branches: [main]
@@ -13,15 +16,46 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  fast:
+    name: cheap checks (pyflakes, generated docs, self-scan)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install pinned test tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: pyflakes
+        run: python -m pyflakes aigate_lite.py
+      - name: The generated documents match their sources (rule table, accuracy section)
+        run: |
+          python scripts/gen_docs.py --check
+          python scripts/gen_accuracy.py --check
+      - name: Self-scan (the gate on its own repository)
+        env:
+          AIGATE_PROVENANCE: human
+        run: python aigate_lite.py check --all --offline -q
+
   test:
     name: ${{ matrix.os }} / py${{ matrix.python }}
+    needs: fast
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60          # the suite grew to ~1,900 tests; a Windows runner needs about 30 minutes for them
+    timeout-minutes: 60          # generous until the parallel run is measured on every runner type
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python: ["3.11", "3.12", "3.13", "3.14"]
+        include:
+          - {os: ubuntu-latest, python: "3.11"}
+          - {os: ubuntu-latest, python: "3.14"}
+          - {os: windows-latest, python: "3.12"}
+          - {os: macos-latest, python: "3.12"}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -30,6 +64,8 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
       - name: Require git and sh (the hook tests need both)
         if: runner.os == 'Windows'
         run: Get-Command git, sh | Format-Table Name, Source
@@ -37,11 +73,10 @@ jobs:
         run: python -m pip install -r requirements-dev.txt
       - name: pyflakes
         run: python -m pyflakes aigate_lite.py
-      - name: pytest
-        run: python -m pytest -q
-      - name: Evaluation corpus (the fixed yardstick; fails on any regression against eval/ratchet.json)
-        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
-        run: python eval/run.py --check --no-write --families real,seeded,adversarial
+      - name: pytest (in parallel; the tests marked serial run in the next step)
+        run: python -m pytest -q -n auto -m "not serial"
+      - name: pytest (the tests marked serial, such as timing limits, one at a time)
+        run: python -m pytest -q -m serial
       - name: Self-scan (the gate on its own repository)
         env:
           AIGATE_PROVENANCE: human
@@ -58,6 +93,28 @@ jobs:
           name: bench-${{ matrix.os }}
           path: bench-smoke.json
           if-no-files-found: ignore
+
+  eval:
+    name: evaluation corpus (the fixed yardstick; fails on any regression against eval/ratchet.json)
+    needs: fast
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install pinned test tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: Evaluation corpus
+        run: python eval/run.py --check --no-write --families real,seeded,adversarial
+      - name: Two clean repositories from their recorded registry snapshots (the smallest two; clone and replay, no registry lookup)
+        run: python eval/run.py --check --no-write --case clean-go-mux --case clean-go-chi
 
   perf-budget:
     name: performance budget (hook scenarios vs the base branch)

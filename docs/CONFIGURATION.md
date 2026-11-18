@@ -33,6 +33,16 @@ signed, in two 0600 files in your user cache dir. `--no-cache` turns it off even
 on, and also skips the registry lookup cache. It helps large changes and not small ones: compare the `C`
 and `C-cache` rows (300 files) with `A` and `A-cache` (1 file) in [PERF.md](PERF.md).
 
+Committed baseline on a push (`[baseline] apply_on_push`, default `true`): a person's push or range honours the entries of
+`.aigate/baseline.json` that were already committed before the change (details in
+[USAGE.md](USAGE.md#existing-project-accept-todays-findings-with-baseline)). `apply_on_push = false` gives the older behaviour
+back: a baseline then accepts only as many findings as the change removed. Without `--config`, for a range or a push with a base
+the key is read from the base, so a change cannot switch it off for itself; for a first push to an empty remote it is read at
+the tip; a push with no baseline source (a base no remote knows, an unrelated history joined to a known one, a remote sha this
+clone does not know) gets no baseline and the key is not read. With `--config FILE` the value comes from that file, so the file
+must not come from the change being checked, as with the rest of the CI config. A value that is not true or false counts as
+true and is reported. An AI agent ignores the key.
+
 ## Commands need your approval
 
 A cloned or pulled config can't run code on your

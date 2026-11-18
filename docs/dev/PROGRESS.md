@@ -1885,3 +1885,39 @@ detected, which is stricter). Generated repos (scratchpad gen_051_audit.py, offl
 First run showed C +8.8% and G +14.6%: `person_test_context()` matched 17 globs on every added line. Now it is cached per
 path and asked only when a credential-like value is found. Second run: startup +0.9%, startup-direct +2.2%, A +2.9%,
 B -0.6%, C +0.3%, D +1.7%, E -1.1%, F -0.9%, G -1.8%; git calls and blob reads identical.
+
+## Faster CI: parallel tests and a smaller pull-request matrix
+
+Machine: Windows 11, 20 hardware threads, Python 3.12.10. Nothing in `aigate_lite.py` changed.
+
+What changed
+- `pytest-xdist==3.8.0` and `execnet==2.1.2` are pinned in `requirements-dev.txt` and in the `dev` extra (same versions;
+  `tests/test_ci_workflow.py` checks they match). `dependencies = []` is still empty.
+- CI runs `python -m pytest -q -n auto -m "not serial"` and then `python -m pytest -q -m serial`. The `serial` marker is
+  registered in `pyproject.toml`.
+- Pull requests and pushes to `main` run four legs (Ubuntu 3.11 and 3.14, Windows 3.12, macOS 3.12) after a "cheap checks" job
+  (pyflakes, `gen_docs --check`, `gen_accuracy --check`, the self-scan). The evaluation check is its own job on Ubuntu 3.12.
+- `ci-full.yml` runs the full 12-leg matrix every night and by hand, and opens or updates one issue when a leg fails.
+  `docs/dev/RELEASING.md` now requires a green run of it on the release commit before tagging.
+- `actions/setup-python` caches pip, keyed on `requirements-dev.txt`. No new action was added.
+
+Tests marked serial (11 test functions, 36 test cases, listed by file): `test_doctor.py`
+(`test_offline_doctor_is_fast`), `test_evasion_python.py` (the fold-is-linear test), `test_fold_js_go.py` (five fold and
+deep-nesting tests), `test_lexer.py` (three linear-time tests), `test_fuzz.py` (the pathological-input time and memory
+bound). Each asserts a wall-clock limit of 5 or 6 seconds. With all tests running together, the fuzz one failed once
+(a 5 s limit, 6.1 s taken); run alone it passes. No other test failed under parallel runs, so nothing else is marked.
+
+Measured before and after (same machine, whole suite)
+- Before, one process, `py -m pytest -q`: 2013 passed, 20 failed (the 20 are an encoding variable of the shell, not the
+  code), 55 skipped in 1877.91 s (31 min 17 s). `hypothesis` was not installed then, so the fuzz tests were skipped.
+- After, `py -m pytest -q -n auto -m "not serial"` then `py -m pytest -q -m serial`, four runs in a row (the last with
+  `-p no:cacheprovider`, the others with `-p no:randomly`), each 2049 passed, 54 skipped plus 36 passed:
+  parallel step 352.07 s, 377.53 s, 323.78 s, 329.96 s; serial step 23.04 s, 62.89 s, 63.43 s, 63.04 s;
+  both steps with start-up 377 s, 443 s, 389 s, 395 s (6.3 to 7.4 minutes). The after runs include the fuzz tests.
+- A plain `py -m pytest -q -n auto` (serial tests running next to the others) gave 1 failed, 2084 passed, 54 skipped in
+  337.82 s: the failure was the fuzz timing test above. This is why CI and the docs use the two-step form.
+- Linux (WSL2, Ubuntu, Python 3.12.3, a copy of the tree on the Linux file system), one process, `python3 -m pytest -q`:
+  2106 passed, 3 skipped in 485.09 s (8 min 5 s). `pytest-xdist` and `hypothesis` are not installed in that WSL, so the
+  parallel command and the fuzz tests were not run on Linux.
+- GitHub runner times (the targets: pytest step at most 5 minutes on Ubuntu, pull request at most 15 minutes) are not
+  measured yet: the workflows have not run on GitHub.

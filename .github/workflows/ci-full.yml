@@ -1,0 +1,117 @@
+name: ci-full
+
+# The full matrix (3 systems x Python 3.11 to 3.14, 12 legs) that pull requests do not run. It runs every night and can be
+# started by hand (Actions -> ci-full -> Run workflow): do that on the release commit before tagging, see
+# docs/dev/RELEASING.md. On a failure the `report` job opens (or comments on) one issue.
+
+on:
+  schedule:
+    - cron: "43 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-full-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  fast:
+    name: cheap checks (pyflakes, generated docs, self-scan)
+    if: github.event_name != 'schedule' || github.repository == 'hitarth1812/AI-Gate'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Install pinned test tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: pyflakes
+        run: python -m pyflakes aigate_lite.py
+      - name: The generated documents match their sources (rule table, accuracy section)
+        run: |
+          python scripts/gen_docs.py --check
+          python scripts/gen_accuracy.py --check
+      - name: Self-scan (the gate on its own repository)
+        env:
+          AIGATE_PROVENANCE: human
+        run: python aigate_lite.py check --all --offline -q
+
+  test:
+    name: ${{ matrix.os }} / py${{ matrix.python }}
+    needs: fast
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - name: Require git and sh (the hook tests need both)
+        if: runner.os == 'Windows'
+        run: Get-Command git, sh | Format-Table Name, Source
+      - name: Install pinned test tools
+        run: python -m pip install -r requirements-dev.txt
+      - name: pyflakes
+        run: python -m pyflakes aigate_lite.py
+      - name: pytest (in parallel; the tests marked serial run in the next step)
+        run: python -m pytest -q -n auto -m "not serial"
+      - name: pytest (the tests marked serial, such as timing limits, one at a time)
+        run: python -m pytest -q -m serial
+      - name: Self-scan (the gate on its own repository)
+        env:
+          AIGATE_PROVENANCE: human
+        run: python aigate_lite.py check --all --offline -q
+      - name: Benchmark smoke (informational)
+        if: matrix.python == '3.12'
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python bench/bench.py --runs 5 --json bench-smoke.json
+      - name: Upload benchmark
+        if: matrix.python == '3.12'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-${{ matrix.os }}
+          path: bench-smoke.json
+          if-no-files-found: ignore
+
+  report:
+    name: open an issue when a leg fails
+    needs: [fast, test]
+    if: ${{ always() && contains(needs.*.result, 'failure') && github.event_name == 'schedule' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      issues: write
+    steps:
+      - name: Open or update the failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          TITLE="Nightly full test matrix failure"
+          BODY="A leg of the nightly full test matrix failed (see the failing legs and their logs): $RUN_URL"
+          N="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"$TITLE\" in:title" --json number --jq '.[0].number // empty')"
+          if [ -n "$N" ]; then
+            gh issue comment "$N" --repo "$GITHUB_REPOSITORY" --body "$BODY"
+          else
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body "$BODY"
+          fi

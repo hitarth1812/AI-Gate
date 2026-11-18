@@ -1,0 +1,11 @@
+id = "r5-push-newbranch-baselined"
+source = "seeded"
+language = "python"
+origin = "authored for the committed baseline on a first push: a person pushes a new branch whose history holds accepted findings"
+who = "person"
+mode = "push"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.eval"
+path = "app.py"

@@ -154,3 +154,55 @@ the machine are never visible and the answer does not depend on the machine; the
 (click 55 -> 56 packages, requests 10 -> 12, attrs 22 -> 23; flask and jinja unchanged in size). Two tests pin it
 (`tests/test_eval_harness.py`). Result: `py eval/run.py --check --no-write` passes on 3.11, 3.12 and 3.14 from a clean export with an
 empty clone cache (training failure keys 2, as in the ratchet; holdout 11, as in the ratchet).
+
+## Harness round (2026-11-17): a scoreboard that cannot be stale, and a holdout line that points
+
+This round changes the harness, the scripts, CI and one generated case. It does not change the tool (`aigate_lite.py` is byte for
+byte as before), so the holdout was not expected to move and was not tuned on.
+
+Same command before and after: `py eval/run.py --check --no-write --families real,seeded,adversarial --failures` (Windows 11,
+Python 3.12.10, jobs 4; before = the tree at `61ad6a0`, after = this change).
+
+| | before | after |
+|---|---|---|
+| training cases (real, seeded, adversarial) | 255 (61 + 125 + 69) | 255 |
+| training failures (keys, person and agent) | 2 (1 case: `r3-properties-key`, both `FN:secrets.hardcoded@src/main/resources/application.properties:2`) | 0 |
+| false BLOCK on clean, unexpected BLOCK, crashes, gate.error, agent softer | 0 / 0 / 0 / 0 / 0 | 0 / 0 / 0 / 0 / 0 |
+| holdout cases (these three families) | 64 | 64 |
+| holdout failure keys | 11 (missed 10, too strict 1) | 11 (missed 10, too strict 1): no movement |
+| `eval --check` | ok | ok |
+
+One more full run, `py eval/run.py --check` with all four families (the clean repositories included, a fresh scoreboard written to a
+scratch path, not over the committed one): 265 training cases (adversarial 69, clean 10, real 61, seeded 125), no training failure,
+holdout 67 cases with the same 11 failure keys, `eval --check` ok. The committed `eval/scoreboard.json` and `eval/ratchet.json` were
+not touched: the maintainer commits the scoreboard made on the reference runner (GitHub `ubuntu-latest`, Python 3.12) and runs
+`--update-ratchet`.
+
+The new line, as printed:
+
+```
+holdout by rule: secrets.hardcoded missed 8 · review.claim_mismatch missed 2 · tests.skip_added too strict 1
+```
+
+It adds up to the 11 failure keys. Round 3 recorded 9 keys for the original 57 holdout cases (`secrets.hardcoded` 6,
+`review.claim_mismatch` 2, `tests.skip_added` 1 too strict) and 2 more in the 10 cases added that round; with the original 9 unchanged,
+the line now says those 2 are `secrets.hardcoded` too.
+
+What changed:
+- `eval/run.py` prints `holdout by rule` and stores the same counts as `holdout.by_rule` in the scoreboard (rule and kind and a count;
+  never a case id, a path or a language). A test checks the printed line and the stored counts against the known case-id prefixes.
+- `scripts/release_check.py` fails a tag run when `eval/scoreboard.json` is for another version than `__version__` or its case counts
+  differ from the case folders; `release_check.py scoreboard` runs the same check by hand. It is not in a pull-request workflow. It
+  is red against today's committed scoreboard (for 0.6.0 with 247 training cases, the tree is 0.6.1 with 265) until the maintainer
+  commits a scoreboard made on the reference runner.
+- `scripts/gen_accuracy.py` shows the holdout failures by rule when the scoreboard has them, and works unchanged when it does not.
+- `.github/workflows/ci.yml`: the evaluation job also runs the two smallest pinned clean repositories (`clean-go-mux`,
+  `clean-go-chi`) from their recorded snapshots, so a snapshot problem shows in the pull request, not in the nightly run.
+  Locally this took 1.7 s from an empty clone cache.
+- `r3-properties-key`: decided by the maintainer, option (a) of LABEL_CHANGES H: the generator writes a Slack token without a
+  documentation-placeholder run (`@@SLACKKEY@@`) in this one case. The label is unchanged; the rule in the tool is unchanged. The ratchet
+  still lists its two old failure keys until the maintainer runs `--update-ratchet`.
+- The holdout refresh rule (at least 10 new holdout cases per minor version, written by a session that has seen neither the fixes nor
+  the holdout, logged here with the writer's inputs; old holdout cases never deleted or moved) is in `eval/README.md`.
+
+Rejected or revised attempts: none. Not changed: any label, any test expectation, `.aigate/`, `eval/ratchet.json`.

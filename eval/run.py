@@ -26,6 +26,7 @@ import collections
 import concurrent.futures
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -60,6 +61,9 @@ SUBST = {
     "@@GHTOKEN@@": _cat("ghp_", "Zx9kQ2vB7mN4pL1wT8yR5uJ3cH6dF0aSeGiO"),
     "@@STRIPE@@": _cat("sk_live_", "4eC39HqLyjWDarjtT1zdp7dc"),
     "@@SLACK@@": _cat("xoxb-", "123456789012-1234567890123-AbCdEfGhIjKlMnOpQrStUvWx"),
+    # a Slack token without a documentation-placeholder run (no digit run like 12345678, no alphabet): the tool reports it as a real
+    # token. @@SLACK@@ above is kept as it is for the cases that already use it.
+    "@@SLACKKEY@@": _cat("xoxb-", "987654321098-", "5432109876543-", "Zq7Lm2Xv9Kp4Rt8Wy3Nb6Hc1"),
     # the AWS key in three pieces (round 3): a case that splits a key in its source writes the PIECES as placeholders, so no
     # tracked file holds the key, nor a constant-foldable expression that adds up to one. "@@AKIA@@" + "@@AKT1@@@@AKT2@@" is @@AWS@@.
     "@@AKIA@@": "AKIA", "@@AKT1@@": "QWERTYUI", "@@AKT2@@": "OPASDFGH",
@@ -209,7 +213,7 @@ def build_repo(case: Case, root: Path, env: dict) -> Path:
         git(repo, "add", "-A", env=env)
         git(repo, "commit", "-q", "--no-verify", "-m", "main work", env=env)
         git(repo, "merge", "--no-commit", "--no-ff", "topic", env=env, check=False)
-    elif case.mode == "range":
+    elif case.mode in ("range", "push"):
         git(repo, "commit", "-q", "--no-verify", "-m", "the change", env=env)
     return repo
 
@@ -254,13 +258,14 @@ def run_env(who: str, tmp: Path) -> dict:
     return env
 
 
-def gate(script: Path, cwd: Path, env: dict, args: list, timeout=300):
+def gate(script: Path, cwd: Path, env: dict, args: list, timeout=300, input=None):
     """Run the CLI under `python -S`: the packages installed on the machine that runs the evaluation are not visible to
     the tool, so a snapshot recorded on one machine gives the same answer on every runner (a runner without setuptools or
     pytest must not read `import setuptools` as a made-up package)."""
     t0 = time.perf_counter()
     try:
-        proc = subprocess.run([sys.executable, "-S", str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout)
+        proc = subprocess.run([sys.executable, "-S", str(script), *args], cwd=cwd, env=env, capture_output=True, timeout=timeout,
+                              input=input)
     except subprocess.TimeoutExpired:
         return {"crash": "timeout", "ms": (time.perf_counter() - t0) * 1000, "findings": [], "verdict": None}
     ms = (time.perf_counter() - t0) * 1000
@@ -315,9 +320,14 @@ def run_case(case: Case, script: Path, who: str, cache: Path, tmp_root: Path, cl
         return {"crash": "case setup failed: " + (e.stderr or b"").decode(errors="replace")[-160:], "findings": [],
                 "ms": 0, "verdict": None}
     args = ["check", "--deep", "--no-cache", "--format", "json"]
+    stdin = None
     if case.mode == "range":
         args += ["--range", "HEAD~1..HEAD"]
-    res = gate(script, repo, env, args)
+    elif case.mode == "push":              # the first push of a new branch to a remote that holds none of it (git's pre-push input)
+        tip = git(repo, "rev-parse", "HEAD", env=env).stdout.decode().strip()
+        args += ["--push"]
+        stdin = f"refs/heads/main {tip} refs/heads/main {'0' * 40}\n".encode()
+    res = gate(script, repo, env, args, input=stdin)
     if case.messages and not res["crash"]:
         rargs = ["review", "--no-cache", "--format", "json"] + [a for m in case.messages for a in ("--message", m)]
         rev = gate(script, repo, env, rargs)
@@ -514,10 +524,7 @@ def main(argv=None):
                     if active(f):
                         print(f"   {f['action']:5} {f['rule']:26} {f['path']}:{f.get('line')}  {f['message'][:80]}")
     version = subprocess.run([sys.executable, str(script), "--version"], capture_output=True, text=True).stdout.split()[1:2]
-    board = {"schema": 1, "tool_version": version[0] if version else "?", "python": sys.version.split()[0],
-             "platform": sys.platform, "jobs": args.jobs, "seconds": round(time.perf_counter() - t0, 1),
-             "train": {k: v for k, v in s_train.items() if k != "failing"},
-             "holdout": {k: v for k, v in s_hold.items() if k not in ("failing", "skipped")} if held else None}
+    board = build_board(version[0] if version else "?", args.jobs, round(time.perf_counter() - t0, 1), s_train, s_hold, bool(held))
     if not args.no_write and not args.case and families is None:
         SCOREBOARD.write_text(json.dumps(board, indent=1, sort_keys=True) + "\n", encoding="utf-8")
         HOLDOUT_DETAIL.write_text(json.dumps(s_hold["failing"], indent=1) + "\n", encoding="utf-8")
@@ -536,6 +543,40 @@ def main(argv=None):
     return 0
 
 
+# What the holdout shows a fixer: the failures counted per rule and per kind, and nothing else. A key of the failing list holds
+# the case id and the path; only the rule id (checked against its own shape) and a kind name leave this function.
+KIND_NAMES = {"FN": "missed", "OVER": "too strict", "UNDER": "too lax", "FP": "false positive", "FALSE_BLOCK": "block on a clean project",
+              "UNEXPECTED_BLOCK": "unexpected block", "CRASH": "crash", "GATE_ERROR": "gate error", "AGENT_SOFTER": "agent softer"}
+RULE_ID = re.compile(r"[a-z][a-z0-9_]*(?:\.[a-z0-9_]+)+")
+NO_RULE = "(none)"                                           # a crash or a verdict difference belongs to no rule
+
+
+def holdout_by_rule(failing) -> dict:
+    """{rule id: {kind name: count}} from the failure keys `case|who|KIND:rule@path:line ...`. The counts add up to len(failing)."""
+    out = collections.defaultdict(collections.Counter)
+    for key in failing:
+        kind, _, detail = key.split("|", 2)[2].partition(":")
+        rule = "gate.error" if kind == "GATE_ERROR" else NO_RULE if kind == "CRASH" or "@" not in detail else detail.split("@", 1)[0]
+        out[rule if RULE_ID.fullmatch(rule) else NO_RULE][KIND_NAMES.get(kind, "other")] += 1
+    return {rule: dict(sorted(kinds.items())) for rule, kinds in sorted(out.items())}
+
+
+def format_by_rule(by_rule: dict) -> str:
+    """One `rule kind count` group per rule and kind, joined by a middle dot, the most frequent first; `none` when nothing failed."""
+    pairs = sorted(((rule, kind, n) for rule, kinds in by_rule.items() for kind, n in kinds.items()), key=lambda t: (-t[2], t[0], t[1]))
+    return " \u00b7 ".join(f"{rule} {kind} {n}" for rule, kind, n in pairs) or "none"
+
+
+def build_board(version, jobs, seconds, s_train, s_hold, held) -> dict:
+    """The scoreboard. The holdout part holds counts only (and the per-rule counts), never a case id."""
+    holdout = None
+    if held:
+        holdout = {k: v for k, v in s_hold.items() if k not in ("failing", "skipped")}
+        holdout["by_rule"] = holdout_by_rule(s_hold["failing"])
+    return {"schema": 1, "tool_version": version, "python": sys.version.split()[0], "platform": sys.platform, "jobs": jobs,
+            "seconds": seconds, "train": {k: v for k, v in s_train.items() if k != "failing"}, "holdout": holdout}
+
+
 def print_summary(board, s_train, s_hold, held):
     o = s_train["overall"]
     print(f"\ncases: {s_train['cases']} (train) contested: {s_train['contested']} skipped: {s_train['skipped']}")
@@ -547,6 +588,7 @@ def print_summary(board, s_train, s_hold, held):
         ho = s_hold["overall"]
         print(f"holdout: {s_hold['total_cases']} cases, failures {s_hold['failures'] or 'none'} (details: eval/.holdout_detail.json, "
               f"not for fixers), agent-softer {ho['agent_softer']}")
+        print(f"holdout by rule: {format_by_rule(holdout_by_rule(s_hold['failing']))}")
     worst = sorted(((r, v) for r, v in s_train["rules"].items() if v["fp"] or v["fn"] or v["over"] or v["under"]),
                    key=lambda kv: -(kv[1]["fp"] + kv[1]["fn"] + kv[1]["over"] + kv[1]["under"]))[:12]
     for r, v in worst:
