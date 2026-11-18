@@ -1,0 +1,19 @@
+id = "r5-range-baseline-edit-adds"
+source = "seeded"
+language = "typescript"
+origin = "authored for a pull-request range whose own change records a baseline: the base holds an unrecorded finding, the change edits that line and adds a new one"
+who = "person"
+mode = "range"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.xss"
+path = "src/ui/banner.ts"
+
+[[must_fire]]
+rule = "security.deserialization"
+path = "tools/restore.py"
+
+[[must_fire]]
+rule = "gate.baseline_changed"
+path = ".aigate/baseline.json"

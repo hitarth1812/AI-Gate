@@ -1,0 +1,11 @@
+id = "r5-push-newbranch-baselined-shell"
+source = "seeded"
+language = "javascript"
+origin = "authored for the committed baseline on a first push: a person pushes a new branch whose history holds an accepted shell-call finding"
+who = "person"
+mode = "push"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.shell"
+path = "src/tasks/archive.js"

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "tool": "0.6.1",
+  "entries": [
+    {
+      "rule": "security.xss",
+      "path": "src/ui/banner.ts",
+      "fingerprint": "7bc24d68e30117c4"
+    },
+    {
+      "rule": "security.deserialization",
+      "path": "tools/restore.py",
+      "fingerprint": "de91dee14ea58e52"
+    }
+  ]
+}
