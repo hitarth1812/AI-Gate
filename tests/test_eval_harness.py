@@ -228,6 +228,50 @@ def test_key_fragment_placeholders_add_up_to_the_aws_key_and_are_not_a_key_alone
     assert all(len(ev.SUBST[p]) < 12 for p in pieces)
 
 
+def _spellings(text, depth=2):
+    """The text itself and what a decoder would make of each word-like token in it (base64, hex, reversed, rot13), two levels deep."""
+    import base64
+    import codecs
+    yield text
+    if depth:
+        for tok in re.findall(r"[A-Za-z0-9+/_-]{16,5000}={0,2}", text):
+            stripped = tok.rstrip("=")
+            candidates = [tok[::-1], codecs.encode(tok, "rot13")]
+            try:
+                candidates.append(base64.b64decode(stripped.replace("-", "+").replace("_", "/") + "=" * (-len(stripped) % 4)).decode("latin-1"))
+            except ValueError:
+                pass
+            if len(tok) % 2 == 0 and re.fullmatch(r"[0-9a-fA-F]+", tok):
+                candidates.append(bytes.fromhex(tok).decode("latin-1"))
+            for c in candidates:
+                yield from _spellings(c, depth - 1)
+
+
+def test_encoded_key_placeholders_decode_to_the_aws_key_and_no_stored_file_holds_a_form_of_it():
+    # a case that hides the key behind a decoder call writes @@AWSB64@@ and its siblings, built at run time
+    import base64
+    import codecs
+    aws = ev.fill(b"@@AWS@@").decode()
+    forms = {name: ev.SUBST[name] for name in ("@@AWSB64@@", "@@AWSHEX@@", "@@AWSREV@@", "@@AWSROT13@@")}
+    assert base64.b64decode(forms["@@AWSB64@@"]).decode() == aws
+    assert bytes.fromhex(forms["@@AWSHEX@@"]).decode() == aws
+    assert forms["@@AWSREV@@"][::-1] == aws
+    assert codecs.decode(forms["@@AWSROT13@@"], "rot13") == aws
+    assert len(set(forms.values()) | {aws}) == 5                      # five different spellings
+    assert ev.fill(b'atob("@@AWSB64@@")').decode() == f'atob("{forms["@@AWSB64@@"]}")'
+    # no case file, generator, test or document holds the key, or a form of it that the tool would read as the key (a run of
+    # it inside a longer word is not one: the provider pattern needs a boundary). The held-out cases are not read here.
+    key = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(aws) + r"(?![A-Za-z0-9_])")
+    doubled = (base64.b64encode(base64.b64encode(aws.encode())).decode(), base64.b64encode(aws.encode().hex().encode()).decode())
+    files = [p for p in (EVAL / "corpus").rglob("*") if p.is_file()] + [p for p in (EVAL / "tools").rglob("*.py")]
+    files += list((ROOT / "tests").glob("*.py")) + [ROOT / "aigate_lite.py", ROOT / "README.md", EVAL / "run.py"]
+    files += list((ROOT / "docs").glob("*.md")) + list(EVAL.glob("*.md"))
+    for path in files:
+        data = path.read_bytes().decode("utf-8", "replace")
+        assert not any(v in data for v in (aws, *forms.values(), *doubled)), path
+        assert not any(key.search(t) for t in _spellings(data)), path
+
+
 def test_the_gate_runs_without_the_packages_installed_on_this_machine(repo, tmp_path):
     # the first nightly run failed on every runner: a snapshot recorded where setuptools was installed never held it, so a
     # runner without setuptools read `import setuptools` as a made-up package. The harness now hides installed packages

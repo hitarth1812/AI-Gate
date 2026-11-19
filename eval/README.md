@@ -100,6 +100,8 @@ that is huge, binary or oddly encoded is made at run time and never committed.
 
 **No provider-shaped secret and no invisible character is stored.** Write `@@AWS@@`, `@@GHTOKEN@@`, `@@STRIPE@@`,
 `@@SLACK@@`, `@@SLACKKEY@@` (a Slack token with no documentation-placeholder run in it), `@@PEMBEGIN@@`/`@@PEMBODY@@`/`@@PEMEND@@`, `@@ZWSP@@`, `@@RLO@@`, `@@LRI@@`, `@@PDI@@`; `run.py` fills them in.
+A key hidden behind a decoder call is written as the placeholder of the form it decodes (`@@AWSB64@@`, `@@AWSHEX@@`, `@@AWSREV@@`,
+`@@AWSROT13@@`: the `@@AWS@@` key in base64, hex, reversed and rot13), and a key assembled from pieces as `@@AKIA@@`, `@@AKT1@@`, `@@AKT2@@`.
 (The repository's own hygiene tests scan every tracked file, and `.aigate/lite.toml` ignores `eval/corpus` and
 `eval/holdout` for the self-scan because the corpus is made of mistakes.)
 

@@ -206,3 +206,45 @@ What changed:
   the holdout, logged here with the writer's inputs; old holdout cases never deleted or moved) is in `eval/README.md`.
 
 Rejected or revised attempts: none. Not changed: any label, any test expectation, `.aigate/`, `eval/ratchet.json`.
+
+## Round 5 (2026-11-19): keys behind a decoder call or assembled from pieces
+
+The change: `secrets.hardcoded` decodes a string literal that is the argument of a known decoder call and runs only the provider
+patterns on the result (never `secrets.generic`; the boundary and documented-example rules still apply). Known calls: Python
+`base64.b64decode`, `urlsafe_b64decode`, `standard_b64decode`, `decodebytes`, `binascii.unhexlify`, `a2b_hex`, `a2b_base64`,
+`bytes.fromhex`, `codecs.decode(x, "rot13" or "hex" or "base64")` (with the codec aliases), a `[::-1]` or `"".join(reversed(x))` of a
+literal; JS/TS `atob` (also `window.`, `globalThis.`, `self.`), `Buffer.from(x, "base64", "base64url" or "hex")` in any letter case,
+`.split("").reverse().join("")`; Go `base64.StdEncoding`, `URLEncoding`, `RawStdEncoding`, `RawURLEncoding` and `hex.DecodeString`.
+At most two decoders one after the other and at most 4,096 characters per literal; a longer literal is not decoded and is counted in
+a `decode.skipped` note shown with `-v`. A list or string that starts as literals, is extended with literals only (`push`, `append`,
+`extend`, `+=`) and is joined, with every statement at most 25 lines from the first, is folded too. The finding names the step
+("base64-decoded from a literal", "reversed from a literal", "assembled from literals") and its fingerprint is that of the decoded
+value. A person and an agent get the same BLOCK. The decoder table (`DECODER_CALLS`) is data: an empty table restores 0.6.1.
+
+Names: a decoder is also known by a name the same file imports it under (`from base64 import b64decode as d`, `import base64 as b`,
+`from codecs import decode`, a Go import alias). The resolver is file-local and static. A name the file binds to anything else (a def,
+an assignment, a parameter, another module, a relative or star import) is not a decoder; a name is not followed across files, through
+a reassignment, `getattr` or a dynamic import. A custom base64 alphabet is not decoded.
+
+Linear time: the first version of the assembly and of the JS/Go chain reading was quadratic on generated files (120,000 lines of
+`k += ""` took 123 s against 4.0 s before the feature). A name is now dropped when a statement is more than 25 lines after the first,
+after 256 extensions, or beyond 4,096 characters; a chain of literals is read once. Measured on the final code, person, staged, no cache
+(new against 0.6.1): 120,000 lines of `k += ""` 4.8 s against 4.4 s; 30,000 lines of `parts.append("")` 2.1 s against 1.9 s; an
+8,000-piece literal chain next to `[].reverse()` 0.5 s against 0.4 s. Every other shape of the two timing scripts is within about 1.2
+times 0.6.1. Tests count the work of 4 times the pieces against 1 times (not time-based) and one serial test times six generated files.
+
+Cases (training only, from `eval/tools/seeds/seed_v6.py`; the placeholders `@@AWSB64@@`, `@@AWSHEX@@`, `@@AWSREV@@`, `@@AWSROT13@@` in
+`eval/run.py` are built at run time, so no tracked file holds the key in any form): 30 in all. Seeded `must_fire`, 20: 14 for each
+decoder call and language plus a three-file assembly case, and 6 for the other spellings (a `from` import, a module alias, a codec
+alias, the global object and other encodings, two Go import aliases). Adversarial `must_not_fire`, 10: 8 of harmless encoded data
+(ordinary text, a PNG header, SHA-256 and SHA-1 hex, an image-like blob, a JWT segment, a key-shaped run inside a longer word, the
+encoded AWS documentation example) and 2 more (a function of another module that only has the same name, and a blob decoded through an
+aliased import). Not a case: a key inside a literal over 4,096 characters; the tool documents that it does not decode it, so neither
+label would be honest; a unit test pins the skip. On the unchanged tool the 14 first seeded cases and the 6 new ones give 34 and 14 `FN`
+keys (every `must_fire` label, person and agent) and no other failure.
+
+Holdout: the last full run of `py eval/run.py --check --no-write --families real,seeded,adversarial` (before the name resolver and the
+linear-time change) gave holdout 66 cases, `secrets.hardcoded missed 8` both before and after this feature. The count did NOT move. This
+feature was a hypothesis about that family, not a fix for named holdout cases (the holdout is not read), so the holdout was not the target
+and no claim about it is made. The final full run, with the clean family, is part of the verification that follows this entry; its
+numbers are not given here.
