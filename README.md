@@ -140,6 +140,23 @@ for anything wrong. Errors from other commands also end in a `fix:` line.
   server-side check is enforceable: see [docs/CI.md](https://github.com/hitarth1812/AI-Gate/blob/main/docs/CI.md).
 - **Static heuristics, not proof.** Time complexity is flagged from code shape, not measured. Test
   tampering for JS/TS is line-based.
+- **Encoded and assembled keys are found only in simple shapes.** A provider key is a block when it sits behind one decoder
+  call whose argument is a plain string literal, and the message names the step: Python `base64.b64decode` and its
+  `urlsafe_`, `standard_` and `decodebytes` forms, `bytes.fromhex`, `binascii.unhexlify`, `a2b_hex`, `a2b_base64`,
+  `codecs.decode(x, "rot13" or "hex" or "base64")`, a `[::-1]` or `"".join(reversed(x))` of a literal; JS/TS `atob`
+  (also `window.`, `globalThis.` and `self.`), `Buffer.from(x, "base64", "base64url" or "hex")`, `.split("").reverse().join("")`;
+  Go `base64.StdEncoding`, `URLEncoding`, `RawStdEncoding`, `RawURLEncoding` and `hex.DecodeString`. Up to two decoders may
+  follow each other. A key built from literal pieces in a few statements (a list or string that starts as literals, is
+  extended with `push`, `append`, `extend` or `+=`, then joined) is a block too. Names are followed only inside one file, and
+  only when the file imports them from the standard library (`from base64 import b64decode as d`, `import base64 as b`, a Go
+  import alias); a name the file binds to anything else is not a decoder. **Still not found:** a decoder you wrote yourself
+  (`my_b64(x)`); a name followed across files, through a reassignment, a function parameter, `getattr` or a dynamic import;
+  a value built or decoded at run time or read from a file or an environment variable; a decoder call whose argument is not a
+  plain string literal (a variable, a call, an f-string with a variable); decoding deeper than two levels; a literal over
+  4,096 characters (it is not decoded and `-v` says so; this includes a 4096-bit RSA private key once it is base64-encoded);
+  assembly over more than 25 lines or with a piece that is not a literal; and any JS/TS or Go file the lexer gives up on
+  (`-v` shows the `lang.fallback` note), where no encoded or assembled key is looked for. Decoded text is checked for provider
+  keys only, never for `secrets.generic`.
 - **Not covered in lite:** calls to functions or attributes that don't exist (that needs a type
   checker, which you can add as a `[[commands]]` entry), sandboxed test runs, mutation testing, and
   LLM review.

@@ -1,0 +1,11 @@
+id = "r5-sha1-hex-go"
+source = "adversarial"
+language = "go"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "shop/digest.go"

@@ -3104,6 +3104,7 @@ def _secrets_file(ctx, fc, where) -> list:
         out.extend(_folded_key_findings(ctx, fc, where, {(f.line, f.key) for f in out}))
     elif fc.ext in _FOLD_LANG_EXTS and _may_fold_js_go(fc.added, _SPEC_EXT[fc.ext] == "go"):
         out.extend(_folded_key_findings_js_go(ctx, fc, where, {(f.line, f.key) for f in out}, _SPEC_EXT[fc.ext] == "go"))
+    out.extend(_encoded_key_findings(ctx, fc, where, {(f.line, f.key) for f in out}))
     return out
 
 
@@ -3437,6 +3438,634 @@ def _folded_key_findings_js_go(ctx, fc, where, have, go) -> list:
                 i = chain(i, 0)[1]
     except RecursionError:                                        # a pathological nesting: what was found so far stands
         pass
+    return out
+
+
+# ---------------------------------------------------------------------------------------------- encoded and assembled keys
+# A provider key behind one decoder call (`atob("..")`, `base64.b64decode("..")`, `hex.DecodeString("..")`, a reversed literal)
+# or built in a few statements from literal pieces is one key at run time. The string literal that is the argument of a known
+# decoder call is decoded (at most two decoders one after the other, at most 4,096 characters) and ONLY the provider patterns
+# run on the result, with their boundary and documented-example rules; the generic rules never see decoded text. The same for a
+# list or a string that starts as literals, is extended with literals only (push, append, extend, +=) and is joined or used, when
+# the statements are at most 25 lines apart. A decoder is known by its name as the table spells it, or by a name the same file
+# imports it under (`from base64 import b64decode as d`, `import base64 as b`, a Go import alias); a name that the file binds to
+# anything else (a def, an assignment, a parameter, another module) is not a decoder. Anything else (a custom decoder, a name
+# followed across files, a value read at run time, a third level, a piece that is a variable) is not followed. The table is
+# data: an empty table (or language) turns the whole check off. Every step is linear in the size of the file.
+DECODER_CALLS = {
+    "python": {"base64.b64decode": "base64", "base64.urlsafe_b64decode": "base64", "base64.standard_b64decode": "base64",
+               "base64.decodebytes": "base64", "binascii.a2b_base64": "base64", "bytes.fromhex": "hex",
+               "binascii.unhexlify": "hex", "binascii.a2b_hex": "hex", "codecs.decode": "codecs", "[::-1]": "reverse",
+               "reversed(": "reverse"},
+    "js": {"atob": "base64", "Buffer.from": "buffer", ".reverse(": "reverse"},
+    "go": {"base64.StdEncoding.DecodeString": "base64", "base64.URLEncoding.DecodeString": "base64",
+           "base64.RawStdEncoding.DecodeString": "base64", "base64.RawURLEncoding.DecodeString": "base64",
+           "hex.DecodeString": "hex"},
+}
+ENCODED_LITERAL_MAX = 4096        # a literal over this many characters is not decoded (it is counted, and shown with -v)
+ENCODED_LEVELS = 2                # decoders applied one after another; a third is not followed
+ASSEMBLY_SPAN = 25                # lines between the first and the last statement of an assembled key
+ASSEMBLY_STEPS = 256              # statements that extend one name; more than this and the name is dropped (keeps it linear)
+ASSEMBLY_PIECES = 4096            # pieces in one assembled list
+# the encoding names of codecs.decode (Python normalises case, `-` and spaces to `_`) and of Buffer.from (Node ignores case)
+_CODEC_NAMES = {"rot13": "rot13", "rot_13": "rot13", "hex": "hex", "hex_codec": "hex", "base64": "base64",
+                "base64_codec": "base64", "base_64": "base64"}
+_BUFFER_ENCODINGS = {"base64": "base64", "base64url": "base64", "hex": "hex"}
+_ENCODED_PHRASE = {"base64": "base64-decoded", "hex": "hex-decoded", "rot13": "rot13-decoded", "reverse": "reversed"}
+_GENERIC_TAIL = frozenset({"decode", "from"})          # too common to test for alone: the gate wants the whole dotted name
+_ASSEMBLE_GATE = {                                    # an added line that extends a literal list or string, or joins a name
+    "python": re.compile(r"""\.(?:append|extend)\s*\(\s*[\[(]?\s*[A-Za-z]{0,2}['"]|\+=\s*[\[(]?\s*[A-Za-z]{0,2}['"]|"""
+                         r"""\.join\s*\(\s*[A-Za-z_]\w*\s*\)"""),
+    "js": re.compile(r"""\.push\s*\(\s*['"`]|\+=\s*['"`]|\.join\s*\("""),
+    "go": re.compile(r"""\bappend\s*\(\s*\w+\s*,\s*["`]|\+=\s*["`]|\bstrings\s*\.\s*Join\s*\("""),
+}
+_ENC_CACHE: dict = {}
+_JS_REVERSE = re.compile(r"""\s*\.\s*split\s*\(\s*(?:""|'')\s*\)\s*\.\s*reverse\s*\(\s*\)\s*\.\s*join\s*\(\s*(?:""|'')\s*\)""")
+_JS_TOSTRING = re.compile(r"""\s*\.\s*toString\s*\(\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)""")
+_JS_BUFFER_ENCODING = re.compile(r"""\s*,\s*(?:"(base64url|base64|hex)"|'(base64url|base64|hex)')\s*\)""", re.I)
+_JS_SHADOW = re.compile(r"\b(?:function|const|let|var|class)\s+(atob|Buffer)\b")
+_CLOSE_PAREN = re.compile(r"\s*,?\s*\)")
+_WS = re.compile(r"\s*")
+_GO_IMPORT = re.compile(r'''(?m)^[ \t]*(?:import[ \t]+)?(?:(?P<alias>[A-Za-z_]\w*|\.)[ \t]+)?"(?P<path>[^"\n]+)"[ \t]*$''')
+_GO_CALL = re.compile(r"(?<![\w.])(?P<root>[A-Za-z_]\w*)\s*\.\s*(?P<rest>[A-Za-z_]\w*(?:\s*\.\s*[A-Za-z_]\w*)*)\s*\(")
+_STR_JS = r"""(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'|`[^`$\\]*`)"""
+_STR_GO = r'''(?:"(?:[^"\\\n]|\\.)*"|`[^`]*`)'''
+
+
+def _decode_literal(kind, s):
+    """One transformation of a literal: base64 (either alphabet), hex, rot13, reverse. None when `s` is not valid for it.
+    Bytes become text one character per byte, so a binary result is simply text no provider pattern matches."""
+    if kind == "base64":
+        import base64
+        t = "".join(s.split()).rstrip("=")
+        if not t or not re.fullmatch(r"[A-Za-z0-9+/_-]+", t):
+            return None
+        t = t.replace("-", "+").replace("_", "/")
+        try:
+            return base64.b64decode(t + "=" * (-len(t) % 4), validate=True).decode("latin-1")
+        except ValueError:
+            return None
+    if kind == "hex":
+        t = "".join(s.split())
+        if not t or len(t) % 2 or not re.fullmatch(r"[0-9A-Fa-f]+", t):
+            return None
+        return bytes.fromhex(t).decode("latin-1")
+    if kind == "rot13":
+        import codecs
+        return codecs.encode(s, "rot13")
+    if kind == "reverse":
+        return s[::-1]
+    return None
+
+
+def _encoded_gate(table, lang):
+    """One regular expression of the decoder names of a language (a substring test per file, before anything is parsed). A
+    dotted name is tested by its last part (so `from base64 import b64decode` and `import base64 as b` pass too), or by its
+    first part when the last is too common; any other key (`[::-1]`, `reversed(`) as it is."""
+    key = ("gate", lang, tuple(table))
+    if key not in _ENC_CACHE:
+        parts = set()
+        for name in table:
+            if re.fullmatch(r"[\w$]+(?:\.[\w$]+)+", name):
+                tail = name.rpartition(".")[2]
+                parts.add(r"\s*\.\s*".join(re.escape(x) for x in name.split(".")) if tail in _GENERIC_TAIL else re.escape(tail))
+            else:
+                parts.add(re.escape(name))
+        if lang == "python" and "codecs.decode" in table:             # `d(x, "rot13")` through any alias of codecs.decode
+            parts.add(r"""(?i:[,(=]\s*['"](?:rot[_-]?13|hex(?:_codec)?|base[_-]?64(?:_codec)?)['"]\s*[,)])""")
+        _ENC_CACHE[key] = re.compile("|".join(sorted(parts, key=len, reverse=True)))
+    return _ENC_CACHE[key]
+
+
+def _encoded_where(names, where):
+    return f", {', then '.join(_ENCODED_PHRASE[n] for n in names)} from a literal{where}"
+
+
+def _py_bindings(tree) -> dict:
+    """name -> what the file binds it to: the dotted name an import gives it (`import base64 as b` is {'b': {'base64'}},
+    `from base64 import b64decode as d` is {'d': {'base64.b64decode'}}), or None for any other binding (a def, a class, an
+    assignment, a loop or with target, a parameter, a relative import). Flow and scope are ignored: a name bound two ways
+    anywhere in the file is not followed."""
+    binds: dict = {}
+
+    def add(name, what):
+        binds.setdefault(name, set()).add(what)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                add(a.asname or a.name.split(".")[0], a.name if a.asname else a.name.split(".")[0])
+        elif isinstance(node, ast.ImportFrom):
+            for a in node.names:
+                if a.name != "*":
+                    add(a.asname or a.name, f"{node.module}.{a.name}" if node.module and not node.level else None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            add(node.name, None)
+        elif isinstance(node, ast.arg):
+            add(node.arg, None)
+        elif isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            add(node.id, None)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            add(node.name, None)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            add(node.name, None)
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            add(node.rest, None)
+    return binds
+
+
+def _py_call_shape(n, kind):
+    """(data expression, codec name or None) of a call to a decoder of `kind`, or None when the call passes an argument the
+    decoder does not take or one that changes what it does (a custom alphabet, a codec that is not one of ours)."""
+    if any(isinstance(a, ast.Starred) for a in n.args) or any(k.arg is None for k in n.keywords):
+        return None
+    pos, kws = list(n.args), {k.arg: k.value for k in n.keywords}
+    names = {"base64": ("s", "data"), "hex": ("hexstr", "string", "data"), "codecs": ("obj",)}[kind]
+    data = pos.pop(0) if pos else next((kws.pop(k) for k in names if k in kws), None)
+    if data is None:
+        return None
+    codec = None
+    if kind == "codecs":
+        enc = pos.pop(0) if pos else kws.pop("encoding", None)
+        if not isinstance(enc, ast.Constant) or not isinstance(enc.value, str):
+            return None
+        codec = _CODEC_NAMES.get(enc.value.lower().replace("-", "_").replace(" ", "_"))
+        if codec is None:
+            return None
+        if pos:
+            pos.pop(0)                                              # errors=
+        kws.pop("errors", None)
+    elif kind == "base64":
+        for k in ("altchars", "validate", "strict_mode"):
+            if pos:                                                 # b64decode(s, altchars, validate)
+                kws.setdefault(k, pos.pop(0))
+        if "altchars" in kws and not (isinstance(kws["altchars"], ast.Constant) and kws["altchars"].value is None):
+            return None                                             # another alphabet: not decoded
+        kws.pop("altchars", None)
+        kws.pop("validate", None)
+        kws.pop("strict_mode", None)
+    return (data, codec) if not pos and not kws else None
+
+
+def _py_decoded(node, table, skipped, added, binds):
+    """(text, transformations) of a constant Python expression that may pass through the decoder calls of `table`; None
+    when any part of it is not a literal (a variable, a call, a custom decoder) or a third decoder would be needed.
+    A literal over the size limit is recorded in `skipped` (when it is on an added line) and not decoded."""
+    def dotted(n):
+        parts = []
+        while isinstance(n, ast.Attribute):
+            parts.append(n.attr)
+            n = n.value
+        return ".".join(reversed(parts + [n.id])) if isinstance(n, ast.Name) else None
+
+    def resolve(name):                       # the table's spelling of a name this file may call, or None
+        root, dot, rest = name.partition(".")
+        what = binds.get(root)
+        if what is None:
+            return name if dot else None     # `base64.b64decode` as the table spells it; a bare name must be imported
+        if len(what) != 1 or None in what:
+            return None
+        return next(iter(what)) + dot + rest
+
+    def apply(kind, arg):
+        inner = go(arg)
+        if inner is None:
+            return None
+        text, names = inner
+        if len(names) >= ENCODED_LEVELS:
+            return None
+        if not names and len(text) > ENCODED_LITERAL_MAX:
+            if any(ln in added for ln in range(arg.lineno, (arg.end_lineno or arg.lineno) + 1)):
+                skipped.add((arg.lineno, arg.col_offset))
+            return None
+        out = _decode_literal(kind, text)
+        return None if out is None else (out, names + [kind])
+
+    def go(n):
+        text = _fold_str(n)
+        if text is not None:
+            return text, []
+        if isinstance(n, ast.Constant) and isinstance(n.value, bytes):
+            return n.value.decode("latin-1"), []
+        if isinstance(n, ast.Call):
+            f, name = n.func, dotted(n.func)
+            kind = table.get(resolve(name) or "") if name else None
+            if kind is None and isinstance(f, ast.Attribute) and f.attr == "decode":     # bytes to text: no transformation
+                return go(f.value)
+            if kind in ("base64", "hex", "codecs"):
+                shape = _py_call_shape(n, kind)
+                return None if shape is None else apply(shape[1] or kind, shape[0])
+            if table.get("reversed(") == "reverse" and isinstance(f, ast.Attribute) and f.attr == "join" \
+                    and len(n.args) == 1 and not n.keywords and _fold_str(f.value) == "" \
+                    and isinstance(n.args[0], ast.Call) and dotted(n.args[0].func) == "reversed" \
+                    and "reversed" not in binds and len(n.args[0].args) == 1 and not n.args[0].keywords:
+                return apply("reverse", n.args[0].args[0])
+        elif isinstance(n, ast.Subscript) and table.get("[::-1]") == "reverse" and isinstance(n.slice, ast.Slice) \
+                and n.slice.lower is None and n.slice.upper is None and isinstance(n.slice.step, ast.UnaryOp) \
+                and isinstance(n.slice.step.op, ast.USub) and isinstance(n.slice.step.operand, ast.Constant) \
+                and n.slice.step.operand.value == 1:
+            return apply("reverse", n.value)
+        return None
+    return go(node)
+
+
+def _py_decoder_hits(tree, table, added, skipped) -> list:
+    """(line, decoded text, transformations) for every decoder expression of a Python tree that decodes a literal."""
+    out, stack, binds = [], [tree], _py_bindings(tree)
+    while stack:
+        node = stack.pop()
+        if isinstance(node, (ast.Call, ast.Subscript)):
+            got = _py_decoded(node, table, skipped, added, binds)
+            if got is not None and got[1]:
+                line = next((ln for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1) if ln in added), None)
+                if line is not None:
+                    out.append((line, got[0], got[1]))
+                continue
+        stack.extend(ast.iter_child_nodes(node))
+    return out
+
+
+def _py_assembly_events(tree) -> list:
+    """(line, kind, name, payload) of the statements that start, extend, reset or join a name that holds literals, in order."""
+    ev = []
+
+    def lit_list(n):
+        if isinstance(n, (ast.List, ast.Tuple)):
+            vals = [_fold_str(e) for e in n.elts]
+            return None if None in vals else vals
+        return None
+
+    def assign(node, name, value):
+        text, items = _fold_str(value), lit_list(value)
+        kind, pay = ("set_str", text) if text is not None else ("set_list", items) if items is not None else ("poison", None)
+        ev.append((node.lineno, node.col_offset, kind, name, pay))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            if len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                assign(node, node.targets[0].id, node.value)
+            else:
+                for t in node.targets:
+                    ev += [(node.lineno, node.col_offset, "poison", n.id, None) for n in ast.walk(t) if isinstance(n, ast.Name)]
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            if node.value is not None:
+                assign(node, node.target.id, node.value)
+        elif isinstance(node, ast.AugAssign) and isinstance(node.target, ast.Name):
+            text, items = _fold_str(node.value), lit_list(node.value)
+            if isinstance(node.op, ast.Add) and text is not None:
+                ev.append((node.lineno, node.col_offset, "add_str", node.target.id, text))
+            elif isinstance(node.op, ast.Add) and items is not None:
+                ev.append((node.lineno, node.col_offset, "add_list", node.target.id, items))
+            else:
+                ev.append((node.lineno, node.col_offset, "poison", node.target.id, None))
+        elif isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            f, args = node.func, node.args
+            pos = (node.lineno, node.col_offset)
+            if f.attr == "join" and len(args) == 1 and isinstance(args[0], ast.Name) and not node.keywords:
+                sep = _fold_str(f.value)
+                if sep is not None:
+                    ev.append((*pos, "join", args[0].id, sep))
+            elif isinstance(f.value, ast.Name):
+                if f.attr == "append" and len(args) == 1 and not node.keywords and _fold_str(args[0]) is not None:
+                    ev.append((*pos, "add_list", f.value.id, [_fold_str(args[0])]))
+                elif f.attr == "extend" and len(args) == 1 and not node.keywords and lit_list(args[0]) is not None:
+                    ev.append((*pos, "add_list", f.value.id, lit_list(args[0])))
+                elif f.attr in ("append", "extend", "insert", "remove", "pop", "clear", "sort", "reverse"):
+                    ev.append((*pos, "poison", f.value.id, None))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    return [(e[0], e[2], e[3], e[4]) for e in ev]
+
+
+def _assembled_values(events, added) -> list:
+    """(line, value) of every name whose literal pieces were extended at least once, from (line, kind, name, payload) events in
+    source order (kinds: set_str, set_list, add_str, add_list, join, poison). A piece that is not a literal, or a name that is
+    set again to something else, ends it. All the statements that built the value are at most ASSEMBLY_SPAN lines apart (the
+    name is dropped as soon as one is not), and the finding goes on the last of them that the change adds. A name is also
+    dropped after ASSEMBLY_STEPS extensions or when its text would pass ENCODED_LITERAL_MAX characters, so the work stays
+    linear in the number of statements however they are written."""
+    state, out = {}, []
+    for line, kind, name, pay in events:
+        cur = state.get(name)
+        if kind == "set_str" or kind == "set_list":
+            total = sum(map(len, pay)) if kind == "set_list" else len(pay)
+            if total > ENCODED_LITERAL_MAX or (kind == "set_list" and len(pay) > ASSEMBLY_PIECES):
+                state.pop(name, None)
+            else:
+                state[name] = {"list": kind == "set_list", "v": list(pay) if kind == "set_list" else pay, "first": line,
+                               "at": line if line in added else None, "total": total, "steps": 0, "ver": 0, "joined": None}
+            continue
+        if kind == "poison":
+            state.pop(name, None)
+            continue
+        if cur is None:
+            continue
+        if line - cur["first"] > ASSEMBLY_SPAN:                   # the bound can never be met again
+            del state[name]
+            continue
+        if line in added:
+            cur["at"] = line
+        if kind == "join":
+            if not (cur["list"] and cur["steps"]) or cur["joined"] == (cur["ver"], pay):
+                continue
+            cur["joined"] = (cur["ver"], pay)
+            value = pay.join(cur["v"])
+        elif kind == "add_str" and not cur["list"]:
+            cur["v"] += pay
+            cur["total"] += len(pay)
+            cur["steps"] += 1
+            cur["ver"] += 1
+            value = cur["v"]
+        elif kind == "add_list" and cur["list"]:
+            cur["v"].extend(pay)
+            cur["total"] += sum(map(len, pay))
+            cur["steps"] += 1
+            cur["ver"] += 1
+            if cur["total"] > ENCODED_LITERAL_MAX or len(cur["v"]) > ASSEMBLY_PIECES or cur["steps"] > ASSEMBLY_STEPS:
+                del state[name]
+            continue
+        else:
+            del state[name]                                       # a string extended as a list, or the reverse
+            continue
+        if cur["total"] > ENCODED_LITERAL_MAX or cur["steps"] > ASSEMBLY_STEPS:
+            state.pop(name, None)
+        elif cur["at"] is not None and len(value) <= ENCODED_LITERAL_MAX and PROVIDER_LITERALS.search(value):
+            out.append((cur["at"], value))
+    return out
+
+
+def _js_go_assembly_rx(go):
+    S = _STR_GO if go else _STR_JS
+    N, SC, LS = r"[A-Za-z_$][\w$]*", rf"{S}(?:\s*\+\s*{S})*", rf"{S}(?:\s*,\s*{S})*"
+    end = r"(?=[ \t]*(?:[;,)}\]]|\r?\n|$))"
+    if go:
+        P = r"(?<![\w.])(?:var\s+)?"
+        return S, [
+            (0, "set_list", rf"{P}(?P<n>{N})\s*(?::=|=)\s*\[\]string\s*\{{\s*(?P<v>(?:{LS}\s*,?\s*)?)\}}"),
+            (0, "set_list", rf"(?<![\w.])var\s+(?P<n>{N})\s+\[\]string(?!\s*=)"),
+            (0, "set_str", rf"{P}(?P<n>{N})(?:\s+string)?\s*(?::=|=)\s*(?P<v>{SC}){end}"),
+            (1, "poison", rf"{P}(?P<n>{N})(?:\s+(?:string|\[\]string))?\s*(?::=|=)(?!=)"),
+            (0, "add_str", rf"(?<![\w.])(?P<n>{N})\s*\+=\s*(?P<v>{SC}){end}"),
+            (1, "poison", rf"(?<![\w.])(?P<n>{N})\s*\+="),
+            (0, "add_list", rf"(?<![\w.])(?P<n>{N})\s*=\s*append\s*\(\s*(?P=n)\s*,\s*(?P<v>{LS})\s*,?\s*\)"),
+            (0, "join", rf"\bstrings\s*\.\s*Join\s*\(\s*(?P<n>{N})\s*,\s*(?P<v>{S})\s*\)"),
+        ]
+    P = r"(?<![\w$.])(?:(?:const|let|var)\s+)?"
+    return S, [
+        (0, "set_list", rf"{P}(?P<n>{N})\s*=(?![=>])\s*\[\s*(?P<v>(?:{LS}\s*,?\s*)?)\](?!\s*[.\[(])"),
+        (0, "set_str", rf"{P}(?P<n>{N})\s*=(?![=>])\s*(?P<v>{SC}){end}"),
+        (1, "poison", rf"{P}(?P<n>{N})\s*=(?![=>])"),
+        (0, "add_str", rf"(?<![\w$.])(?P<n>{N})\s*\+=\s*(?P<v>{SC}){end}"),
+        (1, "poison", rf"(?<![\w$.])(?P<n>{N})\s*\+="),
+        (0, "add_list", rf"(?<![\w$.])(?P<n>{N})\s*\.\s*push\s*\(\s*(?P<v>{LS})\s*\)"),
+        (1, "poison", rf"(?<![\w$.])(?P<n>{N})\s*\.\s*(?:push|unshift|splice|pop|shift|fill|reverse|sort)\s*\("),
+        (0, "join", rf"(?<![\w$.])(?P<n>{N})\s*\.\s*join\s*\(\s*(?P<v>{S})?\s*\)"),
+    ]
+
+
+def _asm_piece(piece, go):
+    return piece[1:-1] if piece[0] == "`" else _fold_unescape(piece[1:-1])
+
+
+def _js_go_assembly_events(lx, text, go) -> list:
+    """(line, kind, name, payload) of the statements of a JS/TS or Go file, read from the code text of the lexer view (a
+    statement must start in code, not inside a string); the most specific reading of a position wins."""
+    import bisect
+    key = ("asm", go)
+    if key not in _ENC_CACHE:
+        S, rows = _js_go_assembly_rx(go)
+        _ENC_CACHE[key] = (re.compile(S), [(prio, kind, re.compile(rx)) for prio, kind, rx in rows])
+    piece, rows = _ENC_CACHE[key]
+    best = {}
+    for prio, kind, rx in rows:
+        for m in rx.finditer(text):
+            p = m.start()
+            if lx.kinds[p] == STR or (p in best and best[p][0] <= prio):
+                continue
+            v = m.groupdict().get("v")
+            if kind == "join":
+                pay = _asm_piece(v, go) if v is not None else ","
+            elif kind in ("add_str", "set_str"):
+                pay = "".join([_asm_piece(x, go) for x in piece.findall(v)])
+            elif kind in ("add_list", "set_list"):
+                pay = [_asm_piece(x, go) for x in piece.findall(v or "")]
+            else:
+                pay = None
+            best[p] = (prio, kind, m.group("n"), pay)
+    return [(bisect.bisect_right(lx.starts, p), best[p][1], best[p][2], best[p][3]) for p in sorted(best)]
+
+
+def _go_package_names(text) -> dict:
+    """The packages a Go file imports, by the name it uses for them: {'b64': {'encoding/base64'}} for `import b64
+    "encoding/base64"`, {'base64': {...}} for no alias. An import under `_` or `.` binds no name that is followed."""
+    names: dict = {}
+    for m in _GO_IMPORT.finditer(text):
+        alias, path = m.group("alias"), m.group("path")
+        if alias in ("_", "."):
+            continue
+        names.setdefault(alias or path.rsplit("/", 1)[-1], set()).add(path)
+    return names
+
+
+def _js_go_decoder_hits(fc, lx, table, go, skipped) -> list:
+    """(line, decoded text, transformations) for every decoder call or reversed literal of a JS/TS or Go file whose argument
+    is a string constant (a `+` chain of them, a template without interpolation, or another decoder call)."""
+    import bisect
+    text, kinds, added = lx.code_text((COM,)), lx.kinds, fc.added
+    reverse = not go and table.get(".reverse(") == "reverse"
+    pkgs = _go_package_names(text) if go else {}
+    if go:
+        call_rx = _GO_CALL
+    else:
+        shadowed = {m.group(1) for m in _JS_SHADOW.finditer(text)}
+        names = [n for n, k in table.items() if k in ("base64", "hex", "buffer") and n.split(".")[0] not in shadowed]
+        key = ("calls", tuple(names))
+        if key not in _ENC_CACHE:
+            sep = r"\s*\.\s*"
+            alts = "|".join(sep.join(re.escape(p) for p in n.split(".")) for n in sorted(names, key=len, reverse=True))
+            _ENC_CACHE[key] = re.compile(r"(?<![\w$.])(?:(?:window|globalThis|self|global)\s*\.\s*)?(?P<n>" + alts + r")\s*\(") \
+                if names else None
+        call_rx = _ENC_CACHE[key]
+    if call_rx is None and not reverse:
+        return []
+    start_rx = call_rx if not reverse else re.compile((f"(?:{call_rx.pattern})|" if call_rx else "") + r"""(?P<q>["'`])""")
+
+    variables: dict = {}
+
+    def match_call(p):                                           # (decoder kind, end of the opening parenthesis) | None
+        if call_rx is None or kinds[p] == STR:
+            return None
+        m = call_rx.match(text, p)
+        if m is None:
+            return None
+        if not go:
+            return table.get(re.sub(r"\s+", "", m.group("n"))), m.end()
+        name = m.group("root")
+        bound = pkgs.get(name)
+        if bound is None:
+            root = name                                           # not imported here: as the table spells it
+        elif len(bound) == 1 and next(iter(bound)) in ("encoding/base64", "encoding/hex"):
+            root = next(iter(bound)).rsplit("/", 1)[-1]
+        else:
+            return None
+        if table.get(root + "." + re.sub(r"\s+", "", m.group("rest"))) is None:
+            return None
+        if name not in variables:                                 # a variable of that name here is not the package
+            variables[name] = bool(re.search(rf"\b{re.escape(name)}\s*:=|\bvar\s+{re.escape(name)}\b", text))
+        if variables[name]:
+            return None
+        return table.get(root + "." + re.sub(r"\s+", "", m.group("rest"))), m.end()
+
+    def ws(p):
+        return _WS.match(text, p).end()
+
+    def lit(p):
+        ch = text[p:p + 1]
+        if ch not in ('"', "'", "`") or kinds[p] != STR or (p and kinds[p - 1] == STR) or (go and ch == "'"):
+            return None
+        if ch == "`" and not go:
+            q = _FOLD_TEMPLATE.match(text, p)
+            val = _fold_template(q.group(1))[0] if q is not None else None
+        else:
+            q = _FOLD_QUOTED[ch].match(text, p)
+            val = None if q is None else q.group(1) if ch == "`" else _fold_unescape(q.group(1))
+        return None if val is None else (val, q.end())
+
+    def line_range(p, e):
+        return bisect.bisect_right(lx.starts, p), bisect.bisect_right(lx.starts, e - 1)
+
+    def apply(kind, val, done, at):
+        if len(done) >= ENCODED_LEVELS:
+            return None
+        if not done and len(val) > ENCODED_LITERAL_MAX:
+            first, last = line_range(at, at + 1)
+            if any(ln in added for ln in range(first, last + 1)):
+                skipped.add(at)
+            return None
+        out = _decode_literal(kind, val)
+        return None if out is None else (out, done + [kind])
+
+    reached = [0]                                                # how far the last operand read, to skip what it read
+
+    def operand(p, depth=0):                                     # (value, transformations, end) | None
+        p = ws(p)
+        got = lit(p)
+        if got is not None:
+            val, e = got
+            pieces, done = [val], []
+            while text[ws(e):ws(e) + 1] == "+" and text[ws(e) + 1:ws(e) + 2] not in ("=", "+"):     # "a" + "b"
+                reached[0] = max(reached[0], e)
+                more = lit(ws(ws(e) + 1))
+                if more is None:
+                    return None
+                pieces.append(more[0])
+                e = more[1]
+            reached[0] = max(reached[0], e)
+            val = pieces[0] if len(pieces) == 1 else "".join(pieces)
+        else:
+            found = match_call(p) if depth < ENCODED_LEVELS + 2 else None
+            if found is None or found[0] not in ("base64", "hex", "buffer"):
+                return None
+            kind = found[0]
+            inner = operand(found[1], depth + 1)
+            if inner is None:
+                return None
+            val, done, e = inner
+            if kind == "buffer":
+                enc = _JS_BUFFER_ENCODING.match(text, e)
+                if enc is None:
+                    return None
+                kind, e = _BUFFER_ENCODINGS[(enc.group(1) or enc.group(2)).lower()], enc.end()
+            else:
+                close = _CLOSE_PAREN.match(text, e)
+                if close is None:
+                    return None
+                e = close.end()
+            res = apply(kind, val, done, p)
+            if res is None:
+                return None
+            val, done = res
+        while True:
+            m = _JS_REVERSE.match(text, e) if reverse else None
+            if m is not None:
+                res = apply("reverse", val, done, p)
+                if res is None:
+                    return None
+                (val, done), e = res, m.end()
+                continue
+            m = _JS_TOSTRING.match(text, e) if done else None
+            if m is None:
+                return val, done, e
+            e = m.end()
+
+    out, upto = [], 0
+    for m in start_rx.finditer(text):
+        p = m.start()
+        if p < upto:
+            continue
+        reached[0] = p
+        got = operand(p)
+        if got is None:
+            if m.lastgroup == "q":                               # a literal run that was read and was nothing: not read again
+                upto = max(upto, reached[0])
+            continue
+        upto = got[2]
+        if not got[1]:
+            continue
+        first, last = line_range(p, got[2])
+        line = next((ln for ln in range(first, last + 1) if ln in added), None)
+        if line is not None:
+            out.append((line, got[0], got[1]))
+    return out
+
+
+def _encoded_key_findings(ctx, fc, where, have) -> list:
+    """Provider keys behind a decoder call or assembled from literal pieces, for Python, JS/TS and Go (see DECODER_CALLS)."""
+    lang = "python" if fc.ext in PY_EXTS else {"go": "go", "js": "js"}.get(_SPEC_EXT.get(fc.ext))
+    table = DECODER_CALLS.get(lang) if lang else None
+    if not table:
+        return []
+    joined = "\n".join(fc.added.values())
+    decode, assemble = _encoded_gate(table, lang).search(joined), _ASSEMBLE_GATE[lang].search(joined)
+    if not decode and not assemble:
+        return []
+    skipped, hits = set(), []                                     # hits: (line, text, the words for the message)
+    if lang == "python":
+        tree = ctx.py_tree(fc)[0]
+        if tree is None:
+            return []
+        try:
+            if decode:
+                hits += [(ln, t, _encoded_where(names, where)) for ln, t, names in _py_decoder_hits(tree, table, fc.added, skipped)]
+            if assemble:
+                hits += [(ln, t, f", assembled from literals{where}")
+                         for ln, t in _assembled_values(_py_assembly_events(tree), fc.added)]
+        except RecursionError:
+            pass
+    else:
+        lx = ctx.lexed(fc)
+        if lx is None:
+            return []
+        go = lang == "go"
+        try:
+            if decode:
+                hits += [(ln, t, _encoded_where(names, where)) for ln, t, names in _js_go_decoder_hits(fc, lx, table, go, skipped)]
+            if assemble:
+                events = _js_go_assembly_events(lx, lx.code_text((COM,)), go)
+                hits += [(ln, t, f", assembled from literals{where}") for ln, t in _assembled_values(events, fc.added)]
+        except (RecursionError, MemoryError, IndexError):
+            pass
+    if skipped:                                                   # counted with the other notes, visible with -v
+        note = (f"decode.skipped: {fc.path}: {len(skipped)} encoded literal{'s' if len(skipped) != 1 else ''} "
+                f"over {ENCODED_LITERAL_MAX} characters not decoded")
+        if note not in ctx.lang_notes:
+            ctx.lang_notes.append(note)
+        ctx.parse_failures.add((fc.path, "decode"))               # no verdict the result cache may keep: the note must come back
+    import types
+    shadow, out = types.SimpleNamespace(path=fc.path, added={}), []   # the decoded text is not a line of the file
+    for line, text, words in hits:
+        for f in provider_findings(ctx, shadow, line, text, words, seen=set()):
+            if (f.line, f.key) not in have:
+                have.add((f.line, f.key))
+                out.append(f)
     return out
 
 

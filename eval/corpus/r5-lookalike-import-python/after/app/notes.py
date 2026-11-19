@@ -1,0 +1,3 @@
+from app.textcodec import b64decode
+
+NOTE = b64decode("VGhlIG5pZ2h0bHkgam9iIGNvcGllcyB0aGUgcmVwb3J0IHRvIHRoZSBzaGFyZWQgZHJpdmUgYW5kIHBvc3RzIHRoZSBsaW5rIGluIHRoZSB0ZWFtIGNoYW5uZWwgd2hlbiBpdCBpcyBkb25lLg==")

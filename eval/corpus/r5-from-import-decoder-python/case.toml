@@ -1,0 +1,14 @@
+id = "r5-from-import-decoder-python"
+source = "seeded"
+language = "python"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "app/creds.py"
+line = 3
+action = "block"
+agent_action = "block"

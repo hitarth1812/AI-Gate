@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import collections
 import concurrent.futures
 import json
@@ -67,6 +68,12 @@ SUBST = {
     # the AWS key in three pieces (round 3): a case that splits a key in its source writes the PIECES as placeholders, so no
     # tracked file holds the key, nor a constant-foldable expression that adds up to one. "@@AKIA@@" + "@@AKT1@@@@AKT2@@" is @@AWS@@.
     "@@AKIA@@": "AKIA", "@@AKT1@@": "QWERTYUI", "@@AKT2@@": "OPASDFGH",
+    # the AWS key in encoded forms (round 5): a case that hides the key behind a decoder call writes the placeholder of the form it
+    # decodes, so no tracked file holds the key, nor a literal that decodes to it. Built here, at run time, from @@AWS@@.
+    "@@AWSB64@@": base64.b64encode(_cat("AKIA", "QWERTYUIOPASDFGH").encode()).decode(),
+    "@@AWSHEX@@": _cat("AKIA", "QWERTYUIOPASDFGH").encode().hex(),
+    "@@AWSREV@@": _cat("AKIA", "QWERTYUIOPASDFGH")[::-1],
+    "@@AWSROT13@@": codecs.encode(_cat("AKIA", "QWERTYUIOPASDFGH"), "rot13"),
     "@@PEMBEGIN@@": "-----BEGIN " + "RSA PRIVATE KEY-----",
     "@@PEMEND@@": "-----END " + "RSA PRIVATE KEY-----",
 }

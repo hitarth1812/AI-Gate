@@ -1,0 +1,14 @@
+id = "r5-url-encoding-decode-go"
+source = "seeded"
+language = "go"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/creds.go"
+line = 9
+action = "block"
+agent_action = "block"

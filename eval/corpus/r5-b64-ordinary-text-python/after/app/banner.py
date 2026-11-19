@@ -1,0 +1,3 @@
+import base64
+
+BANNER = base64.b64decode("UmVsZWFzZSBub3RlczogdGhlIGltcG9ydGVyIG5vdyBrZWVwcyBnb2luZyB3aGVuIGEgcm93IGlzIGVtcHR5LCBhbmQgdGhlIHJlcG9ydCBzYXlzIGhvdyBtYW55IHJvd3Mgd2VyZSBza2lwcGVkLg==").decode()

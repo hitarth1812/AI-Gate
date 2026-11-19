@@ -1,0 +1,2 @@
+const icon = atob("iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAAAQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyAhIiMkJSYnKCkqKywtLi8wMTIzNDU2Nzg5Ojs8PT4/");
+module.exports = { icon };

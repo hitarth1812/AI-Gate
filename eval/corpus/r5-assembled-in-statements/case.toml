@@ -1,0 +1,28 @@
+id = "r5-assembled-in-statements"
+source = "seeded"
+language = "python"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "app/creds.py"
+line = 4
+action = "block"
+agent_action = "block"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "src/creds.js"
+line = 4
+action = "block"
+agent_action = "block"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/creds.go"
+line = 9
+action = "block"
+agent_action = "block"
