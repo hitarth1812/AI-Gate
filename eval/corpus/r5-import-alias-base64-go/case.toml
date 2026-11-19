@@ -1,0 +1,14 @@
+id = "r5-import-alias-base64-go"
+source = "seeded"
+language = "go"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/creds.go"
+line = 6
+action = "block"
+agent_action = "block"

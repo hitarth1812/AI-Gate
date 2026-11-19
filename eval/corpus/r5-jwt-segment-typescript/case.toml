@@ -1,0 +1,11 @@
+id = "r5-jwt-segment-typescript"
+source = "adversarial"
+language = "typescript"
+origin = "round 5 authored from README rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "src/token.ts"
