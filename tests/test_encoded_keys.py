@@ -557,6 +557,45 @@ def test_a_name_that_is_not_the_standard_decoder_is_not_one(repo, name):
     assert both(repo, path, src) == []
 
 
+def test_js_shadow_check_reads_code_only_not_a_string(repo):
+    src = f'const s = "function atob";\nconst k = atob("{b64(KEY)}");\n'
+    assert block_with(both(repo, "src/k.js", src), 2, B64)
+    drop(repo, "src/k.js")
+    src = f'// function atob\nconst s = `const Buffer`;\nconst k = Buffer.from("{hexed(KEY)}", "hex");\n'
+    assert block_with(both(repo, "src/k.js", src), 3, HEX)
+
+
+def test_go_variable_check_reads_code_only_not_a_string(repo):
+    src = ('package shop\n\nimport "encoding/hex"\n\nfunc k() []byte {\n\ts := "hex := 1; var hex"\n\t_ = s\n'
+           f'\tb, _ := hex.DecodeString("{hexed(KEY)}")\n\treturn b\n}}\n')
+    assert block_with(both(repo, "shop/k.go", src), line_of(src, "DecodeString"), HEX)
+
+
+def test_a_very_deep_expression_does_not_hide_a_key_found_elsewhere_in_the_file(repo):
+    key_line = f'import base64\n\nk = base64.b64decode("{b64(KEY)}")\n'
+    deep = "z = y" + "[::-1]" * 600 + "\n"
+    assert block_with(both(repo, "src/k.py", key_line + deep), 3, B64)       # the key is on an earlier line
+    drop(repo, "src/k.py")
+    assert block_with(both(repo, "src/k.py", deep + key_line), 4, B64)       # and on a later one
+    drop(repo, "src/k.py")
+    deep_calls = "z = y" + ".decode()" * 600 + "\n"
+    assert block_with(both(repo, "src/k.py", key_line + deep_calls), 3, B64)
+
+
+def test_one_expression_that_overflows_the_stack_costs_only_its_own_finding(monkeypatch):
+    import ast
+    real = aigate._py_decoded
+
+    def overflowing_on_line_two(node, *args):
+        if node.lineno == 2:
+            raise RecursionError
+        return real(node, *args)
+    monkeypatch.setattr(aigate, "_py_decoded", overflowing_on_line_two)
+    src = f'import base64\nx = base64.b64decode("{b64(KEY)}")\ny = base64.b64decode("{b64(KEY)}")\n'
+    got = aigate._py_decoder_hits(ast.parse(src), aigate.DECODER_CALLS["python"], {1: "", 2: "", 3: ""}, set())
+    assert [(ln, text) for ln, text, _ in got] == [(3, KEY)]
+
+
 def test_a_decoder_name_in_another_file_is_not_followed(repo):
     repo.write("src/util.py", "from base64 import b64decode as unwrap\n")
     assert both(repo, "src/k.py", f'from util import unwrap\n\nk = unwrap("{b64(KEY)}")\n') == []
@@ -645,6 +684,65 @@ def test_a_long_literal_chain_is_read_once_not_once_per_piece(monkeypatch, prefi
     assert large <= 5 * small, (small, large)               # 4 times the pieces, about 4 times the work (a square would be 16)
 
 
+_REAL_RE = aigate.re
+
+
+class _CountingRe:
+    """The `re` module of the tool, counting the characters its module-level functions are asked to scan."""
+    n = 0
+
+    def __getattr__(self, name):
+        return getattr(_REAL_RE, name)
+
+
+def _counting(name, index):
+    def call(self, *args, **kwargs):
+        _CountingRe.n += len(args[index])               # the text to scan is the second argument (the third for sub)
+        return getattr(_REAL_RE, name)(*args, **kwargs)
+    return call
+
+
+for _name, _index in (("search", 1), ("match", 1), ("fullmatch", 1), ("finditer", 1), ("findall", 1), ("split", 1),
+                      ("sub", 2), ("subn", 2)):
+    setattr(_CountingRe, _name, _counting(_name, _index))
+
+
+def _go_alias_file(n):
+    imports = "".join(f'\th{i} "encoding/hex"\n' for i in range(n))
+    calls = "".join(f'\th{i}.DecodeString("41")\n' for i in range(n))
+    return "package shop\n\nimport (\n" + imports + ")\n\nfunc k() {\n" + calls + "}\n"
+
+
+def _go_alias_work(monkeypatch, n):
+    src = _go_alias_file(n)
+    lx = aigate.lex_text(src, aigate.language_for("a.go").lex)
+    fc = SimpleNamespace(path="a.go", added={i: ln for i, ln in enumerate(src.split("\n"), 1)})
+    monkeypatch.setattr(aigate, "re", _CountingRe())
+    _CountingRe.n = 0
+    aigate._js_go_decoder_hits(fc, lx, aigate.DECODER_CALLS["go"], True, set())
+    return _CountingRe.n
+
+
+def test_go_calls_through_many_import_aliases_are_not_a_scan_of_the_file_per_alias(monkeypatch):
+    small, large = _go_alias_work(monkeypatch, 400), _go_alias_work(monkeypatch, 800)
+    assert 0 < small and large <= 3 * small, (small, large)     # twice the aliases, about twice the work (a square would be 4 times)
+
+
+def _failed_chain_work(monkeypatch, pieces):
+    src = "const s = " + " + ".join(['"ab"'] * pieces) + " + x;\n"
+    lx = aigate.lex_text(src, aigate.language_for("a.js").lex)
+    fc = SimpleNamespace(path="a.js", added={1: src})
+    monkeypatch.setattr(aigate, "_WS", _CountingWs(_REAL_WS))
+    _CountingWs.n = 0
+    aigate._js_go_decoder_hits(fc, lx, aigate.DECODER_CALLS["js"], False, set())
+    return _CountingWs.n
+
+
+def test_a_long_chain_that_ends_in_a_variable_is_read_once_too(monkeypatch):
+    small, large = _failed_chain_work(monkeypatch, 400), _failed_chain_work(monkeypatch, 1600)
+    assert large <= 5 * small, (small, large)               # the pieces it read are not read again from each of their own quotes
+
+
 def _big_file(name):
     """The generated source of one shape, made inside the test so no large text is a parameter (it would be in the test id)."""
     return {
@@ -654,13 +752,14 @@ def _big_file(name):
         "js_30000_plus_equals": ("src/a.js", 'let k = "";\n' + 'k+="";\n' * 30_000),
         "js_decoder_and_a_2000_piece_chain": ("src/a.js", 'atob("QQ==");\nconst s = ' + " + ".join(['"ab"'] * 2000) + ";\n"),
         "js_reverse_and_an_8000_piece_chain": ("src/a.js", "[].reverse();\nconst s = " + " + ".join(['"ab"'] * 8000) + ";\n"),
+        "go_10000_import_aliases_each_called_once": ("shop/a.go", _go_alias_file(10_000)),
     }[name]
 
 
 @pytest.mark.serial  # asserts a wall-clock limit; CPU contention from parallel tests would make it flaky
 @pytest.mark.parametrize("name", ["python_30000_plus_equals", "python_30000_appends", "python_60000_on_one_line",
                                   "js_30000_plus_equals", "js_decoder_and_a_2000_piece_chain",
-                                  "js_reverse_and_an_8000_piece_chain"])
+                                  "js_reverse_and_an_8000_piece_chain", "go_10000_import_aliases_each_called_once"])
 def test_the_scans_of_big_generated_files_finish_in_seconds(repo, name):
     import time
     path, text = _big_file(name)

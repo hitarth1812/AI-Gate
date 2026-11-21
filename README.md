@@ -144,12 +144,16 @@ for anything wrong. Errors from other commands also end in a `fix:` line.
   call whose argument is a plain string literal, and the message names the step: Python `base64.b64decode` and its
   `urlsafe_`, `standard_` and `decodebytes` forms, `bytes.fromhex`, `binascii.unhexlify`, `a2b_hex`, `a2b_base64`,
   `codecs.decode(x, "rot13" or "hex" or "base64")`, a `[::-1]` or `"".join(reversed(x))` of a literal; JS/TS `atob`
-  (also `window.`, `globalThis.` and `self.`), `Buffer.from(x, "base64", "base64url" or "hex")`, `.split("").reverse().join("")`;
+  (also `window.`, `globalThis.`, `self.` and `global.`), `Buffer.from(x, "base64", "base64url" or "hex")`, `.split("").reverse().join("")`;
   Go `base64.StdEncoding`, `URLEncoding`, `RawStdEncoding`, `RawURLEncoding` and `hex.DecodeString`. Up to two decoders may
   follow each other. A key built from literal pieces in a few statements (a list or string that starts as literals, is
   extended with `push`, `append`, `extend` or `+=`, then joined) is a block too. Names are followed only inside one file, and
   only when the file imports them from the standard library (`from base64 import b64decode as d`, `import base64 as b`, a Go
-  import alias); a name the file binds to anything else is not a decoder. **Still not found:** a decoder you wrote yourself
+  import alias); a name the file binds to anything else is not a decoder. That claim is exact for Python (a def, class,
+  assignment, loop target or parameter of that name anywhere in the file). For JS/TS and Go it is a text check, not scope
+  analysis: a `function`, `const`, `let`, `var` or `class` named `atob` or `Buffer`, or a Go name declared with `:=` or `var`,
+  stops the match, but a parameter, a `catch` binding, a destructuring or (JS/TS) an `import` under that name is not
+  seen, so such a call may still be read as the standard decoder (the stricter side). **Still not found:** a decoder you wrote yourself
   (`my_b64(x)`); a name followed across files, through a reassignment, a function parameter, `getattr` or a dynamic import;
   a value built or decoded at run time or read from a file or an environment variable; a decoder call whose argument is not a
   plain string literal (a variable, a call, an f-string with a variable); decoding deeper than two levels; a literal over

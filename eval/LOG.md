@@ -213,7 +213,7 @@ The change: `secrets.hardcoded` decodes a string literal that is the argument of
 patterns on the result (never `secrets.generic`; the boundary and documented-example rules still apply). Known calls: Python
 `base64.b64decode`, `urlsafe_b64decode`, `standard_b64decode`, `decodebytes`, `binascii.unhexlify`, `a2b_hex`, `a2b_base64`,
 `bytes.fromhex`, `codecs.decode(x, "rot13" or "hex" or "base64")` (with the codec aliases), a `[::-1]` or `"".join(reversed(x))` of a
-literal; JS/TS `atob` (also `window.`, `globalThis.`, `self.`), `Buffer.from(x, "base64", "base64url" or "hex")` in any letter case,
+literal; JS/TS `atob` (also `window.`, `globalThis.`, `self.`, `global.`), `Buffer.from(x, "base64", "base64url" or "hex")` in any letter case,
 `.split("").reverse().join("")`; Go `base64.StdEncoding`, `URLEncoding`, `RawStdEncoding`, `RawURLEncoding` and `hex.DecodeString`.
 At most two decoders one after the other and at most 4,096 characters per literal; a longer literal is not decoded and is counted in
 a `decode.skipped` note shown with `-v`. A list or string that starts as literals, is extended with literals only (`push`, `append`,
@@ -224,17 +224,29 @@ value. A person and an agent get the same BLOCK. The decoder table (`DECODER_CAL
 Names: a decoder is also known by a name the same file imports it under (`from base64 import b64decode as d`, `import base64 as b`,
 `from codecs import decode`, a Go import alias). The resolver is file-local and static. A name the file binds to anything else (a def,
 an assignment, a parameter, another module, a relative or star import) is not a decoder; a name is not followed across files, through
-a reassignment, `getattr` or a dynamic import. A custom base64 alphabet is not decoded.
+a reassignment, `getattr` or a dynamic import. A custom base64 alphabet is not decoded. The claim that a rebound name is not a decoder
+is exact for Python only. For JS/TS and Go it is a check of the code text (strings and comments are not read): a `function`, `const`,
+`let`, `var` or `class` named `atob` or `Buffer`, or a Go name declared with `:=` or `var`, stops the match; a parameter, a `catch`
+binding, a destructuring or (JS/TS) an `import` under that name is not seen, so such a call may still be read as the standard
+decoder. That errs on the stricter side (more findings, never fewer).
 
 Linear time: the first version of the assembly and of the JS/Go chain reading was quadratic on generated files (120,000 lines of
 `k += ""` took 123 s against 4.0 s before the feature). A name is now dropped when a statement is more than 25 lines after the first,
 after 256 extensions, or beyond 4,096 characters; a chain of literals is read once. Measured on the final code, person, staged, no cache
 (new against 0.6.1): 120,000 lines of `k += ""` 4.8 s against 4.4 s; 30,000 lines of `parts.append("")` 2.1 s against 1.9 s; an
 8,000-piece literal chain next to `[].reverse()` 0.5 s against 0.4 s. Every other shape of the two timing scripts is within about 1.2
-times 0.6.1. Tests count the work of 4 times the pieces against 1 times (not time-based) and one serial test times six generated files.
+times 0.6.1. Tests count the work of 4 times the pieces against 1 times (not time-based) and one serial test times seven generated files.
+
+A later review found one more quadratic shape: a Go file with N import aliases of `encoding/hex`, each called once, searched the whole
+file once per alias for a variable of that name (10,000 aliases: 69.7 s against 1.3 s after the fix; 5,000: 17.9 s against 0.8 s). The
+names a Go file declares are now read once per file; a test counts the characters the module-level `re` calls scan (twice the aliases,
+at most 3 times the work), and the serial timing test has the 10,000-alias shape. The shadow checks of JS/TS and Go read the code only
+(a `"function atob"` in a string does not stop the match), and one Python expression nested too deeply to follow (a chain of 600
+`[::-1]`) no longer drops the findings of the rest of the file: it is skipped alone, and a chain longer than 64 steps is not followed.
 
 Cases (training only, from `eval/tools/seeds/seed_v6.py`; the placeholders `@@AWSB64@@`, `@@AWSHEX@@`, `@@AWSREV@@`, `@@AWSROT13@@` in
-`eval/run.py` are built at run time, so no tracked file holds the key in any form): 30 in all. Seeded `must_fire`, 20: 14 for each
+`eval/run.py`, and `@@AWSWORDB64@@` for the key inside a longer word, are built at run time, so no tracked file holds the key in any
+form, plain, encoded, or encoded inside a word; a test scans every stored file for all of them): 30 in all. Seeded `must_fire`, 20: 14 for each
 decoder call and language plus a three-file assembly case, and 6 for the other spellings (a `from` import, a module alias, a codec
 alias, the global object and other encodings, two Go import aliases). Adversarial `must_not_fire`, 10: 8 of harmless encoded data
 (ordinary text, a PNG header, SHA-256 and SHA-1 hex, an image-like blob, a JWT segment, a key-shaped run inside a longer word, the

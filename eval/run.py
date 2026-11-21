@@ -74,6 +74,8 @@ SUBST = {
     "@@AWSHEX@@": _cat("AKIA", "QWERTYUIOPASDFGH").encode().hex(),
     "@@AWSREV@@": _cat("AKIA", "QWERTYUIOPASDFGH")[::-1],
     "@@AWSROT13@@": codecs.encode(_cat("AKIA", "QWERTYUIOPASDFGH"), "rot13"),
+    # the key inside a longer word before it is encoded ("...x" + key + "x..."), which the provider pattern does not read as a key
+    "@@AWSWORDB64@@": base64.b64encode(("build=4821 region=eu-west-1 x" + _cat("AKIA", "QWERTYUIOPASDFGH") + "x notes=none").encode()).decode(),
     "@@PEMBEGIN@@": "-----BEGIN " + "RSA PRIVATE KEY-----",
     "@@PEMEND@@": "-----END " + "RSA PRIVATE KEY-----",
 }

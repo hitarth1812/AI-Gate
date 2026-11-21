@@ -258,18 +258,19 @@ def test_encoded_key_placeholders_decode_to_the_aws_key_and_no_stored_file_holds
     assert forms["@@AWSREV@@"][::-1] == aws
     assert codecs.decode(forms["@@AWSROT13@@"], "rot13") == aws
     assert len(set(forms.values()) | {aws}) == 5                      # five different spellings
+    in_a_word = ev.SUBST["@@AWSWORDB64@@"]                            # the key inside a longer word, then base64
+    assert base64.b64decode(in_a_word).decode().count(aws) == 1 and in_a_word not in forms.values()
     assert ev.fill(b'atob("@@AWSB64@@")').decode() == f'atob("{forms["@@AWSB64@@"]}")'
-    # no case file, generator, test or document holds the key, or a form of it that the tool would read as the key (a run of
-    # it inside a longer word is not one: the provider pattern needs a boundary). The held-out cases are not read here.
-    key = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(aws) + r"(?![A-Za-z0-9_])")
-    doubled = (base64.b64encode(base64.b64encode(aws.encode())).decode(), base64.b64encode(aws.encode().hex().encode()).decode())
+    # no case file, generator, test or document holds the key, or any form of it, plain or inside a longer word: a decoded text
+    # that contains the key anywhere (with or without a word boundary) is a stored key. The held-out cases are not read here.
+    doubled = (base64.b64encode(base64.b64encode(aws.encode())).decode(), base64.b64encode(aws.encode().hex().encode()).decode(), in_a_word)
     files = [p for p in (EVAL / "corpus").rglob("*") if p.is_file()] + [p for p in (EVAL / "tools").rglob("*.py")]
     files += list((ROOT / "tests").glob("*.py")) + [ROOT / "aigate_lite.py", ROOT / "README.md", EVAL / "run.py"]
     files += list((ROOT / "docs").glob("*.md")) + list(EVAL.glob("*.md"))
     for path in files:
         data = path.read_bytes().decode("utf-8", "replace")
         assert not any(v in data for v in (aws, *forms.values(), *doubled)), path
-        assert not any(key.search(t) for t in _spellings(data)), path
+        assert not any(aws in t for t in _spellings(data)), path
 
 
 def test_the_gate_runs_without_the_packages_installed_on_this_machine(repo, tmp_path):
