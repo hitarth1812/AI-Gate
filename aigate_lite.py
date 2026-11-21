@@ -3463,6 +3463,7 @@ DECODER_CALLS = {
            "hex.DecodeString": "hex"},
 }
 ENCODED_LITERAL_MAX = 4096        # a literal over this many characters is not decoded (it is counted, and shown with -v)
+ENCODED_NESTING = 64              # nested `.decode()` / slice steps of one Python expression that are followed
 ENCODED_LEVELS = 2                # decoders applied one after another; a third is not followed
 ASSEMBLY_SPAN = 25                # lines between the first and the last statement of an assembled key
 ASSEMBLY_STEPS = 256              # statements that extend one name; more than this and the name is dropped (keeps it linear)
@@ -3484,6 +3485,7 @@ _JS_REVERSE = re.compile(r"""\s*\.\s*split\s*\(\s*(?:""|'')\s*\)\s*\.\s*reverse\
 _JS_TOSTRING = re.compile(r"""\s*\.\s*toString\s*\(\s*(?:"[^"\n]*"|'[^'\n]*')?\s*\)""")
 _JS_BUFFER_ENCODING = re.compile(r"""\s*,\s*(?:"(base64url|base64|hex)"|'(base64url|base64|hex)')\s*\)""", re.I)
 _JS_SHADOW = re.compile(r"\b(?:function|const|let|var|class)\s+(atob|Buffer)\b")
+_GO_DECLARED = re.compile(r"\b([A-Za-z_]\w*)\s*:=|\bvar\s+([A-Za-z_]\w*)\b")      # a name a Go file declares: `x :=`, `var x`
 _CLOSE_PAREN = re.compile(r"\s*,?\s*\)")
 _WS = re.compile(r"\s*")
 _GO_IMPORT = re.compile(r'''(?m)^[ \t]*(?:import[ \t]+)?(?:(?P<alias>[A-Za-z_]\w*|\.)[ \t]+)?"(?P<path>[^"\n]+)"[ \t]*$''')
@@ -3626,8 +3628,8 @@ def _py_decoded(node, table, skipped, added, binds):
             return None
         return next(iter(what)) + dot + rest
 
-    def apply(kind, arg):
-        inner = go(arg)
+    def apply(kind, arg, depth):
+        inner = go(arg, depth + 1)
         if inner is None:
             return None
         text, names = inner
@@ -3640,7 +3642,9 @@ def _py_decoded(node, table, skipped, added, binds):
         out = _decode_literal(kind, text)
         return None if out is None else (out, names + [kind])
 
-    def go(n):
+    def go(n, depth=0):
+        if depth > ENCODED_NESTING:                       # a chain this long is no key: not followed (and cheap to give up)
+            return None
         text = _fold_str(n)
         if text is not None:
             return text, []
@@ -3650,20 +3654,20 @@ def _py_decoded(node, table, skipped, added, binds):
             f, name = n.func, dotted(n.func)
             kind = table.get(resolve(name) or "") if name else None
             if kind is None and isinstance(f, ast.Attribute) and f.attr == "decode":     # bytes to text: no transformation
-                return go(f.value)
+                return go(f.value, depth + 1)
             if kind in ("base64", "hex", "codecs"):
                 shape = _py_call_shape(n, kind)
-                return None if shape is None else apply(shape[1] or kind, shape[0])
+                return None if shape is None else apply(shape[1] or kind, shape[0], depth)
             if table.get("reversed(") == "reverse" and isinstance(f, ast.Attribute) and f.attr == "join" \
                     and len(n.args) == 1 and not n.keywords and _fold_str(f.value) == "" \
                     and isinstance(n.args[0], ast.Call) and dotted(n.args[0].func) == "reversed" \
                     and "reversed" not in binds and len(n.args[0].args) == 1 and not n.args[0].keywords:
-                return apply("reverse", n.args[0].args[0])
+                return apply("reverse", n.args[0].args[0], depth)
         elif isinstance(n, ast.Subscript) and table.get("[::-1]") == "reverse" and isinstance(n.slice, ast.Slice) \
                 and n.slice.lower is None and n.slice.upper is None and isinstance(n.slice.step, ast.UnaryOp) \
                 and isinstance(n.slice.step.op, ast.USub) and isinstance(n.slice.step.operand, ast.Constant) \
                 and n.slice.step.operand.value == 1:
-            return apply("reverse", n.value)
+            return apply("reverse", n.value, depth)
         return None
     return go(node)
 
@@ -3674,7 +3678,10 @@ def _py_decoder_hits(tree, table, added, skipped) -> list:
     while stack:
         node = stack.pop()
         if isinstance(node, (ast.Call, ast.Subscript)):
-            got = _py_decoded(node, table, skipped, added, binds)
+            try:
+                got = _py_decoded(node, table, skipped, added, binds)
+            except RecursionError:                                # one expression nested too deeply to follow: the rest still counts
+                got = None
             if got is not None and got[1]:
                 line = next((ln for ln in range(node.lineno, (node.end_lineno or node.lineno) + 1) if ln in added), None)
                 if line is not None:
@@ -3875,7 +3882,7 @@ def _js_go_decoder_hits(fc, lx, table, go, skipped) -> list:
     if go:
         call_rx = _GO_CALL
     else:
-        shadowed = {m.group(1) for m in _JS_SHADOW.finditer(text)}
+        shadowed = {m.group(1) for m in _JS_SHADOW.finditer(lx.code_text((STR, COM)))}      # code only, not a string or a comment
         names = [n for n, k in table.items() if k in ("base64", "hex", "buffer") and n.split(".")[0] not in shadowed]
         key = ("calls", tuple(names))
         if key not in _ENC_CACHE:
@@ -3908,9 +3915,9 @@ def _js_go_decoder_hits(fc, lx, table, go, skipped) -> list:
             return None
         if table.get(root + "." + re.sub(r"\s+", "", m.group("rest"))) is None:
             return None
-        if name not in variables:                                 # a variable of that name here is not the package
-            variables[name] = bool(re.search(rf"\b{re.escape(name)}\s*:=|\bvar\s+{re.escape(name)}\b", text))
-        if variables[name]:
+        if "declared" not in variables:                           # a variable of that name here is not the package
+            variables["declared"] = {a or b for a, b in _GO_DECLARED.findall(lx.code_text((STR, COM)))}   # read once per file
+        if name in variables["declared"]:
             return None
         return table.get(root + "." + re.sub(r"\s+", "", m.group("rest"))), m.end()
 
@@ -4032,14 +4039,14 @@ def _encoded_key_findings(ctx, fc, where, have) -> list:
         tree = ctx.py_tree(fc)[0]
         if tree is None:
             return []
-        try:
-            if decode:
-                hits += [(ln, t, _encoded_where(names, where)) for ln, t, names in _py_decoder_hits(tree, table, fc.added, skipped)]
-            if assemble:
+        if decode:                                                # a too deeply nested expression is skipped inside, one by one
+            hits += [(ln, t, _encoded_where(names, where)) for ln, t, names in _py_decoder_hits(tree, table, fc.added, skipped)]
+        if assemble:
+            try:
                 hits += [(ln, t, f", assembled from literals{where}")
                          for ln, t in _assembled_values(_py_assembly_events(tree), fc.added)]
-        except RecursionError:
-            pass
+            except RecursionError:                                # what the decoder calls found still counts
+                pass
     else:
         lx = ctx.lexed(fc)
         if lx is None:

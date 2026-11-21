@@ -17,8 +17,9 @@ is written), NOT from what the tool prints today, and no tool output was looked 
      decoded through an aliased import, and a name that only looks like the standard decoder (another module's `b64decode`)
 
 A key hidden behind a decoder call is written with the encoded-form placeholders of eval/run.py (@@AWSB64@@, @@AWSHEX@@, @@AWSREV@@,
-@@AWSROT13@@) and an assembled key with its fragment placeholders (@@AKIA@@, @@AKT1@@, @@AKT2@@), so no tracked file holds a key,
-an encoded key or a statement that builds one. The harmless data below is stored as it is (it is not a key in any form).
+@@AWSROT13@@, and @@AWSWORDB64@@ for the key inside a longer word) and an assembled key with its fragment placeholders (@@AKIA@@,
+@@AKT1@@, @@AKT2@@), so no tracked file holds a key, an encoded key or a statement that builds one. The rest of the harmless data below
+is stored as it is (it is not a key in any form).
 
 Not a case, on purpose: a key inside a base64 literal over 4,096 characters. The tool documents that it does not decode such a
 literal (README "Limits"), so a `must_not_fire` label would call a missed key correct, and a `must_fire` label would be a case the
@@ -146,9 +147,9 @@ def harmless_data():
     harmless("r5-image-like-blob-javascript", "javascript", "src/sprite.js", f'const sprite = atob("{b64(blob)}");\nmodule.exports = {{ sprite }};\n')
     header = b64('{"alg":"HS256","typ":"JWT"}').rstrip("=").replace("+", "-").replace("/", "_")
     harmless("r5-jwt-segment-typescript", "typescript", "src/token.ts", f'export const header = atob("{header}");\n')
-    head, tail = "AK" + "IA", "QWERTYUI" + "OPASDFGH"                                  # the key is built here, never written out
-    decoded = "build=4821 region=eu-west-1 x" + head + tail + "x notes=none"           # a key-shaped run inside a longer word
-    harmless("r5-key-shaped-inside-a-word-python", "python", "app/meta.py", f'import base64\n\nMETA = base64.b64decode("{b64(decoded)}").decode()\n')
+    # a key-shaped run inside a longer word ("...x" + key + "x..."), base64-encoded by the run-time placeholder: the file holds no key
+    harmless("r5-key-shaped-inside-a-word-python", "python", "app/meta.py",
+             'import base64\n\nMETA = base64.b64decode("@@AWSWORDB64@@").decode()\n')
     example = "AK" + "IA" + "IOSFODNN7" + "EXAMPLE"                                      # the AWS documentation example key
     harmless("r5-documented-example-key-encoded-typescript", "typescript", "src/example.ts", f'export const sample = atob("{b64(example)}");\n')
 
