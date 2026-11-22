@@ -1,0 +1,22 @@
+id = "r5-js-directives-in-comments"
+source = "seeded"
+language = "typescript"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "code.todo"
+path = "src/loose.ts"
+line = 1
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "src/loose.ts"
+line = 2
+
+[[must_fire]]
+rule = "suppress.type"
+path = "src/loose.ts"
+line = 3

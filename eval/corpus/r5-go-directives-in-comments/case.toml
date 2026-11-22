@@ -1,0 +1,22 @@
+id = "r5-go-directives-in-comments"
+source = "seeded"
+language = "go"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "suppress.security"
+path = "shop/loose.go"
+line = 3
+
+[[must_fire]]
+rule = "suppress.lint"
+path = "shop/loose.go"
+line = 4
+
+[[must_fire]]
+rule = "code.todo"
+path = "shop/loose.go"
+line = 5

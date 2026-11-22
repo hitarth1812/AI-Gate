@@ -1,0 +1,12 @@
+id = "r5-lex-tsx-apostrophe-and-regex-keep-the-weak-hash"
+source = "adversarial"
+language = "typescript"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/j.tsx"
+line = 1

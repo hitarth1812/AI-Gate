@@ -1,0 +1,27 @@
+id = "h7-b-string-words-ts-1"
+source = "seeded"
+language = "typescript"
+origin = "round 7 held-out, written blind from the two behaviour descriptions (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.weak_crypto"
+path = "src/messages.ts"
+
+[[must_not_fire]]
+rule = "code.todo"
+path = "src/messages.ts"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "src/messages.ts"
+
+[[must_not_fire]]
+rule = "suppress.lint"
+path = "src/messages.ts"
+
+[[must_not_fire]]
+rule = "suppress.type"
+path = "src/messages.ts"

@@ -1984,6 +1984,15 @@ EXPR_KEYWORDS = frozenset("return typeof instanceof in of new delete void throw 
                           "when puts print p if unless while until and or not then".split())
 BRACE_PAIRS = {"(": ")", "[": "]", "{": "}", "<": ">"}
 _LEX_RES: dict = {}
+_QUOTE_CHARS = re.compile(r"""['"`]""")
+JSX_HINT = re.compile(r"</[A-Za-z>]|/>|<>|<!--")
+_WORD_END = re.compile(r"[A-Za-z_$][\w$]*$")
+JS_KEYWORDS = frozenset("return typeof instanceof in of new delete void throw case do else yield await".split())
+QUOTE_KEYWORDS = EXPR_KEYWORDS | {"from", "default", "import", "export", "extends", "with", "as", "static", "get", "set"}
+# what a closed single-line "string" may hold if its quotes were really in non-code text and the span covers real code
+_CODE_IN_QUOTES = re.compile(r";\s*(?:(?:const|let|var|return|throw|await|if|for|while|function|import|export)\b|[A-Za-z_$][\w$.]*\()|"
+                             r"(?:&&|\|\||\+)\s*[A-Za-z_$][\w$.]*\(|\b(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=|"
+                             r"[\w$\]]\s*(?<![=!<>])=(?!=)\s*[A-Za-z_$][\w$.]*\(|[\w$]\([^()]*\)\s*;")
 
 
 def _expr_start(text: str, pos: int) -> bool:
@@ -2049,6 +2058,8 @@ class _Scanner:
         self.deadline = time.monotonic() + LEX_SECONDS
         self.steps = 0
         self.skip = None                 # (start, end): heredoc bodies of the current line, already consumed
+        self.first_bad = None            # offset of the first single-line quote left unclosed at its line end, or of a division sign that
+        self.probe_budget = 300_000      # could be a regex holding a quote (see Lexed.trusted_until, regex_could_start)
 
     def mark(self, a, b, kind):
         if b > a:
@@ -2093,9 +2104,50 @@ class _Scanner:
             else:
                 form = self.cfg.strings[int(name[1:])]
                 if form.expr and not _expr_start(text, s):
+                    if form.kind == "regex" and self.first_bad is None and self.regex_could_start(s):
+                        self.first_bad = s                   # read as division, but a regex holding a quote may be what it is
                     pos = m.end() if form.kind != "regex" else s + 1
                     continue
+                if self.first_bad is None:
+                    if form.kind == "regex":
+                        if self.regex_is_doubtful(s):
+                            self.first_bad = s               # read as a regex, but it may be a division that swallows code
+                    elif form.kind == "quote" and not form.nl and self.quote_after_value(s):
+                        self.first_bad = s                   # `Don't`: not where a string can start, so not a string
                 pos = self.string(form, m, depth)
+
+    def quote_after_value(self, s) -> bool:
+        """Does the quote at `s` follow a name, a number or a closing bracket with nothing between (`Don't`, `it's`, `x)'`)? In
+        valid code a string never starts there (except after a keyword such as `return"x"`): it is an apostrophe in text that is not
+        code (JSX text, say), and the quote pair built from it may be wrong."""
+        text = self.text
+        if not s:
+            return False
+        c = text[s - 1]
+        if c in ")]}":
+            return True
+        if c.isalnum() or c in "_$":
+            m = _WORD_END.search(text, max(0, s - 24), s)
+            return not (m and m.group(0) in QUOTE_KEYWORDS)
+        return False
+
+    def regex_is_doubtful(self, s) -> bool:
+        """A `/` that the lexer took for the start of a regex literal: is the context one where a division is just as likely
+        (after `>` or a non-null `!`, after a word that is not a JavaScript keyword such as a variable named `p`, or when the text before
+        it is out of sight)? Then the span up to the next `/` may be code that was swallowed as a regex."""
+        text = self.text
+        head = text[max(0, s - 48):s].rstrip()
+        if not head:
+            return s >= 48
+        c = head[-1]
+        if c == ">":
+            return not head.endswith("=>")
+        if c == "!":
+            return bool(re.search(r"[\w$)\]]!$", head))
+        if c.isalnum() or c in "_$":
+            m = _WORD_END.search(head)
+            return not (m and m.group(0) in JS_KEYWORDS and head[:m.start()].rstrip()[-1:] != ".")
+        return False
 
     def block_comment(self, m, i):
         _opener, close, nested = self.cfg.block_comments[i]
@@ -2136,12 +2188,16 @@ class _Scanner:
             if kind is None:                                  # an escape sequence
                 pos = c.end()
             elif kind == "n":                                 # a single-line literal ended unclosed at the newline
+                if self.first_bad is None:
+                    self.first_bad = start
                 self.mark(seg, c.start(), STR)
                 return c.start()
             elif kind == "c":
                 if form.double and text.startswith(close, c.end()):
                     pos = c.end() + len(close)
                     continue
+                if not form.nl and self.first_bad is None and _CODE_IN_QUOTES.search(text, start + 1, c.start()):
+                    self.first_bad = start                    # a "string" that holds `; const h = f(` is code between two stray quotes
                 self.mark(seg, c.end(), STR)
                 return c.end()
             else:                                             # an interpolation opens
@@ -2152,6 +2208,37 @@ class _Scanner:
                 pos = self.code(c.end(), depth + 1, True)
                 self.mark(pos - 1, pos, STR)                  # the closing brace belongs to the string again
                 seg = pos
+
+    def regex_could_start(self, s) -> bool:
+        """The `/` at `s` was read as a division. Could it instead open a regular expression that closes on the same line and holds a
+        quote or backquote? Then the quote pair the scanner sees from here on may be the wrong one (`if (x) /"/.test(a) && f() && /"/`
+        reads the code between the two slashes as a string), so the caller marks the view untrusted from this line on. Only the first_bad
+        flag is affected, never the classification. Bounded: at most 2,000 characters per slash and 300,000 per file; past the budget
+        the answer is yes (stricter, never softer)."""
+        text = self.text
+        end = min(self.n, s + 2001)
+        eol = text.find("\n", s, end)
+        if eol >= 0:
+            end = eol
+        if _QUOTE_CHARS.search(text, s + 1, end) is None:
+            return False
+        self.probe_budget -= end - s
+        if self.probe_budget < 0:
+            return True
+        pos, in_class = s + 1, False
+        while pos < end:
+            ch = text[pos]
+            if ch == "\\":
+                pos += 2
+                continue
+            if ch == "[":
+                in_class = True
+            elif ch == "]":
+                in_class = False
+            elif ch == "/" and not in_class:
+                return _QUOTE_CHARS.search(text, s + 1, pos) is not None
+            pos += 1
+        return False
 
     def regex_literal(self, start, pos):
         text, n, in_class = self.text, self.n, False
@@ -2212,17 +2299,35 @@ class _Scanner:
 
 
 class Lexed:
-    """Per-line access to the classification of one file."""
+    """Per-line access to the classification of one file.
 
-    def __init__(self, text, kinds):
-        self.text, self.kinds = text, kinds
+    `first_bad` is the offset of the first single-line quote that was never closed on its own line (a lone apostrophe in JSX text,
+    a typo), or of the first division sign that could be the start of a regex holding a quote (JS): the scanner ends that string at the newline and carries on, but the file is no longer well-formed, so a line rule that
+    relies on the view asks `trusted_until` first: the 1-based number of the first line it may NOT trust (that line and every later
+    one count as code). Without such a quote it is past the last line."""
+
+    def __init__(self, text, kinds, first_bad=None):
+        self.text, self.kinds, self.first_bad = text, kinds, first_bad
         self.lines = text.split("\n")
         self.starts, off = [], 0
         for ln in self.lines:
             self.starts.append(off)
             off += len(ln) + 1
+        self.trusted_until = len(self.lines) + 2
+        if first_bad is not None:
+            from bisect import bisect_right
+            self.trusted_until = bisect_right(self.starts, first_bad)
         self._masked: dict = {}
         self._code: dict = {}
+        self._jsx = None
+
+    def has_jsx(self) -> bool:
+        """Does the text look like it holds JSX (or an HTML comment)? Decided on the raw text, so a hint inside a string or a comment counts
+        too (which only makes the answer more cautious). A closing tag, a self-closing tag, a fragment or `<!--` is enough: JSX text, where a
+        lone apostrophe or backquote can pair with a later one, always sits between a tag and its closing tag."""
+        if self._jsx is None:
+            self._jsx = JSX_HINT.search(self.text) is not None
+        return self._jsx
 
     def line(self, n):
         return self.lines[n - 1] if 0 < n <= len(self.lines) else ""
@@ -2297,7 +2402,7 @@ def lex_text(text, cfg):
         sc.code(0, 0, False)
     except RecursionError as e:
         raise LexError("recursion") from e
-    return Lexed(text, sc.kinds)
+    return Lexed(text, sc.kinds, sc.first_bad)
 
 
 def python_lex(text):
@@ -2583,6 +2688,38 @@ def hit(lx, rx, line, text, where=CODE):
     if m is None or lx is None or lx.line(line).rstrip("\r") != text.rstrip("\r"):
         return m
     return lx.search(rx, line, where, text)
+
+
+# The string-aware reading of the line rules `security.weak_crypto` and `secrets.generic` (text inside a string, a template literal or a
+# Go raw string is not code), and the guard that reads a file as code after an unclosed quote, one switch per language. Setting a language
+# to False makes those rules read that language exactly as 0.6.1 did; a file the lexer cannot read at all is read that way already.
+STRING_VIEW = {"js": True, "go": True}
+# Extensions that keep the 0.6.1 reading although their language is switched on: JSX text (`<p>Dont</p>`) can pair an apostrophe with a
+# quote later on the line and turn real code into a fake string. Delete the extension from this set to give it the string-aware reading.
+# (Any other JS/TS file whose text looks like JSX gets the same plain reading: see Lexed.has_jsx and string_view.)
+PLAIN_READING_EXTS = frozenset({".jsx", ".tsx"})
+
+
+def string_view(ctx, fc):
+    """The Lexed view of a JS/TS or Go file for the string-aware rules above, or None (= the 0.6.1 reading)."""
+    lang = _SPEC_EXT.get(fc.ext)
+    if lang is None or not STRING_VIEW.get(lang) or fc.ext in PLAIN_READING_EXTS:
+        return None
+    lx = ctx.lexed(fc)
+    return None if lx is not None and lx.has_jsx() else lx      # JSX inside a .js or .ts file: the plain reading, like .jsx and .tsx
+
+
+def _untrusted(lx, line) -> bool:
+    """True from the first line that holds a quote left unclosed: the view may have misread what follows, so the rules read that line
+    and every later one as code (a lexer failure must never hide a finding). Python's view is always trusted (it is built
+    lazily, and not asked here)."""
+    return not isinstance(lx, PyLazy) and line >= lx.trusted_until
+
+
+def _trusted(lx, line, text) -> bool:
+    """Is the view usable for this added line: it exists, is for this very text (not an old or edited version), and `line` is before
+    the first unclosed quote."""
+    return lx is not None and not _untrusted(lx, line) and lx.line(line).rstrip("\r") == text.rstrip("\r")
 
 
 def _count(lx, rx, rows) -> int:
@@ -3012,16 +3149,24 @@ def _one_block_per_key_file(findings) -> list:
     return [f for f in findings if not (f.rule == "secrets.env_file" and f.path in keyed)]
 
 
-def _inside_py_string(ctx, fc, line_no, text, m) -> bool:
-    """A `name = "value"` match in a Python line that lies INSIDE one string literal (a code sample, a docstring, a template
-    being written to a file) is text, not an assignment. A dict key such as {"password": "..."} (the name is a string of its
-    own, closed before the operator) and every real assignment still count."""
-    if fc.ext not in PY_EXTS:
+def _inside_string(ctx, fc, line_no, text, m) -> bool:
+    """A `name = "value"` match in a Python, JavaScript/TypeScript or Go line that lies INSIDE one string literal (a code sample, a
+    docstring, a template literal, a Go raw string, a template being written to a file) is text, not an assignment. A dict key such as
+    {"password": "..."} (the name is a string of its own, closed before the operator) and every real assignment still count. In
+    JavaScript/TypeScript and Go a quoted key inside a string (`{"token":"..."}` in a raw string or a template: a JSON body) is data
+    that carries a value, not a sample of code, so it keeps counting too. Where the lexer has no view of the line (not tokenized, a
+    language without one, after an unclosed quote, a line over 2,000 characters) the answer is False: the line is read as code."""
+    if fc.ext in PY_EXTS:
+        lx = ctx.py_lexed(fc)
+        if lx.line(line_no).rstrip("\r") != text.rstrip("\r"):       # not tokenized: the old behaviour
+            return False
+        return all(lx.kind_at(line_no, i) == STR for i in range(m.start("name"), m.start("val")))
+    lx = string_view(ctx, fc)
+    if lx is None or len(text) > 2000 or not _trusted(lx, line_no, text) or text[m.end("name"):m.end("name") + 1] in ("'", '"'):
         return False
-    lx = ctx.py_lexed(fc)
-    if lx.line(line_no).rstrip("\r") != text.rstrip("\r"):       # not tokenized: the old behaviour
-        return False
-    return all(lx.kind_at(line_no, i) == STR for i in range(m.start("name"), m.start("val")))
+    base = lx.starts[line_no - 1]
+    a, b = base + m.start("name"), base + m.start("val")
+    return a < b and lx.kinds[a:b].count(STR) == b - a
 
 
 def secret_findings(ctx, fc, line_no, text, where="") -> list:
@@ -3047,7 +3192,7 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
         return "warn" if soft is None and person_test_context(fc.path) else None
     docs = bool(DOC_PATH.search(fc.path)) and fc.ext != ".txt" and not ctx.sensitive(fc.path)
     for m in GENERIC_ASSIGN.finditer(text):
-        if _looks_like_secret(m.group("name"), m.group("val")) and not _inside_py_string(ctx, fc, line_no, text, m):
+        if _looks_like_secret(m.group("name"), m.group("val")) and not _inside_string(ctx, fc, line_no, text, m):
             val = m.group("val")
             add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", soft,
                 _soft_value(val, docs, soft is not None, text[m.end():],
@@ -3058,7 +3203,7 @@ def secret_findings(ctx, fc, line_no, text, where="") -> list:
             and not PHRASE_SKIP_PATH.search(fc.path):
         for m in PHRASE_ASSIGN.finditer(text):
             if _phrase_secret_name(m.group("name")) and _looks_like_phrase(m.group("val")) \
-                    and not _inside_py_string(ctx, fc, line_no, text, m):
+                    and not _inside_string(ctx, fc, line_no, text, m):
                 val = m.group("val")
                 add("secrets.generic", val, f"'{m.group('name')}' is set to a literal ({redact(val)})", None, fixture())
     if fc.ext in CONFIG_EXTS or fc.ext in {".sh", ".bash", ".zsh"} or fc.name.startswith("Dockerfile"):
@@ -6230,14 +6375,17 @@ def _suppressions_file(ctx, fc) -> list:
         lx, old_lx = ctx.py_lexed(fc), (ctx.py_lexed(fc, "old") if fc.old_spec else None)
     else:
         lx, old_lx = ctx.lexed(fc), (ctx.lexed(fc, "old") if fc.old_spec else None)
+    guard = fc.ext not in PY_EXTS and string_view(ctx, fc) is not None      # the unclosed-quote guard goes with the string-aware reading
     for old_line, text in fc.removed:
+        old_view = None if old_lx is None or (guard and _untrusted(old_lx, old_line)) else old_lx   # after an unclosed quote: read as code
         for rule, rx in SUPPRESSIONS:
-            if _suppression_hit(old_lx, rx, old_line, text):
+            if _suppression_hit(old_view, rx, old_line, text):
                 before[rule] += 1
                 break
     for line, text in fc.added.items():
+        view = None if lx is None or (guard and _untrusted(lx, line)) else lx
         for rule, rx in SUPPRESSIONS:
-            m = _suppression_hit(lx, rx, line, text)
+            m = _suppression_hit(view, rx, line, text)
             if m:
                 if before[rule]:
                     before[rule] -= 1            # the same suppression existed on an edited line
@@ -6248,7 +6396,7 @@ def _suppressions_file(ctx, fc) -> list:
                     _refine_suppression(rule, fc, text, m, f)
                     out.append(f)
                 break
-        cast = hit(lx, TYPE_CAST, line, text, CODE) if fc.ext in TS_EXTS else None
+        cast = hit(view, TYPE_CAST, line, text, CODE) if fc.ext in TS_EXTS else None
         if cast and not text.lstrip().startswith("//"):
             out.append(make("suppress.type_cast", fc.path, line, f"`{cast.group(0).strip()}` added",
                             key=text.strip()))
@@ -6292,9 +6440,15 @@ _SECRET_WIDE = re.compile(r"(?i)" + _SECRET_AT % SECRET_WORDS)
 _HASHLIB_NEW_STR = re.compile(r"""(?i)\bhashlib\.new\(\s*(['"])(?P<alg>md5|sha1)\1""")
 
 
-def _py_weak(lx, line, text) -> bool:
+# JavaScript/TypeScript and Go: an algorithm named by a string that is a whole argument or property value (`createHash("md5")`,
+# `createHmac('sha1', key)`, `pbkdf2Sync(p, s, 1e5, 64, "sha1")`, `{ digest: 'sha1' }`) is how the weak hash is chosen, so it counts like
+# a code name; `md5(` or `sha1` inside a longer string (a message, a template) does not.
+_ALG_ARG = re.compile(r"""(?i)[(,:]\s*(['"`])(?P<alg>md5|sha1)\1""")
+
+
+def _py_weak(lx, line, text, alg=_HASHLIB_NEW_STR) -> bool:
     code = lx.masked(line, (STR, COM))
-    for m in _HASHLIB_NEW_STR.finditer(text):
+    for m in alg.finditer(text):
         if lx.kind_at(line, m.start()) == CODE:
             a, b = m.span("alg")
             code = code[:a] + text[a:b] + code[b:]
@@ -6357,15 +6511,19 @@ def _code_lines_file(ctx, fc) -> list:
     is_js, is_py = fc.ext in JS_EXTS, fc.ext in PY_EXTS
     test = ctx.is_test(fc.path)
     lx = None if is_py else ctx.lexed(fc)           # code / string / comment view; None = line-based as before
+    sv = None if is_py else string_view(ctx, fc)    # the same view, unless the string-aware reading is off for this language
     for line, text in fc.added.items():
         if len(text) > 2000:
             continue
-        if lx is not None:
+        lxl = None if lx is None or (sv is not None and _untrusted(lx, line)) else lx     # after an unclosed quote: read as code
+        if lxl is not None:
             same = lx.line(line).rstrip("\r") == text.rstrip("\r")
             placeholder = hit(lx, PLACEHOLDER_RE, line, text, COM)
             js_placeholder = is_js and hit(lx, JS_PLACEHOLDER, line, text, CODE)
             todo = hit(lx, TODO_RE, line, text, COM)
             weak = WEAK_CRYPTO.search(lx.masked(line, (COM,)) if same else text)
+            if weak and same and sv is not None:         # the weak operation must be code (an algorithm named as an argument counts)
+                weak = _py_weak(lx, line, text, _ALG_ARG)
         else:
             m, c = PLACEHOLDER_RE.search(text), COMMENT_START.search(text)
             placeholder = m and c and c.start() <= m.start()
@@ -6394,9 +6552,9 @@ def _code_lines_file(ctx, fc) -> list:
             out.append(f)
         if not is_py:
             for rule, rx, what in NON_PY_RULES + (JS_RULES if is_js else []):
-                if hit(lx, rx, line, text, CODE):
+                if hit(lxl, rx, line, text, CODE):
                     out.append(make(rule, fc.path, line, what, key=text.strip()))
-        if is_js and not test and hit(lx, JS_CONSOLE, line, text, CODE) \
+        if is_js and not test and hit(lxl, JS_CONSOLE, line, text, CODE) \
                 and not re.search(r"(?:^|/)(?:scripts|bin|cli)/|\.config\.", fc.path):
             f = make("code.console_log", fc.path, line, text.strip()[:80], key=text.strip())
             f.human = "off" if person_test_context(fc.path) else None      # e2e / mock files: people only

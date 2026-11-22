@@ -1,0 +1,22 @@
+id = "r5-js-weak-hash-in-code"
+source = "seeded"
+language = "javascript"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/hash.js"
+line = 3
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/hash.js"
+line = 4
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/hash.js"
+line = 5

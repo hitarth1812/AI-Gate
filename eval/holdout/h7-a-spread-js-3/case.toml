@@ -1,0 +1,11 @@
+id = "h7-a-spread-js-3"
+source = "adversarial"
+language = "javascript"
+origin = "round 7 held-out, written blind from the two behaviour descriptions (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "secrets.hardcoded"
+path = "src/creds.js"

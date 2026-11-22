@@ -1,0 +1,19 @@
+id = "r5-go-words-in-interpreted-string"
+source = "seeded"
+language = "go"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.weak_crypto"
+path = "shop/doc.go"
+
+[[must_not_fire]]
+rule = "code.todo"
+path = "shop/doc.go"
+
+[[must_not_fire]]
+rule = "suppress.security"
+path = "shop/doc.go"

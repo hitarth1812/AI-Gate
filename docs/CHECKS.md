@@ -24,6 +24,26 @@ blocks, and the reviewer rules of [REVIEWER.md](REVIEWER.md) (each rule says whi
 quadratic-pattern, call-in-loop and exponential-recursion checks are Python-only. Other languages get secrets,
 placeholders, TODOs and suppressions.
 
+**Text inside a string is not code.** In Python, JavaScript/TypeScript (`.js` `.mjs` `.cjs` `.ts`) and Go the rules `code.todo`,
+`security.weak_crypto`, `suppress.lint`, `suppress.type` and `secrets.generic` ignore the contents of a string: quotes, template
+literals and Go raw strings (backquotes), including a string that holds `// TODO`, `sha1(password)`, `// eslint-disable-line` or
+`password = "..."`. What still counts: a provider key or a connection-string password inside a string (they are where real secrets
+live), a credential assigned in code (`password = "..."`, `{ "password": "..." }`), a quoted key and its value inside a string (a JSON
+body such as `{"token":"..."}` in a raw string), and a weak algorithm named as an argument (`createHash("md5")`, `{ digest: "sha1" }`).
+A person and an AI agent get the same answer. Limits:
+- Files that contain JSX keep the plain line reading (the same as 0.6.1): every `.jsx` and `.tsx` file, and any other JS/TS file whose
+  text holds a closing tag (`</p>`), a self-closing tag (`/>`), a fragment (`<>`) or `<!--`. JSX text can confuse a string reader: the
+  apostrophe in `<p>Don't</p>` can pair with a quote later on the line. There, words inside a string still count for
+  `security.weak_crypto` and `secrets.generic`. The check looks at the raw text, so a file with HTML in a string (`"</div>"`) is read
+  plainly too. `.vue` and `.svelte` files are unchanged (no string reading).
+- After a quote that is never closed on its line, a quote that follows a name or a closing bracket with nothing between (`Don't`), a
+  closed "string" that holds code (`'a; const h = f(x); b'`), a division sign that could instead open a regular expression holding a
+  quote, or a regular expression that is more likely a division (after a variable named `p`, after `>` or a non-null `!`), the rest of
+  the file counts as code. A file the lexer cannot read at all (an unclosed template literal or block comment) counts as code
+  throughout. These fallbacks only ever add findings. The string reader remains a heuristic for source that is not valid code.
+- A line over 2,000 characters (a minified bundle) is not read for weak crypto, and one between 2,000 and 4,000 characters is judged as
+  code for `secrets.generic`.
+
 **Size and copy-paste advice is off for people by default.** `size.*` (long functions and files, complexity, big
 diffs), `perf.*` (loop findings) and `code.duplicate_block` are the "core" exception: they are not reported for a
 person's change unless you name them in `[rules]` (`"size.*" = "warn"`) or use `preset = "strict"`. AI agents always get

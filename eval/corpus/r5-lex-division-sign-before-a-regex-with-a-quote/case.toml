@@ -1,0 +1,12 @@
+id = "r5-lex-division-sign-before-a-regex-with-a-quote"
+source = "adversarial"
+language = "javascript"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "src/i.js"
+line = 2
