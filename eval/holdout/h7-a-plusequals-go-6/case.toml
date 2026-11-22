@@ -1,0 +1,14 @@
+id = "h7-a-plusequals-go-6"
+source = "seeded"
+language = "go"
+origin = "round 7 held-out, written blind from the two behaviour descriptions (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.hardcoded"
+path = "shop/creds.go"
+line = 7
+action = "block"
+agent_action = "block"

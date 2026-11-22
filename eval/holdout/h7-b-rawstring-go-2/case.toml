@@ -1,0 +1,27 @@
+id = "h7-b-rawstring-go-2"
+source = "seeded"
+language = "go"
+origin = "round 7 held-out, written blind from the two behaviour descriptions (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_not_fire]]
+rule = "security.weak_crypto"
+path = "shop/docs.go"
+
+[[must_not_fire]]
+rule = "code.todo"
+path = "shop/docs.go"
+
+[[must_not_fire]]
+rule = "secrets.generic"
+path = "shop/docs.go"
+
+[[must_not_fire]]
+rule = "suppress.security"
+path = "shop/docs.go"
+
+[[must_not_fire]]
+rule = "suppress.lint"
+path = "shop/docs.go"
