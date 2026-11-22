@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-11-22: baseline on push, encoded keys, text inside JS/TS and Go strings
 
 ### Added
 - Provider keys hidden behind a decoder call are found and block, for a person and an AI agent alike. The message names the
