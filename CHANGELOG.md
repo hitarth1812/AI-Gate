@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.7.0 — 2026-11-22: baseline on push, encoded keys, text inside JS/TS and Go strings
+
+### Added
+- Provider keys hidden behind a decoder call are found and block, for a person and an AI agent alike. The message names the
+  step, for example "base64-decoded from a literal". Covered: Python `base64.b64decode` (and its URL-safe and related forms),
+  `bytes.fromhex`, `binascii.unhexlify`, `codecs.decode` with rot13, hex or base64, and a reversed literal; JS/TS `atob`,
+  `Buffer.from(x, "base64" or "hex")` and `.split("").reverse().join("")`; Go `base64` decoders and `hex.DecodeString`. Up to
+  two decoders in a row. A key built from literal pieces in a few statements of one file (pushed, appended or added with
+  `+=`, then joined) blocks too. Literals over 4,096 characters are skipped, and `-v` shows the skip. Custom decoder functions
+  and values read at run time are not followed (see "Limits" in the README).
+- New rule `gate.baseline_changed` (warn): a change edits `.aigate/baseline.json`; the entries it adds do not apply to that
+  same change. 76 rules in total.
+- New setting `[baseline] apply_on_push` (default `true`). See "Changed" below.
+
+### Changed (behaviour you will notice)
+- A person's push, and a check of a commit range, now honour the committed baseline. Only entries that were already committed
+  before the change count; entries added inside the change never hide that change's own findings. A first push to an empty
+  remote uses the baseline at the pushed commit. When the tool cannot tell what the remote already has, no baseline applies.
+  An AI agent's push is never softer than a person's. Set `apply_on_push = false` for the older behaviour.
+- JavaScript, TypeScript (`.js .mjs .cjs .ts`) and Go: `security.weak_crypto`, `secrets.generic`, `code.todo` and the
+  `suppress.*` rules no longer fire on words inside a string, a template literal or a Go raw string. This is the same change
+  Python had in 0.6.1, and it applies to a person and an AI agent alike. Provider keys and connection-string passwords still
+  fire inside strings, as do a real `password = "..."` assignment and a weak algorithm named as an argument
+  (`createHash("md5")`). Files with JSX (every `.jsx` and `.tsx`, and any JS/TS file containing a closing tag, `/>`, `<>` or
+  `<!--`) keep the old line reading. From the first sign that the reader may be wrong (an unclosed quote, a quote straight
+  after a name, a string that looks like code, a slash that could be a division or a regular expression) the rest of the file
+  is read the old way, so a reading mistake can add a warning but cannot hide one.
+
+### Project and evaluation
+- CI runs the test suite in parallel on four legs for a pull request; the full matrix of operating systems and Python versions
+  runs nightly. The property tests use a fixed seed in pull requests and a random one at night.
+- The evaluation report counts held-out failures by rule. A release tag is refused when `eval/scoreboard.json` does not
+  match the version and case counts.
+- New held-out cases, written without seeing the code, measure the new detections: of 82 held-out cases, 21 failing keys
+  remain (10 of them in `secrets.hardcoded`, 4 missed and 2 too strict in `security.weak_crypto`, 2 too strict in
+  `secrets.generic`). The encoded-key detection did not lower the held-out `secrets.hardcoded` count.
+
 ## 0.6.1 — 2026-11-16: command-level fixes (found by a reviewer running the commands, not by the test suite)
 
 ### Added

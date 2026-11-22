@@ -232,7 +232,10 @@ def test_the_ci_config_option_does_not_soften_an_ai_agent_either(repo, tmp_path)
 # ------------------------------------------------------------------ 4. an AI agent: byte for byte what 0.6.1 printed
 
 def normal(text, version):
-    return re.sub(r"\d+\.\d+s\b", "<t>", text.replace(version, "<v>"))
+    # the version banner is the only part allowed to differ: mask this tree's version and the old tag's version alike
+    for v in {version, OLD_TAG[1:]}:
+        text = text.replace(v, "<v>")
+    return re.sub(r"\d+\.\d+s\b", "<t>", text)
 
 
 def agent_output(repo, script, fmt, scenario):
