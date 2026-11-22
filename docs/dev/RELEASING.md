@@ -47,7 +47,8 @@ pick a tag as the branch.
    night opens an issue; a green night is not enough unless it ran on the release commit. Do not tag while any leg is red.
 
    Also make the published numbers current: `eval/scoreboard.json` comes from a full `python eval/run.py` on the reference runner
-   (GitHub `ubuntu-latest`, Python 3.12), not from a laptop. Commit it, run `python scripts/gen_accuracy.py --write` and
+   (GitHub `ubuntu-latest`, Python 3.12), not from a laptop: start the `scoreboard` workflow by hand on the release commit
+   and download its `scoreboard-ubuntu-latest-py3.12` artifact. Commit it, run `python scripts/gen_accuracy.py --write` and
    `python eval/run.py --update-ratchet` yourself, and commit those. The build job fails a tag whose scoreboard is for another
    version or another number of cases (`python scripts/release_check.py scoreboard`).
 4. Tag the merge commit and push the tag:
