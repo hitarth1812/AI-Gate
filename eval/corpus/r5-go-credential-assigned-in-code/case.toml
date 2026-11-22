@@ -1,0 +1,12 @@
+id = "r5-go-credential-assigned-in-code"
+source = "seeded"
+language = "go"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "shop/config.go"
+line = 4

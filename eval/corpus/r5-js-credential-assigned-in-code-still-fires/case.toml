@@ -1,0 +1,17 @@
+id = "r5-js-credential-assigned-in-code-still-fires"
+source = "seeded"
+language = "javascript"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "src/config.js"
+line = 1
+
+[[must_fire]]
+rule = "secrets.generic"
+path = "src/config.js"
+line = 2

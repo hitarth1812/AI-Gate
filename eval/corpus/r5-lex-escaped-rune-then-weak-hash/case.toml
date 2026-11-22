@@ -1,0 +1,12 @@
+id = "r5-lex-escaped-rune-then-weak-hash"
+source = "adversarial"
+language = "go"
+origin = "round 5 authored from the documented rules (no tool output)"
+who = "both"
+mode = "staged"
+label_status = "frozen"
+
+[[must_fire]]
+rule = "security.weak_crypto"
+path = "shop/e.go"
+line = 6

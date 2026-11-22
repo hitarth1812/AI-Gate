@@ -73,6 +73,8 @@ jobs:
       - name: pyflakes
         run: python -m pyflakes aigate_lite.py
       - name: pytest (in parallel; the tests marked serial run in the next step)
+        env:
+          AIGATE_FUZZ_RANDOM: ${{ github.event_name == 'schedule' && '1' || '' }}   # the nightly run fuzzes with random examples
         run: python -m pytest -q -n auto -m "not serial"
       - name: pytest (the tests marked serial, such as timing limits, one at a time)
         run: python -m pytest -q -m serial
