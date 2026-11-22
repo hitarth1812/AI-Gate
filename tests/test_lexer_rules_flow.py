@@ -266,7 +266,7 @@ def test_a_connection_string_with_a_password_inside_a_string_still_fires(repo, p
 # ----------------------------------------------------------------------------------------------- CRLF and a byte order mark
 
 def crlf(text, bom=False):
-    return ("﻿" if bom else "") + text.replace("\n", "\r\n")
+    return ("\ufeff" if bom else "") + text.replace("\n", "\r\n")
 
 
 @pytest.mark.parametrize("bom", [False, True], ids=["crlf", "bom+crlf"])
@@ -284,7 +284,7 @@ def test_the_probe_behaves_the_same_with_crlf_and_a_byte_order_mark_go(repo, bom
 
 
 def test_a_bom_on_the_first_line_does_not_hide_that_line(repo):
-    got = hits(repo, "src/k.js", ("﻿" + f"const h = {SHA1}(password); // {TODO} x\n").encode("utf-8"))
+    got = hits(repo, "src/k.js", ("\ufeff" + f"const h = {SHA1}(password); // {TODO} x\n").encode("utf-8"))
     assert got == {"security.weak_crypto": [1], "code.todo": [1]}
 
 

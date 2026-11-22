@@ -56,9 +56,9 @@ ROWS = {
     "ts-string-literal-type": ("type A = 'a' | 'b';\nconst c = 1", (("'a'", "S"), ("'b'", "S"), ("const", "C"))),
     "object-key": ('o = {"a": 1, \'b\': 2}', (('"a"', "S"), ("'b'", "S"), (": 1", "C"))),
     "unicode": ('x = "é😀" + c', (("é😀", "S"), ("+ c", "C"))),
-    "line-separator-char": ('x = "a b" + c', ((" ", "S"), ("+ c", "C"))),
+    "line-separator-char": ('x = "a\u2028b" + c', (("\u2028", "S"), ("+ c", "C"))),
     "crlf": ('a = "x"\r\nb = \'y\' // z\r\nc', (('"x"', "S"), ("'y'", "S"), ("// z", "M"), ("c", "C"))),
-    "bom": ('﻿x = "a" // b', (("﻿", "C"), ('"a"', "S"), ("// b", "M"))),
+    "bom": ('\ufeffx = "a" // b', (("\ufeff", "C"), ('"a"', "S"), ("// b", "M"))),
     "empty": ("", ()),
     "only-comment": ("// just this", (("just", "M"),)),
 }
@@ -144,8 +144,8 @@ def test_a_minified_line_is_lexed_in_linear_time():
 
 
 def test_lines_and_columns_match_with_a_bom_and_crlf():
-    lx = aigate.lex_text('﻿x = "a"\r\ny = 1 // c\r\n', JS)
-    assert lx.line(1).rstrip("\r") == '﻿x = "a"'
+    lx = aigate.lex_text('\ufeffx = "a"\r\ny = 1 // c\r\n', JS)
+    assert lx.line(1).rstrip("\r") == '\ufeffx = "a"'
     assert lx.kind_at(1, 5) == aigate.STR and lx.kind_at(2, 6) == aigate.COM
 
 
